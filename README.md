@@ -1,7 +1,7 @@
 # Cyber Threat Exploit Watch — scheduled rebuild
 
 Keeps the runbook page at
-**https://wiki2.internal.ediphy.io/en/CTP/run-books/Cyber-Exploit-Watch**
+**[hostname]/run-books/Cyber-Exploit-Watch**
 current, by pulling five free public feeds on a schedule and writing the result
 back through the Wiki.js GraphQL API.
 
@@ -117,7 +117,7 @@ Wiki.js. `rebuild.py` already does this (`wiki_headers()`).
 67656592571-61jia7k51h2f8nvej0osatfguirrhsc2.apps.googleusercontent.com
 ```
 
-Read off the sign-in redirect from `wiki2.internal.ediphy.io` on 17 Oct 2026.
+Read off the sign-in redirect from `my_host` on 17 Oct 2026.
 Confirm before relying on it: GCP Console → Security → Identity-Aware Proxy →
 select the resource → ⋮ → **OAuth credentials**.
 
