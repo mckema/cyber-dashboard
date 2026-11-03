@@ -1,26 +1,31 @@
-# Runtime image for rebuild.py and bootstrap_wiki.py.
+# Image for the exploit-watch binary (subcommands: run, bootstrap, demo).
 #
-# The code is NOT copied in: docker-compose.yml bind-mounts the repo at /app, so
-# edits apply on the next run without a rebuild. Rebuild only when
-# requirements.txt changes.
+# docker-compose.yml bind-mounts the repo at /app for state/, page/, .env and
+# the test fixtures; the binary itself is built into the image, so code changes
+# need `docker compose build job`.
 #
 # Proxy: HTTP_PROXY / HTTPS_PROXY / NO_PROXY are Docker's predefined build args.
-# docker-compose.yml passes them from the host so `pip install` can reach PyPI
-# behind the corporate proxy. They are deliberately not declared with ARG, which
-# keeps them out of `docker history` and out of the final image.
-FROM python:3.12-slim
+# docker-compose.yml passes them from the host so cargo can reach crates.io and
+# apt can reach Debian behind the corporate proxy. They are deliberately not
+# declared with ARG, which keeps them out of `docker history` and the image.
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+FROM rust:1.99.1-slim-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked \
+ && cp target/release/exploit-watch /usr/local/bin/exploit-watch
 
-WORKDIR /app
-
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt \
+FROM debian:bookworm-slim
+# ca-certificates: TLS roots for the feeds; apt only honours the lowercase proxy variables.
+RUN http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" apt-get update \
+ && http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --create-home --shell /usr/sbin/nologin app
-
+COPY --from=build /usr/local/bin/exploit-watch /usr/local/bin/exploit-watch
+WORKDIR /app
 USER app
-
-CMD ["python", "rebuild.py"]
+ENTRYPOINT ["exploit-watch"]
+CMD ["run"]

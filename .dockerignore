@@ -1,0 +1,5 @@
+# Only what the build stage compiles; state/, .env, target/ and agent worktrees stay out.
+*
+!Cargo.toml
+!Cargo.lock
+!src/

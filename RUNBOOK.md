@@ -24,11 +24,11 @@ Trạng thái ngày 2026-11-03.
 |---|---|
 | Wiki.js | `ghcr.io/requarks/wiki:2` = **2.5.317** (Node 24.22.1), SQLite trong named volume `wiki-data`, chỉ publish ở `127.0.0.1:3000`. Không dùng tag `latest`: `latest` là 3.x, API khác. |
 | Page | `en/CTP/run-books/Cyber-Exploit-Watch`, **id 1** trên wiki local. Instance gốc của Mark là id 51. Content lấy từ `page/skeleton.html`, CSS (`scriptCss`) lấy từ `page/style.css`. |
-| Job | Service `job`: `python rebuild.py --every 1800`, image `python:3.12-slim` + `requests` 2.34.2, chạy bằng uid 1000. Repo được bind-mount vào `/app`, nên sửa code không cần build lại image. |
+| Job | Service `job`: binary Rust `exploit-watch run --every 1800` (từ 2026-11-03 06:27 UTC; trước đó là bản Python, xem §13). Image `exploit-watch-job` nặng 140 MB: build bằng `rust:1.99.1-slim-bookworm`, runtime `debian:bookworm-slim`, chạy bằng uid 1000. Repo được bind-mount vào `/app` để dùng `state/`, `page/`, `.env`; binary nằm trong image, nên sửa code phải chạy `docker compose build job`. |
 | Credential của job | API key `exploit-watch`, gắn group `exploit-watch` với quyền tối thiểu (xem §7), hết hạn sau 1 năm. Lưu trong `.env`; file này đã có trong `.gitignore`. |
 | Nguồn feed | 8 module trong `feeds/`. Lượt chạy thật 2026-11-03 03:54 UTC: cả 8 nguồn OK. Số item trong 7 ngày: KEV 8 · EUVD 7 · CVE.org 3.119 · NVD 3.121 · GitHub 136 · CERT-EU 0 · NCSC-NL 10 · CIRCL 1. |
 | Page sau lượt ghi đầu | 326.927 byte. Bảng CVE hiện 300/1.304 dòng critical/high (`CVE_ROW_CAP=300`). |
-| Test | 72 unit test, không gọi network, đều pass (`python -m unittest discover -s tests`). |
+| Test | 106 unit test Rust, không gọi network, đều pass; thêm 14 test `#[ignore]` gọi mạng thật (xem §9). |
 | Chưa có | GitHub Actions workflow (quyết định 2026-11-03: chưa tạo); deploy GCP; FR-A2..A4. |
 
 ---
@@ -37,9 +37,9 @@ Trạng thái ngày 2026-11-03.
 
 | Thứ cần có | Ghi chú |
 |---|---|
-| Docker Desktop đang chạy, có Compose v2+ | Đã chạy với Docker 29.9.2, Compose v5.6.1. Máy **không cần Python**: mọi lệnh Python chạy trong container. |
+| Docker Desktop đang chạy, có Compose v2+ | Đã chạy với Docker 29.9.2, Compose v5.6.1. Máy **không cần cài Rust**: build và test đều chạy trong container `rust:1.99.1-slim-bookworm`. |
 | Biến `HTTP_PROXY`, `HTTPS_PROXY` trên host | Mạng công ty bắt đi qua proxy `http://192.168.112.253:3128`. Compose truyền hai biến này vào lúc build image và vào container `job`. Xem §3. |
-| File `.env` | `bootstrap_wiki.py` tự tạo từ `.env.example` và tự điền `WIKI_ADMIN_PASSWORD`, `WIKI_PAGE_ID`, `WIKIJS_API_KEY`. |
+| File `.env` | `exploit-watch bootstrap` tự tạo từ `.env.example` và tự điền `WIKI_ADMIN_PASSWORD`, `WIKI_PAGE_ID`, `WIKIJS_API_KEY`. |
 | `GITHUB_TOKEN` (khuyến nghị) | Token không cần scope nào. Không có token thì GitHub chỉ cho 60 request/giờ, và quota này **dùng chung cho cả IP proxy công ty** (xem §7). |
 | `NVD_API_KEY` (tuỳ chọn) | Key miễn phí. Không có key thì job phải chờ 6 giây giữa các trang NVD. |
 
@@ -49,16 +49,18 @@ Không dùng email cá nhân trong `.env`, kể cả trong `USER_AGENT`. Admin c
 
 ## 3. Chỗ dễ vướng
 
-1. **Container không ra được Internet nếu không truyền proxy.** Triệu chứng: `Name or service not known` khi `pip install` hoặc khi fetch feed. Compose đã truyền proxy vào service `job`. Nếu chạy tay bằng `docker run`, phải thêm `-e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTTPS_PROXY`.
+1. **Container không ra được Internet nếu không truyền proxy.** Triệu chứng: `Name or service not known` khi `cargo build`, `apt-get` hoặc khi fetch feed. Compose đã truyền proxy vào service `job`. Nếu chạy tay bằng `docker run`, phải thêm `-e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTTPS_PROXY`.
 2. **Git Bash tự đổi đường dẫn Windows trong tham số của `docker`.** Thêm `MSYS_NO_PATHCONV=1` trước lệnh và dùng đường dẫn dạng `C:\...` cho `-v`.
-3. **Thư mục `state/` phải thuộc uid 1000.** Job chạy bằng uid 1000. Nếu `state/` được tạo bởi container chạy root (ví dụ `docker run` với image `python:3.12-slim`), job gặp `PermissionError: [Errno 13] Permission denied: '/app/state/items/kev.json.tmp'` (gặp ngày 2026-11-03). Cách sửa:
+3. **Thư mục `state/` phải thuộc uid 1000.** Job chạy bằng uid 1000. Nếu `state/` được tạo bởi container chạy root (ví dụ `docker run` với image `python:3.12-slim` hay `rust:…`), job không ghi được (bản Python gặp `PermissionError: [Errno 13] Permission denied: '/app/state/items/kev.json.tmp'` ngày 2026-11-03). Cách sửa:
    ```bash
    MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/app" python:3.12-slim chown -R 1000:1000 /app/state
    ```
    Để tránh lỗi này, luôn chạy job bằng `docker compose run --rm job …`.
 4. **`cisa.gov` trả 403 cho request đi qua proxy**, kể cả khi dùng User-Agent của trình duyệt. Job tự chuyển sang mirror GitHub `cisagov/kev-data`; bảng health ghi "Read from github mirror. cisa.gov refused the request."
-5. **Đăng nhập admin của Wiki.js bị giới hạn 5 lần mỗi 60 giây**, tính cả lần sai: `Too many requests, please try again in N seconds.` Mỗi lần chạy `bootstrap_wiki.py` dùng 1 lần đăng nhập.
-6. **Sau `docker compose down -v`, password và key trong `.env` không còn khớp.** Volume `wiki-data` chứa admin và key đã bị xoá. Chạy lại `bootstrap_wiki.py`: script tạo lại admin bằng password cũ trong `.env` và thay key mới.
+5. **Đăng nhập admin của Wiki.js bị giới hạn 5 lần mỗi 60 giây**, tính cả lần sai: `Too many requests, please try again in N seconds.` Mỗi lần chạy `bootstrap` dùng 1 lần đăng nhập.
+6. **Sau `docker compose down -v`, password và key trong `.env` không còn khớp.** Volume `wiki-data` chứa admin và key đã bị xoá. Chạy lại `bootstrap`: lệnh này tạo lại admin bằng password cũ trong `.env` và thay key mới.
+7. **Entrypoint của image là `exploit-watch`.** Vì vậy `docker compose run --rm job <subcommand>` nhận trực tiếp `run`, `bootstrap` hoặc `demo`, không cần gõ tên binary.
+8. **Sửa code Rust phải build lại image** (`docker compose build job`; khoảng 1 phút nhờ BuildKit cache). Sửa `page/skeleton.html` hay `page/style.css` thì không cần build, chỉ cần `bootstrap --reseed --update-css`.
 
 ---
 
@@ -66,22 +68,26 @@ Không dùng email cá nhân trong `.env`, kể cả trong `USER_AGENT`. Admin c
 
 ```
 .
-├── rebuild.py            job: gọi 8 feed, gộp, render, ghi page; --dry-run / --out / --every
-├── render.py             dựng HTML cho 6 bảng và các counter; --demo để preview
-├── bootstrap_wiki.py     setup Wiki.js, API key quyền tối thiểu, tạo page; --reseed / --update-css / --purge-history
-├── feeds/
-│   ├── __init__.py       ALL (thứ tự fetch), CORE = {kev, cvelist}
-│   ├── common.py         contract: Item, SourceError, Fatal, get() có ETag cache
-│   ├── state.py          đọc/ghi state/ (atomic), seen.json, runs.jsonl
-│   ├── kev.py euvd.py cvelist.py nvd.py github.py      nhóm CVE
-│   └── certeu.py ncscnl.py circl.py                    nhóm advisory
+├── Cargo.toml, Cargo.lock    crate exploit-watch (Rust 1.99, edition 2024)
+├── src/
+│   ├── main.rs           CLI: run | bootstrap | demo
+│   ├── run.rs            job: gọi 8 feed, gộp, render, ghi page; --dry-run / --out / --every
+│   ├── render.rs         dựng HTML cho 6 bảng và các counter; subcommand demo
+│   ├── wiki.rs           client GraphQL (bot key + IAP; admin JWT)
+│   ├── bootstrap.rs      setup Wiki.js, API key quyền tối thiểu, tạo page; --reseed / --update-css / --purge-history
+│   └── feeds/
+│       ├── mod.rs        all() (thứ tự fetch), CORE = [kev, cvelist]
+│       ├── common.rs     contract: Item, SourceError, Fatal, get() có ETag cache
+│       ├── state.rs      đọc/ghi state/ (atomic), seen.json, runs.jsonl
+│       ├── kev.rs euvd.rs cvelist.rs nvd.rs github.rs      nhóm CVE
+│       └── certeu.rs ncscnl.rs circl.rs                    nhóm advisory
 ├── page/
 │   ├── skeleton.html     content của page (các anchor id)
 │   └── style.css         scriptCss của page
-├── tests/                72 unit test + fixtures/ (payload thật, đã cắt gọn)
+├── tests/fixtures/       payload thật đã cắt gọn, dùng cho unit test và demo
 ├── docker-compose.yml    service wiki + job
-├── Dockerfile            image của job (python:3.12-slim, uid 1000)
-├── requirements.txt      requests
+├── Dockerfile            multi-stage: build bằng rust:1.99.1-slim-bookworm, runtime debian:bookworm-slim, uid 1000
+├── .dockerignore         build context chỉ gồm Cargo.* và src/
 ├── .env.example          mẫu biến môi trường (.env bị gitignore)
 ├── README.md             thiết kế gốc của Mark
 └── RUNBOOK.md            tài liệu này
@@ -109,10 +115,10 @@ Ngày 2026-11-03, `state/` nặng khoảng 16 MB.
 ```bash
 docker compose build job
 docker compose up -d --wait wiki
-docker compose run --rm job python bootstrap_wiki.py
+docker compose run --rm job bootstrap
 ```
 
-Output của bootstrap trên wiki mới (trích, khoảng 8 giây):
+Output của bootstrap trên wiki mới (trích, khoảng 8 giây). Bản Python in ra output này lúc 2026-11-03 03:2x UTC. Bản Rust in ra đúng các dòng đó khi chạy trên một Wiki.js mới, dựng tạm cho lần kiểm tra cùng ngày:
 
 ```
 .env       created from .env.example
@@ -133,8 +139,8 @@ Chạy bootstrap lần 2 không tạo thêm gì mới: `apikey .env key works, k
 Tiếp theo, chạy dry-run (fetch và render, không ghi page), rồi chạy thật:
 
 ```bash
-docker compose run --rm job python rebuild.py --dry-run
-docker compose run --rm job python rebuild.py
+docker compose run --rm job run --dry-run
+docker compose run --rm job run
 ```
 
 Output của lượt ghi thật đầu tiên (2026-11-03 03:54 UTC):
@@ -208,7 +214,7 @@ Những điểm dưới đây được tìm ra bằng chạy thử ngày 2026-11
 | Admin gọi `pages.update` mà không gửi `scriptCss`/`scriptJs` thì Wiki.js **xoá** CSS và JS của page | Bootstrap luôn gửi lại cả hai. Key của job không có `write:styles`, nên khi job update page thì CSS được giữ nguyên (đã kiểm tra: 11.643 B trước và sau). |
 | Mỗi lệnh update tạo một page version mới, kể cả khi nội dung không đổi | Job chỉ ghi khi fingerprint dữ liệu thay đổi (§6). History được dọn bằng `--purge-history` (§9). |
 | `scriptJs` được chèn vào `<body>` dưới dạng HTML thô (`common.js`: `injectCode.body += page.extra.js`) | README §7 của Mark ghi là "not executed". Thực tế đoạn code đặt trong `<script>` có thể chạy (suy ra từ source, chưa thử). Giữ `scriptJs` rỗng. |
-| HTML sanitiser bỏ `<style>`, `<script>`, `<link>` và làm hỏng inline `style=` dài | Skeleton và `render.py` không dùng inline style nào; mọi style nằm trong `page/style.css`, đặt dưới wrapper `.xw`. |
+| HTML sanitiser bỏ `<style>`, `<script>`, `<link>` và làm hỏng inline `style=` dài | Skeleton và `src/render.rs` không dùng inline style nào; mọi style nằm trong `page/style.css`, đặt dưới wrapper `.xw`. |
 | `pages.create` báo sai thông điệp khi bị từ chối: errorCode 6010 `…not authorized to delete this page.` | Đừng tin vào nội dung thông điệp, chỉ xem errorCode. |
 | `scriptCss` bị minify khi lưu (12.659 B → 11.643 B) | Không ảnh hưởng gì. |
 
@@ -220,7 +226,7 @@ Những điểm dưới đây được tìm ra bằng chạy thử ngày 2026-11
 | Range request trên response gzip tính theo byte đã nén | `deltaLog.json` phải gửi kèm `Accept-Encoding: identity`. |
 | Backfill bằng zip end-of-day sót lượt cập nhật ngay sau 00:00 UTC | Lượt đó không nằm trong zip của ngày nào. Lần đầu sót 12 CVE; đã sửa bằng cách đọc lại deltaLog quanh mốc nửa đêm. |
 | EUVD: path đúng là `/api/search` (`/api/vulnerabilities` trả 404) | `aliases` hay đặt GHSA trước CVE; `epss` là phần trăm (82,64), không phải số 0–1. |
-| CERT-EU chặn request không có User-Agent (Azure Application Gateway trả 403) | `.env` có dòng `USER_AGENT=` để trống, nên code dùng `os.environ.get("USER_AGENT") or <mặc định>`. |
+| CERT-EU chặn request không có User-Agent (Azure Application Gateway trả 403) | `.env` có dòng `USER_AGENT=` để trống, nên `common::user_agent()` chỉ dùng giá trị khi khác rỗng, không thì dùng mặc định. |
 | `publish_date` trong JSON CERT-EU là thời điểm của **bản sửa mới nhất** | Thời điểm publish lần đầu lấy từ dòng v1.0 trong History. `original_date` là ngày vendor công bố, không phải của CERT-EU. |
 | Nhãn "CEST" trong RSS của CERT-EU | Chưa kiểm chứng được nhãn có đổi sang "CET" sau 2026-10-25 hay không, vì chưa có advisory mới nào. Code dùng JSON (UTC) làm nguồn chính; bảng zone `{CEST: +02:00, CET: +01:00}` chỉ dùng làm fallback. |
 | Link `advisory?id=` của NCSC-NL trả 200 kể cả với ID không tồn tại | Dùng `https://advisories.ncsc.nl/<năm>/<id>.html`; ID sai trả 404. |
@@ -228,22 +234,32 @@ Những điểm dưới đây được tìm ra bằng chạy thử ngày 2026-11
 | Quota 60 request/giờ của GitHub khi không xác thực dùng chung cho cả IP proxy | Lúc bắt đầu test chỉ còn 16/60. Với request không xác thực, 304 vẫn bị tính quota. |
 | GitHub `published=` dùng timestamp đầy đủ thì URL đổi mỗi lượt và không bao giờ nhận được 304 | Query theo ngày, rồi lọc lại đúng cửa sổ trong code. |
 
+**Rust và bản Python trước đó** (port ngày 2026-11-03)
+
+| Quirk | Hệ quả / cách code xử lý |
+|---|---|
+| `state/` dùng chung định dạng với bản Python: cache `http/<sha1(URL)>`, `items/`, `cursors/`, `seen.json`, `wiki.json` | Job Rust tiếp quản state của Python mà không phải backfill. Đã kiểm: tên file cache và cách encode query khớp với Python. Fingerprint ghi trong `wiki.json` được tính bằng `json.dumps(sort_keys=True)`; `run.rs` tái tạo đúng định dạng đó: ensure_ascii, `", "` / `": "`. |
+| Rust ghi key trong file JSON của state theo thứ tự alphabet (serde_json không bật `preserve_order`) | Nội dung giống nhau và hai bản đọc được file của nhau. Chỉ khác thứ tự key khi xem bằng mắt. |
+| Ở chế độ setup, Wiki.js 2.5 làm rớt socket (handler 404 throw `sendError` of undefined), nên `POST /finalize` trên một kết nối keep-alive bị `connection reset` | Client admin trong `wiki.rs` mở kết nối mới cho mỗi request (`pool_max_idle_per_host(0)`). Bản Python từng gặp lỗi này một lần (`RemoteDisconnected`). |
+| reqwest 0.13 đổi tên feature: `rustls-tls` thành `rustls` | `Cargo.toml` dùng `blocking`, `rustls`, `gzip`. reqwest tự đọc `HTTP(S)_PROXY` / `NO_PROXY`. |
+| Image runtime `debian:bookworm-slim` không có CA bundle; `apt-get` chỉ đọc biến proxy viết thường | Dockerfile cài `ca-certificates`, gán `http_proxy`/`https_proxy` từ build arg viết hoa. |
+
 ---
 
 ## 8. Failure behaviour
 
 | Condition | Behaviour | Đã kiểm chứng |
 |---|---|---|
-| CISA KEV lỗi ở **cả** `cisa.gov` lẫn mirror | `FATAL: CISA KEV: CISA KEV (cisa.gov): HTTP 403 …; CISA KEV (github mirror): HTTP 404`. Không ghi page; chạy đơn lẻ thì exit 1 | 2026-11-03, cố tình trỏ URL sai |
+| CISA KEV lỗi ở **cả** `cisa.gov` lẫn mirror | `FATAL: CISA KEV: CISA KEV (cisa.gov): network error: …; CISA KEV (github mirror): network error: …`. Không ghi page; chạy đơn lẻ thì exit 1 | 2026-11-03, bản Python (URL sai) và bản Rust (`NO_PROXY=www.cisa.gov,raw.githubusercontent.com`, làm hai host không ra được Internet) |
 | cvelistV5 lỗi | `Fatal`, không ghi page (cùng nhóm `CORE` với KEV) | Theo code; unit test có kiểm các message |
-| Nguồn không thuộc CORE lỗi, đã từng thành công | Dùng item của lần thành công gần nhất; bảng health ghi **Stale**, ví dụ `Stale since 3 Nov 03:58 UTC: CERT-EU RSS: HTTP 404`. Page vẫn được dựng, exit 0 | 2026-11-03, cố tình trỏ RSS CERT-EU sai |
+| Nguồn không thuộc CORE lỗi, đã từng thành công | Dùng item của lần thành công gần nhất; bảng health ghi **Stale**, ví dụ `Stale since 3 Nov 06:27 UTC: CERT-EU RSS: network error: …`. Page vẫn được dựng, exit 0 | 2026-11-03, bản Python (URL sai) và bản Rust (`NO_PROXY=cert.europa.eu`) |
 | Nguồn không thuộc CORE lỗi, chưa từng thành công | Bảng health ghi **Error**, bảng của nguồn đó rỗng | Theo code |
-| Lỗi lập trình trong một module (exception không phải `SourceError`) | Xử lý như lỗi của nguồn đó: `internal error: <Type>: …` | Theo code |
+| Lỗi lập trình trong một module (panic) | Xử lý như lỗi của nguồn đó: `internal error: panic: …` (`catch_unwind` trong `run.rs`) | Theo code |
 | Mọi nguồn đều rỗng | `every feed came back empty — refusing to publish an empty brief` | Theo code (giữ nguyên từ Mark) |
 | Page thiếu anchor | `page anchor <tbody id="…"> not found — re-seed the page skeleton` | Unit test |
 | Dữ liệu không đổi, chưa tới heartbeat | `no data change since … — skipping write`, không tạo version mới | 2026-11-03 |
-| Đang ở chế độ `--every` mà gặp `Fatal` | In `FATAL: …`, ghi `{"result": "fatal"}` vào `runs.jsonl`, chạy tiếp ở lượt sau | Theo code |
-| Lỗi quyền ghi `state/` | `PermissionError … state/items/kev.json.tmp`: xem §3 mục 3 | 2026-11-03 |
+| Đang ở chế độ `--every` mà gặp `Fatal` | In `FATAL: …`, ghi `{"result": "fatal"}` vào `runs.jsonl`, chạy tiếp ở lượt sau. Gặp panic thì in `CRASH: …` và ghi `{"result": "crash"}` | Theo code |
+| Lỗi quyền ghi `state/` | Bản Python: `PermissionError … state/items/kev.json.tmp`. Xem §3 mục 3 | 2026-11-03 (bản Python) |
 
 ---
 
@@ -255,7 +271,7 @@ docker compose ps
 docker compose logs -f job
 
 # chạy một lượt ngay, không chờ vòng 30 phút
-docker compose run --rm job python rebuild.py
+docker compose run --rm job run
 
 # 5 lượt chạy gần nhất (kết quả, số item mới, độ trễ SLA)
 tail -5 state/runs.jsonl
@@ -265,13 +281,13 @@ docker compose stop job
 docker compose up -d job
 
 # dọn page history cũ hơn 7 ngày (admin, áp dụng cho mọi page)
-docker compose run --rm job python bootstrap_wiki.py --purge-history P7D
+docker compose run --rm job bootstrap --purge-history P7D
 
 # đẩy lại skeleton hoặc CSS sau khi sửa page/skeleton.html hoặc page/style.css
-docker compose run --rm job python bootstrap_wiki.py --reseed --update-css
+docker compose run --rm job bootstrap --reseed --update-css
 
 # preview page bằng dữ liệu thật mà không ghi wiki
-docker compose run --rm job python rebuild.py --out state/out.html
+docker compose run --rm job run --out state/out.html
 ```
 
 Mỗi dòng trong `runs.jsonl` (trích lượt ghi đầu tiên ngày 2026-11-03):
@@ -289,11 +305,11 @@ Reset state: chỉ xoá đúng phần cần. Xoá `state/http/` buộc job tải
 Chạy unit test:
 
 ```bash
-docker compose run --rm job python -m unittest discover -s tests
+MSYS_NO_PATHCONV=1 docker run --rm -e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTTPS_PROXY -v cargo-registry:/usr/local/cargo/registry -v ew-target:/target -e CARGO_TARGET_DIR=/target -v "$(pwd -W):/src" -w /src rust:1.99.1-slim-bookworm cargo test --quiet
 ```
 
 > [!NOTE]
-> Rotate API key: **chưa triển khai.** Theo code, `bootstrap_wiki.py` tạo key mới khi key trong `.env` không còn dùng được.
+> Rotate API key: **chưa triển khai.** Theo code, `bootstrap` tạo key mới khi key trong `.env` không còn dùng được.
 
 ---
 
@@ -308,9 +324,20 @@ docker compose run --rm job python -m unittest discover -s tests
   - Item chỉ có ngày (KEV `dateAdded`) không đo được.
   - Lượt đầu tiên của mỗi nguồn là baseline nên không đo.
   - `first_seen` chỉ được ghi khi page đã được ghi hoặc không đổi; dry-run và `--out` không ghi.
+  - **Kết quả đo** (bản Python, 2026-11-03 04:01–06:03 UTC, 5 lượt):
+
+    | Lượt (UTC) | Kết quả | CVE mới (cvelistV5) | Lag lớn nhất | Quá 60 phút |
+    |---|---|---|---|---|
+    | 04:03 | unchanged | 0 | — | 0 |
+    | 04:33 | unchanged | 1 | 17,7 phút | 0 |
+    | 05:03 | written | 15 | 20,7 phút | 0 |
+    | 05:33 | written | 2 | 36,6 phút | 0 |
+    | 06:03 | written | 7 | 3,4 phút | 0 |
+
+    Lượt 04:33 không ghi page vì CVE mới không thuộc nhóm critical/high, nên các bảng không đổi. Các nguồn khác không có item mới có giờ cụ thể trong khoảng này.
 - **Dung lượng:**
   - Page khoảng 327 KB với 300 dòng CVE.
-  - Ước tính: mỗi lần dữ liệu đổi tạo một version khoảng 327 KB. Nếu gần như lượt nào cũng đổi (cvelistV5 có CVE mới liên tục) thì khoảng 48 version/ngày, tương đương khoảng 15 MB/ngày. Con số thật sẽ đo sau khi job chạy vài giờ.
+  - Từ 05:03 đến 06:27 UTC ngày 2026-11-03, page được ghi 4/4 lượt, vì lượt nào cũng có CVE mới. Như vậy khoảng 48 version/ngày, mỗi version khoảng 327 KB, tức khoảng 15 MB/ngày nếu không dọn history.
   - DB SQLite của wiki: 1,29 MB lúc 04:01 UTC ngày 2026-11-03, sau khi đã purge history.
   - `state/`: khoảng 16 MB.
 - **Volume CVE** (7 ngày tính đến 2026-11-03): 3.119 CVE. Có 278 CRITICAL và 1.018 HIGH (theo điểm CNA hoặc CISA ADP), 1 CVE có SSVC "active". 597 CVE (khoảng 19%) chưa có điểm từ CNA lẫn ADP.
@@ -336,7 +363,7 @@ docker compose run --rm job python -m unittest discover -s tests
 |---|---|
 | [README.md](README.md) | Thiết kế gốc của Mark McKee (2026-10-17): Wiki.js sau IAP, WIF, `rebuild.py` |
 | `working/fairct_ms30-exploit-watch_kien-truc.md` (workspace Claude Code của team, ngoài repo) | C4 level 1, flow của một lượt chạy, quyết định nguồn feed và bằng chứng kiểm tra ngày 2026-11-03 |
-| `feeds/common.py` | Contract cho mọi feed module: thuộc tính module, `Item.extra` theo bảng, schema dòng health |
+| `src/feeds/common.rs` | Contract cho mọi feed module: thuộc tính module, `Item.extra` theo bảng, schema dòng health |
 
 ---
 
@@ -357,3 +384,7 @@ docker compose run --rm job python -m unittest discover -s tests
 | 2026-11-03 | Thêm `--purge-history`; chạy `P7D` | `history purged versions older than P7D (all pages)` |
 | 2026-11-03 04:01 | `docker compose up -d`: job chạy vòng 30 phút | Lượt đầu: `no data change … skipping write` |
 | 2026-11-03 | Sửa `USER_AGENT=` rỗng trong `.env` làm mất UA mặc định | `common.USER_AGENT` rơi về giá trị mặc định khi biến rỗng |
+| 2026-11-03 | Port toàn bộ sang Rust (crate `exploit-watch`): khung, 4 workstream song song trên git worktree, `src/run.rs` | 106 unit test pass. So khớp với Python: parser 0 khác biệt trên mọi fixture; `demo` giống từng byte (sáng và tối); chạy end-to-end trên hai bản copy của `state/` cho hai page có cùng SHA-256 (`df7a302f…`) |
+| 2026-11-03 06:27 | Cutover: xoá code Python, `Dockerfile` multi-stage, `docker compose up -d` | Job Rust dùng tiếp `state/` của Python: cvelistV5 ở mode `delta` (23 request), NVD dùng cache với lịch "next fetch after 08:03 UTC"; page được ghi vì có 22 CVE thay đổi kể từ lượt Python 06:03 |
+| 2026-11-03 | Kiểm tra lại failure policy trên bản Rust bằng `NO_PROXY` | CERT-EU không ra được Internet: Stale, exit 0. KEV không ra được Internet ở cả hai nguồn: FATAL, exit 1, không ghi page |
+| 2026-11-03 | Chạy lại các lệnh của §5 và §9 bằng bản Rust | `bootstrap` dùng tiếp key do Python tạo (`.env unchanged`); `run --dry-run`: `no data change … skipping write`; `demo` và `--purge-history P7D` chạy được |

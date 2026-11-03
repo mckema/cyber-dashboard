@@ -10,7 +10,7 @@ No paid threat-intel subscription, no API account, no vendor platform.
 > **Fork note (ediphy-tthau, branch `feature/fr-a1-ingest-threat-feeds`, 2026-11-03).**
 > This fork extends the job to the eight sources named in FR-A1 (CISA KEV,
 > ENISA EUVD, CVE.org cvelistV5, NVD, GitHub, CERT-EU, NCSC-NL, CIRCL OSINT),
-> splits the fetchers into `feeds/` and the HTML into `render.py`, and adds a
+> rewrites the job as a Rust binary (`exploit-watch run | bootstrap | demo`) and adds a
 > self-hosted Wiki.js stack under Docker Compose for local testing. How to run
 > and operate it: **[RUNBOOK.md](RUNBOOK.md)** (Vietnamese). The sections below are
 > the original design and still describe the IAP/WIF deployment path.
