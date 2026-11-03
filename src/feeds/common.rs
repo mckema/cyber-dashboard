@@ -10,16 +10,19 @@
 //!             never a partial list.
 //!
 //! Item.extra keys per page table (run.rs decides which feed fills which table;
-//! render reads these keys, anything else is ignored). Values are strings unless
-//! marked otherwise:
+//! render reads these keys, anything else is ignored; triage/matcher.rs also reads
+//! the ones marked *). Values are strings unless marked otherwise:
 //!
-//!   kev    vendor, product, due (YYYY-MM-DD, CISA only), euvd_id, exploited_since,
+//!   kev    vendor*, product*, due (YYYY-MM-DD, CISA only), euvd_id, exploited_since,
 //!          sources (list of feed NAMEs, filled when run.rs merges KEV + EUVD)
+//!          (EUVD: vendor/product are the first 3 names joined with ", ")
 //!   adv    version, products (list), probability, impact (NCSC-NL "Kans"/"Schade": H/M/L)
-//!   dep    ghsa, ecosystems (list), packages (list), fixed (list), npkg (number)
-//!   cve    score_source ("CNA" | "CISA-ADP" | "NVD"), vector, av, pr, vendors (list),
+//!   dep    ghsa, ecosystems (list), packages (list), fixed (list), npkg (number),
+//!          eco_packages* (list of "ecosystem:package", not rendered)
+//!   cve    score_source ("CNA" | "CISA-ADP" | "NVD"), vector, av, pr, vendors* (list, first 3),
 //!          ssvc_exploitation ("none" | "poc" | "active" | ""), assigner,
-//!          nvd_score (number, or "" when NVD has none)
+//!          nvd_score (number, or "" when NVD has none),
+//!          products*, cpes* (lists, untruncated, not rendered)
 //!   nvd    vector, vendors (list)      -- enrichment only, merged into "cve" items
 //!   any    summary (short description, optional)
 //!

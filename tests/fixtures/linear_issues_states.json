@@ -1,0 +1,60 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "id-CTP-123",
+          "identifier": "CTP-123",
+          "url": "https://linear.app/ediphy/issue/CTP-123/x",
+          "state": { "type": "triage", "name": "Triage" },
+          "assignee": null,
+          "dueDate": null,
+          "history": { "nodes": [ { "createdAt": "2026-11-03T08:00:01.000Z", "actor": { "name": "exploit-watch bot" }, "botActor": null, "toState": null } ] },
+          "comments": { "nodes": [] }
+        },
+        {
+          "id": "id-CTP-124",
+          "identifier": "CTP-124",
+          "url": "https://linear.app/ediphy/issue/CTP-124/y",
+          "state": { "type": "started", "name": "In Progress" },
+          "assignee": { "name": "Tran Trung Hau" },
+          "dueDate": "2026-11-10",
+          "history": {
+            "nodes": [
+              { "createdAt": "2026-11-03T09:15:00.000Z", "actor": { "name": "Vu Huy Hoang" }, "botActor": null, "toState": { "type": "started", "name": "In Progress" } },
+              { "createdAt": "2026-11-03T09:16:30.000Z", "actor": { "name": "Vu Huy Hoang" }, "botActor": null, "toState": null },
+              { "createdAt": "2026-11-03T09:00:00.000Z", "actor": { "name": "Vu Huy Hoang" }, "botActor": null, "toState": { "type": "unstarted", "name": "Todo" } }
+            ]
+          },
+          "comments": { "nodes": [ { "body": "Looking at it.", "createdAt": "2026-11-03T09:20:00.000Z", "user": { "name": "Tran Trung Hau" } } ] }
+        },
+        {
+          "id": "id-CTP-125",
+          "identifier": "CTP-125",
+          "url": "https://linear.app/ediphy/issue/CTP-125/z",
+          "state": { "type": "canceled", "name": "Canceled" },
+          "assignee": null,
+          "dueDate": null,
+          "history": { "nodes": [ { "createdAt": "2026-11-03T10:00:00.000Z", "actor": { "name": "Tran Trung Hau" }, "botActor": null, "toState": { "type": "canceled", "name": "Canceled" } } ] },
+          "comments": {
+            "nodes": [
+              { "body": "**exploit-watch**: the feed item changed.", "createdAt": "2026-11-03T10:05:00.000Z", "user": { "name": "exploit-watch bot" } },
+              { "body": "  Not relevant: we only use tokio in the test harness.\n", "createdAt": "2026-11-03T10:00:00.000Z", "user": { "name": "Tran Trung Hau" } },
+              { "body": "First look: maybe.", "createdAt": "2026-11-03T08:30:00.000Z", "user": { "name": "Vu Huy Hoang" } }
+            ]
+          }
+        },
+        {
+          "id": "id-CTP-126",
+          "identifier": "CTP-126",
+          "url": "https://linear.app/ediphy/issue/CTP-126/w",
+          "state": { "type": "duplicate", "name": "Duplicate" },
+          "assignee": null,
+          "dueDate": null,
+          "history": { "nodes": [ { "createdAt": "2026-11-03T11:00:00.000Z", "actor": null, "botActor": { "name": "Triage Intelligence" }, "toState": { "type": "duplicate", "name": "Duplicate" } } ] },
+          "comments": { "nodes": [ { "body": "**exploit-watch**: the feed item changed.", "createdAt": "2026-11-03T11:05:00.000Z", "user": { "name": "exploit-watch bot" } } ] }
+        }
+      ]
+    }
+  }
+}

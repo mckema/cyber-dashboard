@@ -1,0 +1,8 @@
+{
+  "data": {
+    "commentCreate": {
+      "success": true,
+      "comment": { "id": "c0ffee00-0000-4000-8000-000000000001" }
+    }
+  }
+}

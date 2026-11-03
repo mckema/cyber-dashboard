@@ -9,6 +9,8 @@
 mod feeds;
 mod render;
 mod run;
+#[allow(dead_code)] // wired into run.rs in a later step
+mod triage;
 mod wiki;
 
 use clap::{Parser, Subcommand};

@@ -85,6 +85,15 @@ pub fn to_item(a: &Value) -> Result<Item, SourceError> {
     let mut pkgs = uniq(vulns.iter().map(|v| v.get("package").and_then(|p| p.get("name")).and_then(Value::as_str)));
     let mut ecos = uniq(vulns.iter().map(|v| v.get("package").and_then(|p| p.get("ecosystem")).and_then(Value::as_str)));
     let mut fixed = uniq(vulns.iter().map(|v| v.get("first_patched_version").and_then(Value::as_str)));
+    // "ecosystem:name" pairs for the triage matcher (FR-A2); the two lists above lose the pairing.
+    let mut pairs: Vec<String> = Vec::new();
+    for p in vulns.iter().filter_map(|v| v.get("package")) {
+        let (eco, name) = (s(p, "ecosystem"), s(p, "name"));
+        let pair = format!("{eco}:{name}");
+        if !eco.is_empty() && !name.is_empty() && !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
     let (score, vec) = score_and_vector(a);
     let ghsa = s(a, "ghsa_id");
     if ghsa.is_empty() {
@@ -101,6 +110,7 @@ pub fn to_item(a: &Value) -> Result<Item, SourceError> {
     ecos.sort();
     fixed.sort();
     fixed.truncate(3);
+    pairs.sort();
 
     let id = if cve.is_empty() { ghsa } else { cve };
     let mut it = Item::new(NAME, id, s(a, "html_url"), &s(a, "summary").split_whitespace().collect::<Vec<_>>().join(" "), &published);
@@ -108,7 +118,8 @@ pub fn to_item(a: &Value) -> Result<Item, SourceError> {
     it.cves = if cve.is_empty() { vec![] } else { vec![cve.to_string()] };
     it.score = score;
     it.severity = s(a, "severity").to_uppercase();
-    if let Value::Object(m) = json!({"ghsa": ghsa, "ecosystems": ecos, "packages": pkgs, "fixed": fixed, "npkg": npkg, "vector": vec}) {
+    if let Value::Object(m) = json!({"ghsa": ghsa, "ecosystems": ecos, "packages": pkgs, "fixed": fixed, "npkg": npkg, "vector": vec,
+                                         "eco_packages": pairs}) {
         it.extra = m;
     }
     Ok(it)
@@ -230,6 +241,7 @@ mod tests {
         assert_eq!(i.extra["ecosystems"], json!(["npm", "pip"]));
         assert_eq!(i.extra["fixed"], json!(["1.2.1", "1.3.1", "3.0.2"]));
         assert_eq!(i.extra["npkg"], 2);
+        assert_eq!(i.extra["eco_packages"], json!(["npm:brotli-wasm", "pip:brotli"]));
         assert_eq!(i.title, "Brotli decoder heap overflow");
     }
 

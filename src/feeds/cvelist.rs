@@ -171,6 +171,14 @@ fn truncate_desc(desc: &str) -> String {
     desc
 }
 
+/// Append a trimmed value unless it is empty, "n/a" or already listed.
+fn push_named(out: &mut Vec<String>, v: &str) {
+    let v = v.trim();
+    if !v.is_empty() && v.to_lowercase() != "n/a" && !out.iter().any(|x| x == v) {
+        out.push(v.to_string());
+    }
+}
+
 fn bad(what: &str, cid: &str, val: &str) -> SourceError {
     SourceError::new(format!("{NAME} {cid}: bad {what} {val:?}"))
 }
@@ -210,11 +218,15 @@ pub fn parse_record(rec: &Value) -> Result<Option<Item>, SourceError> {
         .map(|d| s(d, "value"))
         .unwrap_or("");
     let desc = truncate_desc(desc);
-    let mut vendors: Vec<String> = Vec::new();
+    // vendors is shown on the page (first 3); products and cpes feed the triage
+    // matcher (FR-A2) and are kept whole.
+    let (mut vendors, mut products, mut cpes): (Vec<String>, Vec<String>, Vec<String>) = Default::default();
     for a in arr(cna.get("affected")) {
-        let v = s(a, "vendor").trim();
-        if !v.is_empty() && v.to_lowercase() != "n/a" && !vendors.iter().any(|x| x == v) {
-            vendors.push(v.to_string());
+        push_named(&mut vendors, s(a, "vendor"));
+        push_named(&mut products, s(a, "product"));
+        push_named(&mut products, s(a, "packageName"));
+        for c in arr(a.get("cpes")) {
+            push_named(&mut cpes, c.as_str().unwrap_or(""));
         }
     }
     let (av, pr) = vector_bits(&vec);
@@ -232,6 +244,7 @@ pub fn parse_record(rec: &Value) -> Result<Option<Item>, SourceError> {
     vendors.truncate(3);
     it.extra = match json!({
         "score_source": src, "vector": vec, "av": av, "pr": pr, "vendors": vendors,
+        "products": products, "cpes": cpes,
         "ssvc_exploitation": ssvc_exploitation(adp_metrics),
         "assigner": s(meta, "assignerShortName"), "nvd_score": "",
     }) {
@@ -798,6 +811,8 @@ mod tests {
         assert_eq!((i.x("av"), i.x("pr")), ("network", "none"));
         assert_eq!(i.x("assigner"), "chainguard");
         assert_eq!(i.extra["vendors"], json!(["octo-sts"]));
+        assert_eq!(i.extra["products"], json!(["app", "github.com/octo-sts/app"])); // product + packageName
+        assert_eq!(i.extra["cpes"], json!([]));
         assert_eq!(i.url, "https://www.cve.org/CVERecord?id=CVE-2026-105770");
         assert!(i.title.chars().count() <= DESC_MAX);
     }
@@ -809,6 +824,24 @@ mod tests {
         assert_eq!(i.x("score_source"), "CISA-ADP");
         assert_eq!(i.x("ssvc_exploitation"), "poc");
         assert_eq!(i.x("pr"), "low");
+        assert_eq!((&i.extra["vendors"], &i.extra["products"]), (&json!([]), &json!([]))); // all "n/a"
+    }
+
+    #[test]
+    fn products_and_cpes_untruncated() {
+        let mut r = rec("CVE-2026-2", "2026-11-01T00:00:00.000Z");
+        r["containers"]["cna"]["affected"] = json!([
+            {"vendor": "F5", "product": "NGINX Open Source", "cpes": ["cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"]},
+            {"vendor": "F5", "product": "NGINX Plus", "cpes": ["cpe:2.3:a:f5:nginx_plus:*:*:*:*:*:*:*:*",
+                                                              "cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*"]},
+            {"vendor": "tokio-rs", "product": "tokio", "packageName": "tokio"},
+            {"vendor": "B", "product": "N/A"},
+            {"vendor": "C", "product": " "},
+        ]);
+        let i = parse_record(&r).unwrap().unwrap();
+        assert_eq!(i.extra["vendors"], json!(["F5", "tokio-rs", "B"])); // page column: first 3
+        assert_eq!(i.extra["products"], json!(["NGINX Open Source", "NGINX Plus", "tokio"]));
+        assert_eq!(i.extra["cpes"], json!(["cpe:2.3:a:f5:nginx:*:*:*:*:*:*:*:*", "cpe:2.3:a:f5:nginx_plus:*:*:*:*:*:*:*:*"]));
     }
 
     #[test]

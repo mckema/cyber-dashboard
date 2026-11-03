@@ -1,0 +1,9 @@
+{
+  "data": {
+    "workflowStates": {
+      "nodes": [
+        { "id": "6f1e2d3c-0000-4000-8000-00000000000a", "name": "Triage", "type": "triage" }
+      ]
+    }
+  }
+}
