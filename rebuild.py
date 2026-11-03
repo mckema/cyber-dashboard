@@ -1,268 +1,192 @@
 #!/usr/bin/env python3
 """
-Rebuild the Cyber Threat Exploit Watch runbook page on wiki2.internal.ediphy.io.
+Rebuild the Cyber Threat Exploit Watch runbook page on Wiki.js.
 
-Pulls five public feeds, rebuilds the three table bodies and the counters on the
-page, and writes the result back through the Wiki.js GraphQL API.
+Pulls eight public feeds (see feeds/__init__.py), rebuilds the six table bodies
+and the counters on the page, and writes the result back through the Wiki.js
+GraphQL API.
 
-Only the generated regions are replaced. Prose, callouts and the source cards
+Only the anchored regions are replaced. Prose, callouts and the source cards
 stay hand-editable; a colleague can reword the page and this job will not
 clobber it.
 
 Environment:
-  WIKI_BASE         https://wiki2.internal.ediphy.io
-  WIKI_PAGE_ID      51
+  WIKI_BASE         https://wiki2.internal.ediphy.io   (compose: http://wiki:3000)
+  WIKI_PAGE_ID      51                                  (local bootstrap: 1)
   WIKIJS_API_KEY    Wiki.js API key          -> Authorization header
-  IAP_ID_TOKEN      Google OIDC ID token     -> Proxy-Authorization header
-  GITHUB_TOKEN      optional, raises GitHub rate limit 60/hr -> 5000/hr
+  IAP_ID_TOKEN      Google OIDC ID token     -> Proxy-Authorization header (only behind IAP)
+  STATE_DIR         ./state                  caches, cursors, seen.json, runs.jsonl
+  CVE_ROW_CAP       300                      rows shown in the CVE table
+  HEARTBEAT_HOURS   6                        rewrite even without data changes after this long
+  GITHUB_TOKEN      optional, raises GitHub rate limit 60/hr -> 1000-5000/hr
   NVD_API_KEY       optional, raises NVD rate limit
 
 Usage:
-  python rebuild.py --dry-run     # fetch + build + diff, write nothing
-  python rebuild.py               # fetch + build + write if changed
+  python rebuild.py --dry-run          # fetch + build + diff, write nothing
+  python rebuild.py                    # fetch + build + write if the data changed
+  python rebuild.py --out page.html    # fetch + build into page/skeleton.html, no wiki
+  python rebuild.py --every 1800       # loop forever, one run every 30 min
 """
 
 import argparse
 import hashlib
-import html
+import importlib
 import json
 import os
-import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+import traceback
+from datetime import timedelta
 
 import requests
+
+import feeds
+import render
+from feeds import state
+from feeds.common import Fatal, Item, SourceError, iso_utc, parse_iso
 
 WIKI_BASE = os.environ.get("WIKI_BASE", "https://wiki2.internal.ediphy.io").rstrip("/")
 PAGE_ID = int(os.environ.get("WIKI_PAGE_ID", "51"))
 WIKIJS_API_KEY = os.environ.get("WIKIJS_API_KEY", "")
 IAP_ID_TOKEN = os.environ.get("IAP_ID_TOKEN", "")
-GH_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-NVD_KEY = os.environ.get("NVD_API_KEY", "")
+CVE_ROW_CAP = int(os.environ.get("CVE_ROW_CAP", "300"))
+HEARTBEAT = timedelta(hours=float(os.environ.get("HEARTBEAT_HOURS", "6")))
 
 TIMEOUT = 90
-MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+WINDOW = timedelta(days=7)
+SLA = timedelta(hours=1)
+SKELETON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "page", "skeleton.html")
 
-
-class Fatal(Exception):
-    """Abort without writing. A half-populated threat brief is worse than a stale one."""
-
-
-def esc(s):
-    return html.escape("" if s is None else str(s), quote=True)
-
-
-def fdate(d):
-    if not d:
-        return "&mdash;"
-    p = str(d).split("-")
-    return f"{int(p[2])} {MON[int(p[1]) - 1]}"
+# Regions that change on every run without the data changing. They are left out
+# of the "did anything change" fingerprint, otherwise every run writes a new
+# page version (Wiki.js keeps them all).
+VOLATILE = {"t-health", "n-health", "winlabel"}
 
 
 # ---------------------------------------------------------------- feeds
 
-def get_json(url, headers=None, label=""):
-    try:
-        r = requests.get(url, headers=headers or {}, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        raise Fatal(f"{label}: network error: {e}")
-    if r.status_code in (403, 429):
-        raise Fatal(
-            f"{label}: rate limited (HTTP {r.status_code}). "
-            f"GitHub allows 60 req/hour per IP unauthenticated; set GITHUB_TOKEN for 5000."
-        )
-    if not r.ok:
-        raise Fatal(f"{label}: HTTP {r.status_code}")
-    return r.json()
+def load_cached(name):
+    c = state.load_json(f"items/{name}.json", None)
+    return c, ([Item.from_dict(d) for d in c["items"]] if c else [])
 
 
-def fetch_kev(start, end):
-    # Straight from cisa.gov. The raw.githubusercontent mirror is only needed in a
-    # browser, where cisa.gov sends no CORS header; server-side we use the origin.
-    url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-    j = get_json(url, label="CISA KEV")
-    rows = [
-        {
-            "cve": v["cveID"], "added": v["dateAdded"], "due": v.get("dueDate", ""),
-            "vendor": v["vendorProject"], "product": v["product"],
-            "desc": (v.get("shortDescription") or "").strip(),
-        }
-        for v in j.get("vulnerabilities", [])
-        if start <= v["dateAdded"] <= end
-    ]
-    rows.sort(key=lambda r: r["added"], reverse=True)
-    return rows, j.get("catalogVersion", "?")
+def newest(items):
+    return max((i.updated or i.published for i in items), default="")
 
 
-def fetch_nvd(sev, start, end):
-    url = (
-        "https://services.nvd.nist.gov/rest/json/cves/2.0"
-        f"?pubStartDate={start}T00:00:00.000&pubEndDate={end}T23:59:59.999"
-        f"&cvssV3Severity={sev}&resultsPerPage=200"
-    )
-    headers = {"apiKey": NVD_KEY} if NVD_KEY else {}
-    j = get_json(url, headers, label=f"NVD {sev}")
-    total, got = j.get("totalResults", 0), len(j.get("vulnerabilities", []))
-    if total > got:
-        print(f"  note: NVD {sev} returned {got} of {total}; page size needs raising", file=sys.stderr)
-    out = []
-    for v in j.get("vulnerabilities", []):
-        c = v["cve"]
-        m = c.get("metrics", {})
-        score, severity, vec = 0, "", ""
-        for k in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
-            if m.get(k):
-                dd = m[k][0]["cvssData"]
-                score = dd.get("baseScore") or 0
-                severity = (dd.get("baseSeverity") or "").upper()
-                vec = dd.get("vectorString") or ""
-                break
-        desc = next((d["value"] for d in c.get("descriptions", []) if d["lang"] == "en"), "")
-        vendors = []
-        for cfg in c.get("configurations", []):
-            for n in cfg.get("nodes", []):
-                for cm in n.get("cpeMatch", []):
-                    parts = cm.get("criteria", "").split(":")
-                    if len(parts) > 4 and parts[3] not in vendors:
-                        vendors.append(parts[3])
-        out.append({
-            "cve": c["id"], "score": score, "sev": severity, "vendors": vendors[:3],
-            "desc": re.sub(r"\s+", " ", desc).strip(),
-            "av": "network" if "AV:N" in vec else "local" if "AV:L" in vec else "",
-            "pr": "none" if "PR:N" in vec else "low" if "PR:L" in vec else "high" if "PR:H" in vec else "",
-            "pub": (c.get("published") or "")[:10],
-        })
-    return out
+def fetch_one(name, start, end, now):
+    """Fetch one feed module, honouring CADENCE and the failure policy.
+    Returns (items, health row). Raises Fatal when a CORE feed fails."""
+    mod = importlib.import_module(f"feeds.{name}")
+    cached, old = load_cached(name)
+    h = {"source": mod.NAME, "status": "", "items": 0, "newest": "",
+         "last_success": cached["last_success"] if cached else "", "note": ""}
+    age = (now - parse_iso(cached["last_success"])) if cached else None
 
-
-def fetch_gh(sev, start, end):
-    url = (
-        f"https://api.github.com/advisories?severity={sev}&type=reviewed"
-        f"&published={start}..{end}&per_page=100"
-    )
-    headers = {"Accept": "application/vnd.github+json"}
-    if GH_TOKEN:
-        headers["Authorization"] = f"Bearer {GH_TOKEN}"
-    j = get_json(url, headers, label=f"GitHub {sev}")
-    out = []
-    for a in j:
-        names, ecos, fixed = [], [], []
-        for v in a.get("vulnerabilities", []):
-            p = v.get("package") or {}
-            if p.get("name") and p["name"] not in names:
-                names.append(p["name"])
-            if p.get("ecosystem") and p["ecosystem"] not in ecos:
-                ecos.append(p["ecosystem"])
-            if v.get("first_patched_version") and v["first_patched_version"] not in fixed:
-                fixed.append(v["first_patched_version"])
-        out.append({
-            "id": a.get("cve_id") or a["ghsa_id"], "ghsa": a["ghsa_id"],
-            "sev": (a.get("severity") or "").upper(),
-            "eco": sorted(ecos), "pkgs": sorted(names), "npkg": len(names),
-            "fixed": sorted(fixed)[:3],
-            "summary": re.sub(r"\s+", " ", a.get("summary") or "").strip(),
-            "score": (a.get("cvss") or {}).get("score") or 0,
-        })
-    return out
-
-
-# ---------------------------------------------------------------- rows
-
-def nvd_link(cve):
-    return f"https://nvd.nist.gov/vuln/detail/{esc(cve)}"
-
-
-def build_kev_rows(kev, today):
-    if not kev:
-        return '<tr><td colspan="5" class="empty">No new entries this window.</td></tr>'
-    out = []
-    for k in kev:
-        past = bool(k["due"]) and k["due"] < today
-        out.append(
-            f'<tr><td class="id"><a href="{nvd_link(k["cve"])}" target="_blank" rel="noopener">{esc(k["cve"])}</a>'
-            f'<span class="sv sv-EXPLOITED" style="margin-top:6px">Exploited</span></td>'
-            f'<td><span class="tgt">{esc(k["vendor"])}</span><span class="sub">{esc(k["product"])}</span></td>'
-            f'<td class="desc">{esc(k["desc"])}</td>'
-            f'<td class="due">{fdate(k["added"])}</td>'
-            f'<td class="due{" past" if past else ""}">{fdate(k["due"])}'
-            + ('<span class="sub" style="color:inherit">overdue</span>' if past else "")
-            + "</td></tr>"
-        )
-    return "".join(out)
-
-
-def build_dep_rows(deps):
-    out = []
-    for d in deps:
-        if d["npkg"] > 3:
-            pkg = (f'<span class="pkg">{esc(d["pkgs"][0])}</span>'
-                   f'<span class="sub">+ {d["npkg"] - 1} more packages</span>')
+    if cached and mod.CADENCE and age.total_seconds() < mod.CADENCE:
+        items = old
+        h["status"] = "cached"
+        h["note"] = f"Polled every {mod.CADENCE // 3600} h; next fetch after " \
+                    f"{render.ftime(iso_utc(parse_iso(cached['last_success']) + timedelta(seconds=mod.CADENCE)))}."
+    else:
+        try:
+            items = mod.fetch(start, end)
+        except Exception as e:  # noqa: BLE001 - a bug in one feed must not blank the page
+            msg = str(e) if isinstance(e, SourceError) else f"internal error: {type(e).__name__}: {e}"
+            if name in feeds.CORE:
+                raise Fatal(f"{mod.NAME}: {msg}")
+            print(f"  {mod.NAME}: {msg}", file=sys.stderr)
+            items = old
+            h["status"] = "stale" if cached else "error"
+            h["note"] = (f"Stale since {render.ftime(cached['last_success'])}: " if cached else "") + msg[:200]
         else:
-            pkg = '<span class="pkg">' + "<br>".join(esc(p) for p in d["pkgs"]) + "</span>"
-        href = nvd_link(d["id"]) if d["id"].startswith("CVE-") else f'https://github.com/advisories/{esc(d["ghsa"])}'
-        ecos = "".join(f'<span class="eco">{esc(e)}</span>' for e in d["eco"])
-        fixed = "<br>".join(esc(f) for f in d["fixed"]) or "&mdash;"
-        out.append(
-            f'<tr><td class="id"><a href="{href}" target="_blank" rel="noopener">{esc(d["id"])}</a></td>'
-            f'<td><span class="sv sv-{esc(d["sev"])}">{esc(d["sev"])}</span></td>'
-            f"<td>{ecos}</td><td>{pkg}</td>"
-            f'<td><span class="fix">{fixed}</span></td>'
-            f'<td class="desc">{esc(d["summary"])}</td></tr>'
-        )
-    return "".join(out)
+            state.save_json(f"items/{name}.json", {
+                "last_success": iso_utc(now), "items": [i.to_dict() for i in items]})
+            h["status"], h["last_success"] = "ok", iso_utc(now)
+            h["note"] = feed_note(name, mod, items)
+
+    h["items"], h["newest"] = len(items), newest(items)
+    return items, h
 
 
-def build_nvd_rows(nvd):
-    out = []
-    for r in nvd:
-        bits = []
-        if r["av"] == "network": bits.append("AV:N network")
-        if r["av"] == "local":   bits.append("AV:L local")
-        if r["pr"] == "none":    bits.append("PR:N unauthenticated")
-        if r["pr"] == "low":     bits.append("PR:L low priv")
-        if r["pr"] == "high":    bits.append("PR:H admin")
-        cls = "crit" if r["sev"] == "CRITICAL" else "high"
-        vend = ("<br>".join(f'<span class="tgt">{esc(v)}</span>' for v in r["vendors"])
-                or '<span class="sub" style="margin:0">no CPE yet</span>')
-        desc = r["desc"][:300] + "…" if len(r["desc"]) > 300 else r["desc"]
-        sev_pill = f'<span class="sv sv-{esc(r["sev"])}" style="margin-top:6px">{esc(r["sev"])}</span>' if r["sev"] else ""
-        out.append(
-            f'<tr><td class="id"><a href="{nvd_link(r["cve"])}" target="_blank" rel="noopener">{esc(r["cve"])}</a>'
-            f'<span class="sub">{esc(r["pub"])}</span></td>'
-            f'<td><span class="score" style="color:var(--{cls})">{float(r["score"]):.1f}</span>{sev_pill}</td>'
-            f"<td>{vend}</td>"
-            f'<td class="desc">{esc(desc)}'
-            + (f'<span class="vecbits">{esc("  ·  ".join(bits))}</span>' if bits else "")
-            + "</td></tr>"
-        )
-    return "".join(out)
+def feed_note(name, mod, items):
+    """One line for the health table: how this run got its data."""
+    st = getattr(mod, "STATS", {}) or {}
+    if name == "kev" and items:
+        via = items[0].extra.get("via", "")
+        return f"Read from {via}." + (" cisa.gov refused the request." if via != "cisa.gov" else "")
+    if name == "cvelist":
+        return f"{st.get('mode', '')}: {st.get('changed', 0)} changed records, {st.get('requests', 0)} requests."
+    if name == "nvd":
+        return "Enrichment only: adds NVD scores to CVE.org records; polled every 2 h."
+    if name == "github":
+        return f"{st.get('requests', 0)} requests."
+    if name == "circl" and not items:
+        return "Fetched; no new or changed events in the window."
+    return ""
 
 
-# ---------------------------------------------------------------- splice
+def merge_exploited(kev, euvd):
+    """KEV + EUVD on one row per CVE. CISA rows win (they carry the due date)."""
+    rows = {}
+    for it in kev:
+        it.extra["sources"] = [it.source]
+        rows[it.id] = it
+    for it in euvd:
+        if it.id in rows:
+            k = rows[it.id]
+            k.extra["sources"].append(it.source)
+            for f in ("euvd_id", "exploited_since"):
+                k.extra.setdefault(f, it.extra.get(f, ""))
+        else:
+            it.extra["sources"] = [it.source]
+            rows[it.id] = it
+    return list(rows.values())
 
-def replace_tbody(doc, tid, rows):
-    pat = re.compile(rf'(<tbody id="{re.escape(tid)}">).*?(</tbody>)', re.S)
-    if not pat.search(doc):
-        raise Fatal(f'page anchor <tbody id="{tid}"> not found — the page skeleton was edited; re-seed it')
-    return pat.sub(lambda m: m.group(1) + rows + m.group(2), doc, count=1)
+
+def enrich_cves(cves, nvd):
+    """Add NVD's score to CVE.org records; fill the score where the CNA and CISA ADP gave none."""
+    by_id = {i.id: i for i in nvd}
+    for it in cves:
+        n = by_id.get(it.id)
+        if not n or not n.score:
+            continue
+        it.extra["nvd_score"] = n.score
+        if not it.score:
+            it.score, it.severity = n.score, n.severity
+            it.extra["score_source"] = "NVD"
+            it.extra.setdefault("vector", n.extra.get("vector", ""))
+            if n.extra.get("vendors") and not it.extra.get("vendors"):
+                it.extra["vendors"] = n.extra["vendors"]
+    return cves
 
 
-def replace_inner(doc, eid, text):
-    """Replace the inner text of a single element by id. Element must not contain child tags."""
-    pat = re.compile(rf'(<([a-zA-Z0-9]+)[^>]*\bid="{re.escape(eid)}"[^>]*>)(.*?)(</\2>)', re.S)
-    if not pat.search(doc):
-        raise Fatal(f'page anchor id="{eid}" not found — the page skeleton was edited; re-seed it')
-    return pat.sub(lambda m: m.group(1) + text + m.group(4), doc, count=1)
+def sla_stats(names, tables, health, now):
+    """Record first_seen for every item the page carries; per feed, how late new items were.
 
-
-def replace_refresh_bar(doc, stamp_html):
-    pat = re.compile(r'<div class="refresh">.*?</div>\s*</div>', re.S)
-    block = ('<div class="refresh"><div class="wrap"><div class="rstat">'
-             + stamp_html + "</div></div></div>")
-    if not pat.search(doc):
-        raise Fatal('page anchor <div class="refresh"> not found — the page skeleton was edited; re-seed it')
-    return pat.sub(block, doc, count=1)
+    A feed's first run is its baseline: everything is "new" but was published
+    days ago, so no lag is measured. Date-only timestamps (KEV dateAdded) can't
+    be measured either. NVD only enriches CVE.org rows and has no rows of its own."""
+    seen_before = state.load_json("seen.json", {})
+    out = {}
+    for name, h, items in zip(names, health, tables):
+        src = h["source"]
+        if name == "nvd":
+            out[src] = {"status": h["status"], "items": len(items), "sla": "n/a (enrichment only)"}
+            continue
+        baseline = not any(k.startswith(src + ":") for k in seen_before)
+        new = state.mark_seen([i.key for i in items], now)
+        lags = []
+        for i in items:
+            ts = i.updated or i.published
+            if i.key in new and len(ts) > 10 and not baseline:
+                lags.append((now - parse_iso(ts)).total_seconds() / 60)
+        out[src] = {
+            "status": h["status"], "items": len(items), "new": len(new), "baseline": baseline,
+            "lag_max_min": round(max(lags), 1) if lags else None,
+            "over_sla": sum(1 for x in lags if x > SLA.total_seconds() / 60),
+        }
+    return out
 
 
 # ---------------------------------------------------------------- wiki api
@@ -279,18 +203,25 @@ def wiki_headers():
 
 
 def gql(query, variables=None):
-    r = requests.post(f"{WIKI_BASE}/graphql", headers=wiki_headers(),
-                      json={"query": query, "variables": variables or {}}, timeout=TIMEOUT)
+    try:
+        r = requests.post(f"{WIKI_BASE}/graphql", headers=wiki_headers(),
+                          json={"query": query, "variables": variables or {}}, timeout=TIMEOUT)
+    except requests.RequestException as e:
+        raise Fatal(f"cannot reach Wiki.js at {WIKI_BASE}: {e}")
     if r.status_code in (301, 302) or "accounts.google.com" in r.text[:600]:
         raise Fatal("redirected to Google sign-in: the IAP token is missing, expired, "
                     "or the service account lacks roles/iap.httpsResourceAccessor")
-    if r.status_code == 401:
-        raise Fatal("HTTP 401 from Wiki.js: API disabled, or the API key is wrong/revoked")
+    # Wiki.js 2.5 never answers 401 for a bad key: a revoked key or a disabled API
+    # is HTTP 500 with a message, and an unknown key is treated as a guest (200 +
+    # "not authorized" in errors).
     if not r.ok:
         raise Fatal(f"GraphQL HTTP {r.status_code}: {r.text[:300]}")
     j = r.json()
     if j.get("errors"):
-        raise Fatal("GraphQL errors: " + "; ".join(e.get("message", "?") for e in j["errors"]))
+        msg = "; ".join(e.get("message", "?") for e in j["errors"])
+        if "not authorized" in msg:
+            msg += " (WIKIJS_API_KEY unknown to this wiki, or its group lacks manage:pages on the page)"
+        raise Fatal("GraphQL errors: " + msg)
     return j["data"]
 
 
@@ -302,7 +233,8 @@ query ($id: Int!) {
 
 # Note: do NOT request `page { ... }` in the mutation response. Page.editor is
 # non-nullable and serialises to null here, which surfaces as a GraphQL error
-# even though the write succeeded.
+# even though the write succeeded. scriptCss is not sent: the job's key has no
+# write:styles, so Wiki.js keeps the hand-written CSS.
 WRITE_PAGE = """
 mutation ($id: Int!, $content: String!, $tags: [String]!, $title: String!, $desc: String!) {
   pages {
@@ -317,85 +249,114 @@ mutation ($id: Int!, $content: String!, $tags: [String]!, $title: String!, $desc
 
 # ---------------------------------------------------------------- main
 
+def fingerprint(regions):
+    stable = {
+        "tbody": {k: v for k, v in regions["tbody"].items() if k not in VOLATILE},
+        "text": {k: v for k, v in regions["text"].items() if k not in VOLATILE},
+        # Health statuses count (a feed going stale is news); their timestamps don't.
+        "health": regions.get("health_status"),
+    }
+    return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
+
+
+def run(args):
+    t0 = time.monotonic()
+    now = state.utcnow()
+    end, start = now, now - WINDOW
+    print(f"window {iso_utc(start)} -> {iso_utc(end)}")
+
+    got, health = {}, []
+    for name in feeds.ALL:
+        items, h = fetch_one(name, start, end, now)
+        got[name] = items
+        health.append(h)
+        print(f"  {h['source']:<18} {h['status']:<8} {h['items']:>5}  {h['note'][:90]}")
+
+    if not any(got.values()):
+        raise Fatal("every feed came back empty — refusing to publish an empty brief")
+
+    exploited = merge_exploited(got["kev"], got["euvd"])
+    cves = enrich_cves(got["cvelist"], got["nvd"])
+    adv = got["certeu"] + got["ncscnl"]
+    catalog = got["kev"][0].extra.get("catalog_version", "") if got["kev"] else ""
+
+    regions = render.build_regions(exploited, adv, got["github"], cves, got["circl"], health,
+                                   start, end, now, kev_catalog=catalog, cap=CVE_ROW_CAP)
+    regions["health_status"] = [(h["source"], h["status"]) for h in health]
+    fp = fingerprint(regions)
+    regions.pop("health_status")
+
+    record = {"run_at": iso_utc(now), "mode": "dry-run" if args.dry_run else ("out" if args.out else "write")}
+    last = state.load_json("wiki.json", {})
+
+    if args.out:
+        with open(SKELETON, encoding="utf-8") as f:
+            doc = render.apply_regions(f.read(), regions)
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(doc)
+        print(f"wrote {args.out} ({len(doc):,} bytes)")
+        record["result"] = "out"
+    else:
+        page = gql(READ_PAGE, {"id": PAGE_ID})["pages"]["single"]
+        doc = render.apply_regions(page["content"], regions)
+        due = not last.get("written_at") or now - parse_iso(last["written_at"]) >= HEARTBEAT
+        if fp == last.get("fingerprint") and not due:
+            print(f"no data change since {last['written_at']} — skipping write")
+            record["result"] = "unchanged"
+        elif doc == page["content"]:
+            print("page already identical — skipping write")
+            record["result"] = "unchanged"
+        else:
+            reason = "data changed" if fp != last.get("fingerprint") else f"heartbeat ({HEARTBEAT})"
+            print(f"content {len(page['content']):,} -> {len(doc):,} bytes ({reason})")
+            if args.dry_run:
+                print("dry run: not writing")
+                record["result"] = "would-write"
+            else:
+                res = gql(WRITE_PAGE, {
+                    "id": PAGE_ID, "content": doc,
+                    "tags": [t["tag"] for t in (page.get("tags") or [])],   # required: resolver maps over it
+                    "title": page["title"], "desc": page.get("description") or "",
+                })["pages"]["update"]["responseResult"]
+                if not res["succeeded"]:
+                    raise Fatal(f"Wiki.js refused the write: {res['message']}")
+                print(f"written: {res['message']}")
+                state.save_json("wiki.json", {"fingerprint": fp, "written_at": iso_utc(now), "bytes": len(doc)})
+                record["result"] = "written"
+        record["bytes"] = len(doc)
+
+    # first_seen is only recorded once the page carries the item (or already did).
+    if record["result"] in ("written", "unchanged"):
+        record["feeds"] = sla_stats(feeds.ALL, [got[n] for n in feeds.ALL], health, now)
+    else:
+        record["feeds"] = {h["source"]: {"status": h["status"], "items": h["items"]} for h in health}
+    record["seconds"] = round(time.monotonic() - t0, 1)
+    state.append_run(record)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="build and diff, write nothing")
+    ap.add_argument("--out", metavar="FILE", help="render into page/skeleton.html and save to FILE; no wiki")
+    ap.add_argument("--every", type=int, metavar="SECONDS", help="loop forever, one run every SECONDS")
     args = ap.parse_args()
 
-    now = datetime.now(timezone.utc)
-    end = now.strftime("%Y-%m-%d")
-    start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
-    print(f"window {start} -> {end}")
-
-    kev, catalog = fetch_kev(start, end)
-    print(f"  KEV         {len(kev):>4}  (catalog {catalog})")
-
-    crit = fetch_nvd("CRITICAL", start, end)
-    print(f"  NVD crit    {len(crit):>4}")
-    if not NVD_KEY:
-        time.sleep(7)  # unauthenticated NVD allows 5 requests / 30s
-    high = fetch_nvd("HIGH", start, end)
-    print(f"  NVD high    {len(high):>4}")
-
-    seen, nvd = set(), []
-    for r in sorted(crit + high, key=lambda x: -x["score"]):
-        if r["cve"] not in seen:
-            seen.add(r["cve"])
-            nvd.append(r)
-
-    deps = fetch_gh("critical", start, end) + fetch_gh("high", start, end)
-    deps.sort(key=lambda d: (d["sev"] != "CRITICAL", -(d["score"] or 0), d["id"]))
-    print(f"  GitHub      {len(deps):>4}")
-
-    if not kev and not nvd and not deps:
-        raise Fatal("every feed came back empty — refusing to publish an empty brief")
-
-    page = gql(READ_PAGE, {"id": PAGE_ID})["pages"]["single"]
-    doc = page["content"]
-    before = hashlib.sha256(doc.encode()).hexdigest()
-
-    n_crit = sum(1 for r in nvd if r["sev"] == "CRITICAL")
-    n_high = sum(1 for r in nvd if r["sev"] == "HIGH")
-    overdue = sum(1 for k in kev if k["due"] and k["due"] < end)
-
-    doc = replace_tbody(doc, "t-kev", build_kev_rows(kev, end))
-    doc = replace_tbody(doc, "t-dep", build_dep_rows(deps))
-    doc = replace_tbody(doc, "t-nvd", build_nvd_rows(nvd))
-    doc = replace_inner(doc, "s-kev", str(len(kev)))
-    doc = replace_inner(doc, "s-crit", str(n_crit))
-    doc = replace_inner(doc, "s-high", str(n_high))
-    doc = replace_inner(doc, "s-dep", str(len(deps)))
-    doc = replace_inner(doc, "n-kev", f"{len(kev)} entries" + (f" &middot; {overdue} past deadline" if overdue else ""))
-    doc = replace_inner(doc, "n-dep", f"{len(deps)} advisories")
-    doc = replace_inner(doc, "n-nvd", f"{len(nvd)} CVEs")
-    doc = replace_inner(doc, "winlabel", f"{fdate(start)} &rarr; {fdate(end)}")
-    doc = replace_refresh_bar(doc, (
-        f'Rebuilt <b>{now.strftime("%-d %b %Y, %H:%M")} UTC</b> &nbsp;&middot;&nbsp; '
-        f"CISA KEV catalog <b>{esc(catalog)}</b> &nbsp;&middot;&nbsp; "
-        "regenerated on a schedule; this wiki strips JavaScript from page content, "
-        "so there is no in-page refresh button."
-    ))
-
-    after = hashlib.sha256(doc.encode()).hexdigest()
-    if before == after:
-        print("no change since last run — skipping write")
-        return 0
-
-    print(f"content {len(page['content'])} -> {len(doc)} bytes")
-    if args.dry_run:
-        print("dry run: not writing")
-        return 0
-
-    res = gql(WRITE_PAGE, {
-        "id": PAGE_ID, "content": doc,
-        "tags": [t["tag"] for t in (page.get("tags") or [])],   # required: resolver maps over it
-        "title": page["title"], "desc": page.get("description") or "",
-    })["pages"]["update"]["responseResult"]
-
-    if not res["succeeded"]:
-        raise Fatal(f"Wiki.js refused the write: {res['message']}")
-    print(f"written: {res['message']}")
-    return 0
+    if not args.every:
+        return run(args)
+    while True:
+        started = time.monotonic()
+        try:
+            run(args)
+        except Fatal as e:
+            print(f"FATAL: {e}", file=sys.stderr)
+            state.append_run({"run_at": iso_utc(state.utcnow()), "result": "fatal", "error": str(e)})
+        except Exception:  # noqa: BLE001 - keep the loop alive; the log shows the traceback
+            traceback.print_exc()
+            state.append_run({"run_at": iso_utc(state.utcnow()), "result": "crash",
+                              "error": traceback.format_exc(limit=1).strip()[-300:]})
+        sys.stdout.flush()
+        time.sleep(max(0, args.every - (time.monotonic() - started)))
 
 
 if __name__ == "__main__":

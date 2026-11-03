@@ -1,0 +1,5 @@
+# Keep LF everywhere: the code runs in Linux containers, and core.autocrlf=true on
+# Windows checkouts would otherwise rewrite fixtures that tests compare byte for byte.
+* text=auto eol=lf
+*.bin binary
+*.png binary

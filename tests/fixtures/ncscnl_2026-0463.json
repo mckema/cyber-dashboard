@@ -1,0 +1,177 @@
+{
+ "document": {
+  "category": "csaf_security_advisory",
+  "csaf_version": "2.0",
+  "distribution": {
+   "tlp": {
+    "label": "WHITE"
+   }
+  },
+  "lang": "nl",
+  "notes": [
+   {
+    "category": "legal_disclaimer",
+    "text": "The Netherlands Cyber Security Center (henceforth: NCSC-NL) maintains this page to enhance access to its information and [trimmed]"
+   },
+   {
+    "category": "description",
+    "text": "Cisco heeft een ernstige kwetsbaarheid verholpen in Cisco Secure Firewall Adaptive Security Appliance (ASA) en Cisco Secure Firewall Threat Defense (FTD).",
+    "title": "Feiten"
+   },
+   {
+    "category": "description",
+    "text": "Cisco bevestigt dat de kwetsbaarheid actief wordt misbruikt. Deze kwetsbaarheid met kenmerk CVE-2026-76418 heeft een CVSS-score van 8.6 en bevindt zich in de Remote Access SSL VPN-functionaliteit. Een niet-geauthenticeerde kwaadwillende kan de kwetsbaarheid op afstand misbruiken door een speciaal vervaardigd verzoek naar de VPN-dienst te versturen. Hierdoor kan het getroffen apparaat onverwacht herstarten, wat kan leiden tot een Denial-of-Service (DoS) en verstoring van de dienstverlening.\n\nVoor succesvol misbruik moet de SSL VPN-dienst bereikbaar zijn en secundaire authenticatie zijn geconfigureerd voor een VPN-tunnelgroep. Een succesvolle VPN-aanmelding is niet vereist. \n\n",
+    "title": "Interpretaties"
+   },
+   {
+    "category": "description",
+    "text": "Cisco heeft updates uitgebracht om de kwetsbaarheid te verhelpen. Controleer of secundaire authenticatie is geconfigureerd voor VPN-tunnelgroepen. Cisco beschrijft tijdelijke mitigerende maatregelen, maar waarschuwt dat deze de beveiliging van VPN-toegang kunnen verlagen. Zie bijgevoegde referenties voor meer informatie.",
+    "title": "Oplossingen"
+   },
+   {
+    "category": "general",
+    "text": "medium",
+    "title": "Kans"
+   },
+   {
+    "category": "general",
+    "text": "high",
+    "title": "Schade"
+   },
+   {
+    "category": "general",
+    "text": "NULL Pointer Dereference",
+    "title": "CWE-476"
+   }
+  ],
+  "publisher": {
+   "category": "coordinator",
+   "contact_details": "cert@ncsc.nl",
+   "name": "Nationaal Cyber Security Centrum",
+   "namespace": "https://www.ncsc.nl/"
+  },
+  "references": [
+   {
+    "category": "external",
+    "summary": "Reference",
+    "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-asaftd-tunnel-dos-s6mgkb75"
+   }
+  ],
+  "title": "Kwetsbaarheid verholpen in Cisco Secure Firewall ASA en FTD Software",
+  "tracking": {
+   "current_release_date": "2026-10-30T14:11:44.339772Z",
+   "generator": {
+    "date": "2025-08-04T16:30:00Z",
+    "engine": {
+     "name": "V.A.",
+     "version": "1.3"
+    }
+   },
+   "id": "NCSC-2026-0463",
+   "initial_release_date": "2026-10-30T14:11:44.339772Z",
+   "revision_history": [
+    {
+     "date": "2026-10-30T14:11:44.339772Z",
+     "number": "1.0.0",
+     "summary": "Initiele versie"
+    }
+   ],
+   "status": "final",
+   "version": "1.0.0"
+  }
+ },
+ "product_tree": {
+  "branches": [
+   {
+    "branches": [
+     {
+      "branches": [
+       {
+        "category": "product_version_range",
+        "name": "vers:unknown/*",
+        "product": {
+         "name": "vers:unknown/*",
+         "product_id": "CSAFPID-1"
+        }
+       }
+      ],
+      "category": "product_name",
+      "name": "Cisco Secure Firewall Adaptive Security Appliance (ASA) Software"
+     },
+     {
+      "branches": [
+       {
+        "category": "product_version_range",
+        "name": "vers:unknown/*",
+        "product": {
+         "name": "vers:unknown/*",
+         "product_id": "CSAFPID-2"
+        }
+       }
+      ],
+      "category": "product_name",
+      "name": "Cisco Secure Firewall Threat Defense (FTD) Software"
+     },
+     {
+      "branches": [
+       {
+        "category": "product_version_range",
+        "name": "vers:unknown/*",
+        "product": {
+         "name": "vers:unknown/*",
+         "product_id": "CSAFPID-3"
+        }
+       }
+      ],
+      "category": "product_name",
+      "name": "Secure Firewall ASA Software and Cisco Secure FTD Software"
+     }
+    ],
+    "category": "vendor",
+    "name": "Cisco"
+   }
+  ]
+ },
+ "vulnerabilities": [
+  {
+   "cve": "CVE-2026-76418",
+   "notes": [
+    {
+     "category": "description",
+     "text": "A NULL pointer dereference vulnerability in Cisco Secure Firewall ASA and FTD Software's Remote Access SSL VPN service allows unauthenticated remote attackers to cause device reloads, resulting in denial of service due to logic errors in secondary authentication.",
+     "title": "Summary"
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "CSAFPID-1",
+     "CSAFPID-2",
+     "CSAFPID-3"
+    ]
+   },
+   "references": [
+    {
+     "category": "self",
+     "summary": "CVE-2026-76418 | NCSC-NL Website",
+     "url": "https://vulnerabilities.ncsc.nl/csaf/v2/2026/cve-2026-76418.json"
+    }
+   ],
+   "scores": [
+    {
+     "cvss_v3": {
+      "version": "3.1",
+      "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+      "baseScore": 8.6,
+      "baseSeverity": "HIGH"
+     },
+     "products": [
+      "CSAFPID-1",
+      "CSAFPID-2",
+      "CSAFPID-3"
+     ]
+    }
+   ],
+   "title": "CVE-2026-76418"
+  }
+ ]
+}

@@ -1,0 +1,199 @@
+/* Cyber Threat Exploit Watch: page styles.
+   Paste into the page's scriptCss field (Wiki.js strips <style> from page content).
+   Every rule is scoped under .xw (the page's outer div) so the Wiki.js chrome is untouched.
+   Selectors use at least two classes so they outrank Wiki.js's own ".contents table/h2/pre" rules.
+   Dark theme: Wiki.js puts .theme--dark on .v-application; the tokens below switch with it. */
+
+.xw{
+  --ink:#1b2430; --muted:#5b6677; --faint:#8a94a3;
+  --line:#dfe3e8; --line2:#eceff3; --bg:#ffffff; --soft:#f6f8fa; --head:#f2f4f7;
+  --accent:#1f5fbf;
+  --crit:#b42318; --crit-bg:#fdeceb; --crit-bd:#f5c2bd;
+  --high:#c2410c; --high-bg:#fff1e6; --high-bd:#f9cfae;
+  --med:#8a5a00; --med-bg:#fcf4dd; --med-bd:#efd9a0;
+  --low:#4a5565; --low-bg:#eef1f4; --low-bd:#d5dbe2;
+  --exp:#ffffff; --exp-bg:#8f1d2c;
+  --ok:#0b7a43; --ok-bg:#e5f4ec;
+  --info:#1f5fbf; --info-bg:#e8f0fc;
+  --warn:#975a00; --warn-bg:#fdf3dc; --warn-bd:#f0d38f;
+  --err:#b42318; --err-bg:#fdeceb;
+  --s-us:#1d4f91; --s-us-bg:#e7eff9;
+  --s-eu:#1a3f9e; --s-eu-bg:#e9edfa;
+  --s-nl:#b34700; --s-nl-bg:#fff0e3;
+  --s-gh:#24292f; --s-gh-bg:#eef0f2;
+  --s-cve:#0e6b6b; --s-cve-bg:#e2f3f2;
+  --s-osint:#6b3fa0; --s-osint-bg:#f1eafa;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  color:var(--ink); font-size:14px; line-height:1.55;
+}
+.theme--dark .xw{
+  --ink:#e4e8ee; --muted:#a3adba; --faint:#7d8896;
+  --line:#3a414b; --line2:#30363e; --bg:#1e2227; --soft:#262b32; --head:#272c33;
+  --accent:#86b4ff;
+  --crit:#ff8b7d; --crit-bg:#4a1f1b; --crit-bd:#6e2b25;
+  --high:#ffac6b; --high-bg:#472a10; --high-bd:#6a3f18;
+  --med:#f0c75a; --med-bg:#3c3214; --med-bd:#5a4a1d;
+  --low:#b8c1cd; --low-bg:#2c323a; --low-bd:#3d454f;
+  --exp:#ffffff; --exp-bg:#a8293c;
+  --ok:#62d398; --ok-bg:#16382a;
+  --info:#86b4ff; --info-bg:#1b2c47;
+  --warn:#f2b84b; --warn-bg:#3b2b0e; --warn-bd:#5c4416;
+  --err:#ff8b7d; --err-bg:#4a1f1b;
+  --s-us:#9cc2ff; --s-us-bg:#1d2b40;
+  --s-eu:#a9b8ff; --s-eu-bg:#202848;
+  --s-nl:#ffb27a; --s-nl-bg:#41260f;
+  --s-gh:#d0d7de; --s-gh-bg:#2d333b;
+  --s-cve:#6fd6d0; --s-cve-bg:#123634;
+  --s-osint:#cfb0ff; --s-osint-bg:#2f2242;
+}
+
+/* ---------- header */
+.xw .hero{margin:0 0 18px}
+.xw .eyebrow{margin:0 0 4px;font-size:11.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.xw h2.xh{margin:0;padding:0;border:0;font-size:22px;font-weight:600;line-height:1.3;color:var(--ink);background:none}
+.xw h2.xh::after,.xw h2.xh::before{display:none;content:none}
+.xw .hero h2.xh{font-size:26px}
+.xw .lede{margin:8px 0 14px;max-width:62em;font-size:15px;color:var(--ink)}
+.xw .strip{display:flex;flex-wrap:wrap;gap:8px 28px;padding:10px 14px;border:1px solid var(--line);border-radius:8px 8px 0 0;background:var(--soft)}
+.xw .kv .k{display:block;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.xw .kv .v{font-size:13.5px;font-variant-numeric:tabular-nums}
+.xw .refresh{border:1px solid var(--line);border-top:0;border-radius:0 0 8px 8px;background:var(--bg);padding:8px 14px}
+.xw .refresh .rstat{font-size:12.5px;color:var(--muted)}
+.xw .refresh .rstat b{color:var(--ink);font-weight:600}
+
+/* ---------- stat tiles */
+.xw .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:0 0 8px}
+.xw .stat{--tile:var(--faint);border:1px solid var(--line);border-top:3px solid var(--tile);border-radius:8px;padding:10px 14px 12px;background:var(--bg)}
+.xw .stat .n{display:block;font-size:30px;font-weight:700;line-height:1.15;color:var(--tile);font-variant-numeric:tabular-nums}
+.xw .stat .l{display:block;margin-top:2px;font-size:12.5px;line-height:1.35;color:var(--muted)}
+.xw .stat-exp{--tile:var(--exp-bg)}
+.xw .stat-crit{--tile:var(--crit)}
+.xw .stat-high{--tile:var(--high)}
+.xw .stat-dep{--tile:var(--s-gh)}
+.xw .stat-adv{--tile:var(--s-eu)}
+.xw .stat-osint{--tile:var(--s-osint)}
+.theme--dark .xw .stat-exp{--tile:var(--crit)}
+
+/* ---------- sections */
+.xw .sec{margin:34px 0 0}
+.xw .sec-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;padding:0 0 6px;border-bottom:1px solid var(--line)}
+.xw .cnt{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+.xw .intro{margin:10px 0;max-width:62em;color:var(--ink)}
+.xw .capnote{margin:6px 0 0;font-size:12.5px;color:var(--muted)}
+.xw .intro code{font-family:var(--mono);font-size:12.5px;padding:0 4px;border-radius:4px;background:var(--soft);color:var(--ink)}
+
+.xw .callout{margin:12px 0;padding:10px 14px;border:1px solid var(--line);border-left:4px solid var(--faint);border-radius:6px;background:var(--soft)}
+.xw .callout p{margin:0}
+.xw .callout.warn{border-color:var(--warn-bd);border-left-color:var(--warn);background:var(--warn-bg)}
+.xw .callout.note{border-color:var(--line);border-left-color:var(--info);background:var(--info-bg)}
+
+.xw ul.legend{margin:6px 0 10px;padding:0;list-style:none;font-size:12.5px;color:var(--muted)}
+.xw ul.legend li{margin:3px 0;padding:0}
+.xw ul.legend .hs{margin-right:4px}
+
+/* ---------- tables */
+.xw .tw{margin:10px 0 4px;overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.xw table.xt{display:table;width:100%;margin:0;border:0;border-collapse:collapse;border-spacing:0;font-size:13.5px;background:var(--bg);box-shadow:none}
+.xw .xt thead th{padding:8px 12px;border:0;border-bottom:1px solid var(--line);background:var(--head);color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;text-align:left;white-space:nowrap}
+.xw .xt td{padding:10px 12px;border:0;border-top:1px solid var(--line2);vertical-align:top;text-align:left;background:transparent;color:var(--ink)}
+.xw .xt tbody tr:first-child td{border-top:0}
+.xw .xt tbody tr:hover td{background:var(--soft)}
+.xw .xt th.num,.xw .xt td.num{text-align:right;font-variant-numeric:tabular-nums}
+.xw .xt a{color:var(--accent);text-decoration:none}
+.xw .xt a:hover{text-decoration:underline}
+.xw .xt a.is-external-link::after{display:none;content:none}
+.xw .xt a.is-external-link{padding-right:0}
+
+.xw .xt td.id{white-space:nowrap;min-width:150px}
+.xw .xt td.id a{font-family:var(--mono);font-size:12.5px;font-weight:600}
+.xw .xt td.id .sv,.xw .xt td.id .ssvc,.xw .xt td.sc .sv{margin-top:6px}
+.xw .xt .sub{display:block;margin-top:3px;font-size:12px;line-height:1.35;color:var(--muted)}
+.xw .xt .mono,.xw .xt .sub.mono{font-family:var(--mono);font-size:11.5px}
+.xw .xt td.desc{min-width:280px;max-width:640px}
+.xw .xt td.desc a.ttl{color:var(--ink);font-weight:500}
+.xw .xt td.desc a.ttl:hover{color:var(--accent)}
+.xw .xt .tgt{display:block;font-weight:600}
+.xw .xt td.due{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--ink)}
+.xw .xt td.due.past{color:var(--crit);font-weight:600}
+.xw .xt td.due.past .sub{color:var(--crit);font-weight:600;text-transform:uppercase;letter-spacing:.05em;font-size:10.5px}
+.xw .xt td.cves{white-space:nowrap}
+.xw .xt td.empty{padding:22px 12px;text-align:center;font-style:italic;color:var(--muted)}
+
+/* severity and evidence pills */
+.xw .sv{display:inline-block;padding:0 7px;border:1px solid var(--low-bd);border-radius:999px;background:var(--low-bg);color:var(--low);font-size:10.5px;font-weight:700;line-height:1.7;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap;vertical-align:middle}
+.xw .sv-CRITICAL{color:var(--crit);background:var(--crit-bg);border-color:var(--crit-bd)}
+.xw .sv-HIGH{color:var(--high);background:var(--high-bg);border-color:var(--high-bd)}
+.xw .sv-MEDIUM{color:var(--med);background:var(--med-bg);border-color:var(--med-bd)}
+.xw .sv-LOW{color:var(--low);background:var(--low-bg);border-color:var(--low-bd)}
+.xw .sv-EXPLOITED{color:var(--exp);background:var(--exp-bg);border-color:var(--exp-bg)}
+.xw .xt td.id .sv,.xw .xt td.id .ssvc{display:table}
+
+.xw .score{display:block;font-size:20px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--ink)}
+.xw .score.sm{display:inline-block;font-size:15px;margin-right:6px;vertical-align:middle}
+.xw .score-crit{color:var(--crit)}
+.xw .score-high{color:var(--high)}
+.xw .score-other{color:var(--med)}
+.xw .xt td.sc{white-space:nowrap}
+.xw .ssrc{display:block;margin-top:5px;font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--muted)}
+.xw .ssvc{display:inline-block;padding:0 7px;border-radius:4px;font-size:10.5px;font-weight:700;line-height:1.7;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
+.xw .ssvc-active{color:var(--exp);background:var(--exp-bg)}
+.xw .ssvc-poc{color:var(--warn);background:var(--warn-bg);border:1px solid var(--warn-bd)}
+.xw .vecbits{display:block;margin-top:6px;font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.xw .vecbits.hot{color:var(--crit);font-weight:600}
+.xw .pi{display:inline-block;margin-top:2px;padding:0 6px;border:1px solid var(--line);border-radius:4px;font-family:var(--mono);font-size:11.5px;font-weight:600;white-space:nowrap;color:var(--ink);background:var(--soft)}
+.xw .pi-H{color:var(--crit);border-color:var(--crit-bd);background:var(--crit-bg)}
+.xw .pi-M{color:var(--high);border-color:var(--high-bd);background:var(--high-bg)}
+.xw .xt td.rate{white-space:nowrap}
+.xw .xt td.rate .pi{display:table;margin-top:6px}
+.xw .xt td.rate .pi:first-child{margin-top:0}
+
+/* packages */
+.xw .pkg{font-family:var(--mono);font-size:12px;word-break:break-all}
+.xw .eco{display:inline-block;margin:0 4px 2px 0;padding:0 6px;border-radius:4px;background:var(--soft);border:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--ink)}
+.xw .fix{font-family:var(--mono);font-size:12px;color:var(--ok);white-space:nowrap}
+
+/* sources */
+.xw .srcs{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.xw .src{display:inline-block;padding:0 7px;border-radius:4px;font-size:11px;font-weight:600;line-height:1.75;white-space:nowrap;color:var(--low);background:var(--low-bg)}
+.xw .src-us{color:var(--s-us);background:var(--s-us-bg)}
+.xw .src-eu{color:var(--s-eu);background:var(--s-eu-bg)}
+.xw .src-nl{color:var(--s-nl);background:var(--s-nl-bg)}
+.xw .src-gh{color:var(--s-gh);background:var(--s-gh-bg)}
+.xw .src-cve{color:var(--s-cve);background:var(--s-cve-bg)}
+.xw .src-osint{color:var(--s-osint);background:var(--s-osint-bg)}
+
+/* feed health */
+.xw .hs{display:inline-block;padding:0 8px 0 7px;border-radius:999px;font-size:11.5px;font-weight:600;line-height:1.75;white-space:nowrap}
+.xw .hs::before{content:"";display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:currentColor;vertical-align:1px}
+.xw .hs-ok{color:var(--ok);background:var(--ok-bg)}
+.xw .hs-cached{color:var(--info);background:var(--info-bg)}
+.xw .hs-stale{color:var(--warn);background:var(--warn-bg)}
+.xw .hs-error{color:var(--err);background:var(--err-bg)}
+
+/* OSINT */
+.xw .tl{display:inline-block;padding:0 7px;border-radius:4px;font-size:11px;font-weight:600;line-height:1.75;color:var(--low);background:var(--low-bg)}
+.xw .tl-high{color:var(--crit);background:var(--crit-bg)}
+.xw .tl-medium{color:var(--high);background:var(--high-bg)}
+.xw .tag{display:inline-block;margin:0 4px 3px 0;padding:0 6px;border:1px solid var(--line);border-radius:4px;font-family:var(--mono);font-size:11px;color:var(--muted);background:var(--soft);word-break:break-all}
+
+/* ---------- source cards */
+.xw .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin:12px 0 0}
+.xw .card{display:flex;flex-direction:column;padding:14px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.xw .card .ch{font-size:15px;font-weight:600;color:var(--ink)}
+.xw .card .pub{margin-top:2px;font-size:12px;color:var(--muted)}
+.xw .card p{margin:10px 0;flex:1;font-size:13px}
+.xw .card .meta{display:flex;flex-wrap:wrap;gap:4px}
+.xw .tagp{display:inline-block;padding:0 7px;border-radius:4px;font-size:11px;font-weight:600;line-height:1.75;color:var(--low);background:var(--low-bg)}
+.xw .tagp.role{color:var(--info);background:var(--info-bg)}
+.xw .card .ep{margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);font-family:var(--mono);font-size:11px;color:var(--muted);word-break:break-all}
+
+/* ---------- terminal block and limits */
+.xw pre.xcode{margin:10px 0 0;padding:14px 16px;overflow-x:auto;border:0;border-radius:8px;background:#0f1720;color:#d6dee8;font-family:var(--mono);font-size:12px;line-height:1.6;white-space:pre;box-shadow:none}
+.xw ul.lim{margin:10px 0 0;padding-left:20px;max-width:62em}
+.xw ul.lim li{margin:0 0 10px}
+
+@media (max-width:700px){
+  .xw .hero h2.xh{font-size:22px}
+  .xw .stat .n{font-size:24px}
+  .xw .xt td.desc{min-width:220px}
+}

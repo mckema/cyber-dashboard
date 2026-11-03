@@ -1,0 +1,268 @@
+{
+ "document": {
+  "category": "csaf_security_advisory",
+  "csaf_version": "2.0",
+  "distribution": {
+   "tlp": {
+    "label": "WHITE"
+   }
+  },
+  "lang": "nl",
+  "notes": [
+   {
+    "category": "legal_disclaimer",
+    "text": "The Netherlands Cyber Security Center (henceforth: NCSC-NL) maintains this page to enhance access to its information and [trimmed]"
+   },
+   {
+    "category": "description",
+    "text": "Apple heeft meerdere kwetsbaarheden verholpen in macOS, met name in de versies Golden Gate 27.2, Sequoia 15.8.2, Tahoe 26.7.2 en Monterey 12.7.5.",
+    "title": "Feiten"
+   },
+   {
+    "category": "description",
+    "text": "De kwetsbaarheden betroffen diverse beveiligingsaspecten binnen macOS, waaronder onvoldoende validatie van symbolische links (symlinks), onjuiste permissiecontroles, onvolledige autorisatiemechanismen, en fouten in geheugenbeheer zoals out-of-bounds reads en writes, use-after-free, buffer overflows, en race conditions. Deze fouten konden door lokale of remote aanvallers worden misbruikt om privileges te escaleren, sandbox-beperkingen te omzeilen, gevoelige gebruikersdata of kernelgeheugen te benaderen, of om denial-of-service condities te veroorzaken door onverwachte systeem- of applicatiecrashes. \n\nDaarnaast werden problemen opgelost in Gatekeeper, de beveiligingscomponent die code-integriteit en app-verificatie afdwingt, waarbij bypasses werden voorkomen. Ook werden kwetsbaarheden in de verwerking van diverse bestandstypen zoals afbeeldingen, video’s, audio, fonts, PDF’s en ZIP-archieven aangepakt om geheugenbeschadiging en ongeautoriseerde code-uitvoering te voorkomen.\n\nDe fixes omvatten verbeterde validatie van invoer, strengere toegangscontroles, verbeterde geheugenbeheer en state management, en het versterken van sandbox- en privacymechanismen. De updates zijn ook doorgevoerd in andere Apple-platforms zoals tvOS, visionOS en watchOS, waarbij consistentie in beveiligingsverbeteringen werd nagestreefd.",
+    "title": "Interpretaties"
+   },
+   {
+    "category": "description",
+    "text": "Apple heeft updates uitgebracht voor macOS Golden Gate 27.2, Sequoia 15.8.2, Tahoe 26.7.2, Monterey 12.7.6 en andere versies om de beschreven kwetsbaarheden te verhelpen. Deze updates bevatten verbeterde validatie- en beveiligingsmechanismen die de integriteit, stabiliteit en privacy van het systeem versterken. Zie bijgevoegde referenties voor meer informatie.",
+    "title": "Oplossingen"
+   },
+   {
+    "category": "general",
+    "text": "medium",
+    "title": "Kans"
+   },
+   {
+    "category": "general",
+    "text": "high",
+    "title": "Schade"
+   },
+   {
+    "category": "general",
+    "text": "Buffer Copy without Checking Size of Input ('Classic Buffer Overflow')",
+    "title": "CWE-120"
+   },
+   {
+    "category": "general",
+    "text": "Out-of-bounds Read",
+    "title": "CWE-125"
+   },
+   {
+    "category": "general",
+    "text": "Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')",
+    "title": "CWE-362"
+   },
+   {
+    "category": "general",
+    "text": "Insecure Temporary File",
+    "title": "CWE-377"
+   },
+   {
+    "category": "general",
+    "text": "Double Free",
+    "title": "CWE-415"
+   },
+   {
+    "category": "general",
+    "text": "Use After Free",
+    "title": "CWE-416"
+   },
+   {
+    "category": "general",
+    "text": "Out-of-bounds Write",
+    "title": "CWE-787"
+   },
+   {
+    "category": "general",
+    "text": "Access of Resource Using Incompatible Type ('Type Confusion')",
+    "title": "CWE-843"
+   },
+   {
+    "category": "general",
+    "text": "Incorrect Authorization",
+    "title": "CWE-863"
+   }
+  ],
+  "publisher": {
+   "category": "coordinator",
+   "contact_details": "cert@ncsc.nl",
+   "name": "Nationaal Cyber Security Centrum",
+   "namespace": "https://www.ncsc.nl/"
+  },
+  "references": [
+   {
+    "category": "external",
+    "summary": "Reference",
+    "url": "https://support.apple.com/en-us/149521"
+   },
+   {
+    "category": "external",
+    "summary": "Reference",
+    "url": "https://support.apple.com/en-us/149522"
+   },
+   {
+    "category": "external",
+    "summary": "Reference",
+    "url": "https://support.apple.com/en-us/149523"
+   }
+  ],
+  "title": "Kwetsbaarheden verholpen in Apple MacOS",
+  "tracking": {
+   "current_release_date": "2026-10-28T14:17:59.503789Z",
+   "generator": {
+    "date": "2025-08-04T16:30:00Z",
+    "engine": {
+     "name": "V.A.",
+     "version": "1.3"
+    }
+   },
+   "id": "NCSC-2026-0455",
+   "initial_release_date": "2026-10-27T08:05:01.630016Z",
+   "revision_history": [
+    {
+     "date": "2026-10-27T08:05:01.630016Z",
+     "number": "1.0.0",
+     "summary": "Initiele versie"
+    },
+    {
+     "date": "2026-10-28T14:17:59.503789Z",
+     "number": "1.0.1",
+     "summary": "In de eerste versie van deze advisory is Monterey 12.4 per abuis vermeld als zowel de kwetsbare als de laatst uitgebrachte versie. Dit is inmiddels gecorrigeerd. De kwetsbare versie betreft Monterey 12.7.5 en de nieuwe versie is Monterey 12.7.6."
+    }
+   ],
+   "status": "final",
+   "version": "1.0.1"
+  }
+ },
+ "product_tree": {
+  "branches": [
+   {
+    "branches": [
+     {
+      "branches": [
+       {
+        "category": "product_version_range",
+        "name": "vers:unknown/*",
+        "product": {
+         "name": "vers:unknown/*",
+         "product_id": "CSAFPID-1"
+        }
+       }
+      ],
+      "category": "product_name",
+      "name": "macOS"
+     }
+    ],
+    "category": "vendor",
+    "name": "Apple"
+   }
+  ]
+ },
+ "vulnerabilities": [
+  {
+   "cve": "CVE-2022-26704",
+   "notes": [
+    {
+     "category": "description",
+     "text": "macOS Monterey 12.4 addressed a security vulnerability by enhancing symlink validation to prevent applications from gaining elevated privileges through improper symlink handling.",
+     "title": "Summary"
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "CSAFPID-1"
+    ]
+   },
+   "references": [
+    {
+     "category": "self",
+     "summary": "CVE-2022-26704 | NCSC-NL Website",
+     "url": "https://vulnerabilities.ncsc.nl/csaf/v2/2022/cve-2022-26704.json"
+    }
+   ],
+   "title": "CVE-2022-26704"
+  },
+  {
+   "cve": "CVE-2026-20648",
+   "notes": [
+    {
+     "category": "description",
+     "text": "A privacy vulnerability allowing malicious applications to access notifications from other iCloud devices was resolved by relocating sensitive data to a protected area in macOS Sequoia 15.8.2 and macOS Tahoe 26.3.",
+     "title": "Summary"
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "CSAFPID-1"
+    ]
+   },
+   "references": [
+    {
+     "category": "self",
+     "summary": "CVE-2026-20648 | NCSC-NL Website",
+     "url": "https://vulnerabilities.ncsc.nl/csaf/v2/2026/cve-2026-20648.json"
+    }
+   ],
+   "scores": [
+    {
+     "cvss_v3": {
+      "version": "3.1",
+      "vectorString": "CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:N/A:N",
+      "baseScore": 5.5,
+      "baseSeverity": "MEDIUM"
+     },
+     "products": [
+      "CSAFPID-1"
+     ]
+    }
+   ],
+   "title": "CVE-2026-20648"
+  },
+  {
+   "cve": "CVE-2026-20649",
+   "cwe": {
+    "id": "CWE-377",
+    "name": "Insecure Temporary File"
+   },
+   "notes": [
+    {
+     "category": "other",
+     "text": "Insecure Temporary File",
+     "title": "CWE-377"
+    },
+    {
+     "category": "description",
+     "text": "A logging issue that could expose sensitive user information was fixed with improved data redaction across multiple Apple operating systems including iOS 26.3, iPadOS 26.3, macOS Sequoia 15.8.2, macOS Tahoe 26.3, tvOS 26.3, and watchOS 26.3.",
+     "title": "Summary"
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "CSAFPID-1"
+    ]
+   },
+   "references": [
+    {
+     "category": "self",
+     "summary": "CVE-2026-20649 | NCSC-NL Website",
+     "url": "https://vulnerabilities.ncsc.nl/csaf/v2/2026/cve-2026-20649.json"
+    }
+   ],
+   "scores": [
+    {
+     "cvss_v3": {
+      "version": "3.1",
+      "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "baseScore": 7.5,
+      "baseSeverity": "HIGH"
+     },
+     "products": [
+      "CSAFPID-1"
+     ]
+    }
+   ],
+   "title": "CVE-2026-20649"
+  }
+ ]
+}

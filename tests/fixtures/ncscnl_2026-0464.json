@@ -1,0 +1,167 @@
+{
+ "document": {
+  "category": "csaf_security_advisory",
+  "csaf_version": "2.0",
+  "distribution": {
+   "tlp": {
+    "label": "WHITE"
+   }
+  },
+  "lang": "nl",
+  "notes": [
+   {
+    "category": "legal_disclaimer",
+    "text": "The Netherlands Cyber Security Center (henceforth: NCSC-NL) maintains this page to enhance access to its information and [trimmed]"
+   },
+   {
+    "category": "description",
+    "text": "Canonical heeft een kwetsbaarheid verholpen in LXD.",
+    "title": "Feiten"
+   },
+   {
+    "category": "description",
+    "text": "De kwetsbaarheid (CVE-2026-112816) wordt veroorzaakt door onjuiste validatie van certificaatketens binnen de HTTPS API van Canonical LXD. De kwetsbaarheid treft LXD-versies vóór 4.0.15, 5.0.11, 5.21.9 en 6.10.1 binnen de betreffende releasebranches.\n\nHierdoor kunnen niet-geauthenticeerde aanvallers die netwerktoegang hebben tot de HTTPS API en beschikken over het publieke certificaat van een vertrouwde client, zich voordoen als die client. Dit is mogelijk doordat LXD ten onrechte alle certificaten in de aangeboden certificaatketen controleert tegen de trust store, terwijl alleen het leaf-certificaat cryptografisch aan het bezit van de bijbehorende private key is gekoppeld.\n\nSuccesvolle exploitatie kan leiden tot ongeautoriseerde toegang tot de LXD-cluster en de beheerde virtuele machines, met privileges gelijk aan die van de geïmiteerde client. Wanneer deze client over voldoende beheerdersrechten beschikt, kan dit uiteindelijk leiden tot root-toegang op de onderliggende host.\n\nDe kwetsbaarheid heeft een CVSS 4.0-score van 10.0 (Critical) en treft meerdere ondersteunde LXD-releasebranches en MicroCloud-omgevingen.",
+    "title": "Interpretaties"
+   },
+   {
+    "category": "description",
+    "text": "Canonical heeft updates uitgebracht om de kwetsbaarheid te verhelpen. Zie bijgevoegde referenties voor meer informatie.",
+    "title": "Oplossingen"
+   },
+   {
+    "category": "general",
+    "text": "medium",
+    "title": "Kans"
+   },
+   {
+    "category": "general",
+    "text": "high",
+    "title": "Schade"
+   },
+   {
+    "category": "general",
+    "text": "Improper Certificate Validation",
+    "title": "CWE-295"
+   }
+  ],
+  "publisher": {
+   "category": "coordinator",
+   "contact_details": "cert@ncsc.nl",
+   "name": "Nationaal Cyber Security Centrum",
+   "namespace": "https://www.ncsc.nl/"
+  },
+  "references": [
+   {
+    "category": "external",
+    "summary": "Reference",
+    "url": "https://discourse.ubuntu.com/t/security-advisory-critical-vulnerability-found-in-canonical-lxd-and-microcloud/90557"
+   }
+  ],
+  "title": "Kwetsbaarheid verholpen in LXD van Canonical",
+  "tracking": {
+   "current_release_date": "2026-11-02T09:17:50.006979Z",
+   "generator": {
+    "date": "2025-08-04T16:30:00Z",
+    "engine": {
+     "name": "V.A.",
+     "version": "1.3"
+    }
+   },
+   "id": "NCSC-2026-0464",
+   "initial_release_date": "2026-11-02T09:17:50.006979Z",
+   "revision_history": [
+    {
+     "date": "2026-11-02T09:17:50.006979Z",
+     "number": "1.0.0",
+     "summary": "Initiele versie"
+    }
+   ],
+   "status": "final",
+   "version": "1.0.0"
+  }
+ },
+ "product_tree": {
+  "branches": [
+   {
+    "branches": [
+     {
+      "branches": [
+       {
+        "category": "product_version_range",
+        "name": "vers:unknown/*",
+        "product": {
+         "name": "vers:unknown/*",
+         "product_id": "CSAFPID-1"
+        }
+       }
+      ],
+      "category": "product_name",
+      "name": "LXD"
+     }
+    ],
+    "category": "vendor",
+    "name": "Canonical"
+   },
+   {
+    "branches": [
+     {
+      "branches": [
+       {
+        "category": "product_version_range",
+        "name": "vers:unknown/*",
+        "product": {
+         "name": "vers:unknown/*",
+         "product_id": "CSAFPID-2"
+        }
+       }
+      ],
+      "category": "product_name",
+      "name": "lxd"
+     }
+    ],
+    "category": "vendor",
+    "name": "Debian"
+   }
+  ]
+ },
+ "vulnerabilities": [
+  {
+   "cve": "CVE-2026-112816",
+   "cwe": {
+    "id": "CWE-295",
+    "name": "Improper Certificate Validation"
+   },
+   "notes": [
+    {
+     "category": "other",
+     "text": "Improper Certificate Validation",
+     "title": "CWE-295"
+    },
+    {
+     "category": "description",
+     "text": "Improper certificate validation in Canonical LXD versions before 4.0.15, 5.0.11, 5.21.9, and 6.10.1 enables unauthenticated attackers to impersonate trusted clients and gain full cluster and VM access via crafted certificate chains.",
+     "title": "Summary"
+    },
+    {
+     "category": "general",
+     "text": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+     "title": "CVSSV4"
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "CSAFPID-1",
+     "CSAFPID-2"
+    ]
+   },
+   "references": [
+    {
+     "category": "self",
+     "summary": "CVE-2026-112816 | NCSC-NL Website",
+     "url": "https://vulnerabilities.ncsc.nl/csaf/v2/2026/cve-2026-112816.json"
+    }
+   ],
+   "title": "CVE-2026-112816"
+  }
+ ]
+}

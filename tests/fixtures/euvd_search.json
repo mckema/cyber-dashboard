@@ -1,0 +1,93 @@
+{
+ "items": [
+  {
+   "id": "EUVD-2026-102437",
+   "enisaUuid": "1e1aa2c1-8663-3e7a-a50e-5d7d4e62a3c1",
+   "description": "Ivanti Connect Secure 22.8R2.4 mishandles the manner in which the dsinvoked broker trusts DSCache configuration data, leading to privilege escalation to root, as exploited in the wild in October 2026.",
+   "datePublished": "Oct 15, 2026, 8:56:58 PM",
+   "dateUpdated": "Oct 31, 2026, 3:56:17 AM",
+   "baseScore": 7.0,
+   "baseScoreVersion": "3.1",
+   "baseScoreVector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+   "aliases": "GHSA-fhw5-mpvj-x89m\nCVE-2026-111357\n",
+   "assigner": "mitre",
+   "epss": 0.53,
+   "exploitedSince": "Oct 30, 2026, 12:00:00 AM",
+   "enisaIdProduct": [
+    {
+     "id": "fcfed60a-eb63-3012-9c5d-af917ba83f31",
+     "product": {
+      "name": "Connect Secure",
+      "vendor": {
+       "name": "Ivanti"
+      }
+     },
+     "product_version": "22.8R2.4"
+    }
+   ],
+   "enisaIdVendor": [
+    {
+     "id": "b5c929d6-4297-30bc-8fba-79bac6c25984",
+     "vendor": {
+      "name": "Ivanti"
+     }
+    }
+   ]
+  },
+  {
+   "id": "EUVD-2026-112462",
+   "enisaUuid": "2ebecd7b-7202-39ee-a1cd-bbbd39e43ad7",
+   "description": "A vulnerability in the Remote Access SSL VPN service of Cisco Secure Firewall Adaptive Security Appliance (ASA) Software and Cisco Secure Firewall Threat Defense (FTD) Software could allow an unauthenticated, remote attacker to cause the device to reload unexpectedly, resulting in a denial of service (DoS) condition. This vulnerability is due to logic errors when secondary authentication is configured on a tunnel group. An attacker could exploit this vulnerability by sending a crafted request when connecting to the SSL remote access VPN. A successful exploit could allow the attacker to cause the affected device to reload, resulting in a DoS condition.",
+   "datePublished": "Oct 28, 2026, 8:05:31 PM",
+   "dateUpdated": "Oct 30, 2026, 3:55:57 AM",
+   "baseScore": 8.6,
+   "baseScoreVersion": "3.1",
+   "baseScoreVector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+   "aliases": "GHSA-3whv-82g3-5cwx\nCVE-2026-76418\n",
+   "assigner": "cisco",
+   "epss": 0.82,
+   "exploitedSince": "Oct 29, 2026, 12:00:00 AM",
+   "enisaIdProduct": [
+    {
+     "id": "034cd7ea-28ee-3a0a-a0e6-a25f0575a1f9",
+     "product": {
+      "name": "Cisco Secure Firewall Adaptive Security Appliance (ASA) Software",
+      "vendor": {
+       "name": "Cisco"
+      }
+     },
+     "product_version": "9.16.2"
+    },
+    {
+     "id": "03bd3d41-f599-35c5-89b0-8108e419b02f",
+     "product": {
+      "name": "Cisco Secure Firewall Threat Defense (FTD) Software",
+      "vendor": {
+       "name": "Cisco"
+      }
+     },
+     "product_version": "7.2.12"
+    },
+    {
+     "id": "052dbc0e-f043-31fe-bdef-025775b5bbdb",
+     "product": {
+      "name": "Cisco Secure Firewall Threat Defense (FTD) Software",
+      "vendor": {
+       "name": "Cisco"
+      }
+     },
+     "product_version": "7.0.6.3"
+    }
+   ],
+   "enisaIdVendor": [
+    {
+     "id": "9230b445-c6fa-323a-82e3-26bd0a4b7e9e",
+     "vendor": {
+      "name": "Cisco"
+     }
+    }
+   ]
+  }
+ ],
+ "total": 2
+}

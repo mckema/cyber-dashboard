@@ -1,0 +1,17 @@
+{
+ "resultsPerPage": 3, "startIndex": 0, "totalResults": 3, "format": "NVD_CVE", "version": "2.0", "timestamp": "2026-11-03T03:40:00.000",
+ "vulnerabilities": [
+  {"cve": {"id": "CVE-2026-76418", "sourceIdentifier": "psirt@cisco.com", "published": "2026-10-28T16:15:42.123", "lastModified": "2026-10-30T14:02:11.870", "vulnStatus": "Analyzed",
+    "descriptions": [{"lang": "en", "value": "A vulnerability in Cisco Secure Firewall ASA\n could allow an unauthenticated, remote attacker to cause a reload."}, {"lang": "es", "value": "Una vulnerabilidad"}],
+    "metrics": {"cvssMetricV31": [
+      {"source": "psirt@cisco.com", "type": "Secondary", "cvssData": {"version": "3.1", "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", "baseScore": 8.6, "baseSeverity": "HIGH"}},
+      {"source": "nvd@nist.gov", "type": "Primary", "cvssData": {"version": "3.1", "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", "baseScore": 7.5, "baseSeverity": "HIGH"}}]},
+    "configurations": [{"nodes": [{"operator": "OR", "negate": false, "cpeMatch": [
+      {"vulnerable": true, "criteria": "cpe:2.3:a:cisco:adaptive_security_appliance_software:9.18.1:*:*:*:*:*:*:*"},
+      {"vulnerable": true, "criteria": "cpe:2.3:a:cisco:firepower_threat_defense:7.2.0:*:*:*:*:*:*:*"}]}]}]}},
+  {"cve": {"id": "CVE-2026-111464", "sourceIdentifier": "cna@example.org", "published": "2026-11-03T02:31:19.933", "lastModified": "2026-11-03T02:31:19.933", "vulnStatus": "Received",
+    "descriptions": [{"lang": "en", "value": "Not yet analysed."}], "metrics": {}}},
+  {"cve": {"id": "CVE-2026-50000", "sourceIdentifier": "cna@example.org", "published": "2026-10-30T10:00:00.000", "lastModified": "2026-11-02T10:00:00.000", "vulnStatus": "Rejected",
+    "descriptions": [{"lang": "en", "value": "** REJECT ** Duplicate."}], "metrics": {}}}
+ ]
+}
