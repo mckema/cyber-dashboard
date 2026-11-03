@@ -1,5 +1,4 @@
 .env
 state/
-__pycache__/
 target/
 .claude/

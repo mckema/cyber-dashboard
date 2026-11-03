@@ -1,7 +1,7 @@
 # Local stack: self-hosted Wiki.js 2.x + the Exploit Watch job, every 30 min.
 #
 #   docker compose up -d wiki
-#   docker compose run --rm job python bootstrap_wiki.py   # once; writes .env
+#   docker compose run --rm job bootstrap                  # once; writes .env
 #   docker compose up -d                                   # starts the job loop
 #
 # Wiki UI: http://localhost:3000 (bound to 127.0.0.1 only).
