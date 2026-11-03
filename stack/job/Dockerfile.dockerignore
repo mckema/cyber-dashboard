@@ -1,3 +1,4 @@
+# Used for builds with stack/job/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
 # Only what the build stage compiles; state/, .env, target/ and agent worktrees stay out.
 *
 !Cargo.toml

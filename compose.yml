@@ -1,0 +1,15 @@
+# Local stack: self-hosted Wiki.js 2.x + the Exploit Watch job.
+#
+#   docker compose up -d wiki
+#   docker compose run --rm job bootstrap                  # once; writes .env
+#   docker compose up -d                                   # starts the job loop
+#
+# Each service lives in its own folder under stack/. project_directory "." keeps
+# their relative paths (build context, .env, the repo bind mount) at the repo root.
+name: exploit-watch
+
+include:
+  - path: stack/wiki/compose.yml
+    project_directory: .
+  - path: stack/job/compose.yml
+    project_directory: .

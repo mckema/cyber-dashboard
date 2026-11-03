@@ -4,7 +4,7 @@
 //!   exploit-watch bootstrap [--reseed] [--update-css] [--purge-history P7D]
 //!   exploit-watch demo OUT.html [--dark]
 //!
-//! See RUNBOOK.md for how the pieces fit together.
+//! See README.md (Architecture) for how the pieces fit together.
 
 mod bootstrap;
 mod feeds;

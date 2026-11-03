@@ -3,9 +3,9 @@
 //! Pure functions: slices of Item in, HTML strings out. No network and no file
 //! I/O, except demo().
 //!
-//! Every builder emits only the class names styled by page/style.css (the page's
+//! Every builder emits only the class names styled by stack/wiki/page/style.css (the page's
 //! scriptCss) and no inline style attributes, because the Wiki.js sanitiser
-//! mangles long ones (README §7). The row vocabulary (td.id, sv sv-*, tgt, sub,
+//! mangles long ones (README.md, Known limitations). The row vocabulary (td.id, sv sv-*, tgt, sub,
 //! desc, due/due past, pkg, eco, fix, score, vecbits, empty) is the one of the
 //! original page's row builders; feed, hs-*, ssrc, ssvc-*, pi-*, tl-*, tag are
 //! the additions for the tables the original did not have.
@@ -13,7 +13,7 @@
 //! Times: every timestamp on the page is UTC and carries the "UTC" label.
 //! Date-only source values (e.g. CISA dueDate) are shown as a date with no time.
 //!
-//! Anchors filled on the page (see page/skeleton.html):
+//! Anchors filled on the page (see stack/wiki/page/skeleton.html):
 //!   tbody  t-health t-kev t-adv t-dep t-nvd t-osint
 //!   text   s-kev s-crit s-high s-dep s-adv s-osint
 //!          n-health n-kev n-adv n-dep n-nvd n-cvecap n-osint winlabel
@@ -47,6 +47,10 @@ pub const TEXT_IDS: [&str; 14] = [
     "n-health", "n-kev", "n-adv", "n-dep", "n-nvd", "n-cvecap", "n-osint", "winlabel",
 ];
 pub const STAMP_ID: &str = "rstat";
+
+/// Page content and scriptCss, relative to the repo root (the job and demo run from there).
+pub const SKELETON_PATH: &str = "stack/wiki/page/skeleton.html";
+pub const STYLE_PATH: &str = "stack/wiki/page/style.css";
 
 /// One row of the feed health table, built by run.rs.
 /// status: "ok" | "not-modified" | "cached" | "stale" | "error" (anything else renders as stale)
@@ -1370,11 +1374,11 @@ fn load_fixture(path: &Path) -> Result<Fixture, Fatal> {
     })
 }
 
-/// The standalone preview page. root holds page/skeleton.html and page/style.css.
+/// The standalone preview page. root holds SKELETON_PATH and STYLE_PATH.
 fn render_demo(fixture: &Path, dark: bool, root: &Path) -> Result<String, Fatal> {
     let d = load_fixture(fixture)?;
-    let skel = read_text(&root.join("page").join("skeleton.html"))?;
-    let css = read_text(&root.join("page").join("style.css"))?;
+    let skel = read_text(&root.join(SKELETON_PATH))?;
+    let css = read_text(&root.join(STYLE_PATH))?;
     let body = apply_regions(&skel, &d.regions())?;
     let theme = if dark { "theme--dark" } else { "theme--light" };
     Ok(format!(
@@ -1384,14 +1388,14 @@ fn render_demo(fixture: &Path, dark: bool, root: &Path) -> Result<String, Fatal>
             "<title>Exploit Watch preview</title><style>{}\n{}</style></head>",
             r#"<body><div class="v-application {}">"#,
             r#"<div class="preview-note">Preview only: fixture data from tests/fixtures/render_items.json. "#,
-            "On the wiki, page/skeleton.html is the page content and page/style.css is scriptCss.</div>",
+            "On the wiki, stack/wiki/page/skeleton.html is the page content and stack/wiki/page/style.css is scriptCss.</div>",
             r#"<div class="contents">{}</div></div></body></html>"#,
         ),
         PREVIEW_BASE, css, theme, body
     ))
 }
 
-/// `exploit-watch demo OUT.html [--dark] [--fixture F]`. Reads page/ from the
+/// `exploit-watch demo OUT.html [--dark] [--fixture F]`. Reads stack/wiki/page/ from the
 /// current directory (run it from the repo root, like the other subcommands).
 pub fn demo(args: DemoArgs) -> Result<(), Fatal> {
     let out = render_demo(&args.fixture, args.dark, Path::new("."))?;
@@ -1420,7 +1424,7 @@ mod tests {
     }
 
     fn skel() -> String {
-        read("page/skeleton.html")
+        read(SKELETON_PATH)
     }
 
     fn fixture_path() -> PathBuf {
@@ -1534,7 +1538,7 @@ mod tests {
 
     #[test]
     fn css_is_scoped() {
-        let css = read("page/style.css");
+        let css = read(STYLE_PATH);
         let body = re(r"(?s)/\*.*?\*/").replace_all(&css, "").to_string();
         let body = re(r"@import[^;]*;").replace_all(&body, "").to_string();
         let body = re(r"@media[^{]*\{").replace_all(&body, "").to_string();
@@ -1774,7 +1778,7 @@ mod tests {
         let mut evil = String::new();
         evil.push_str(&build_cve_rows(&[evil_item()], 300).0);
         evil.push_str(&build_osint_rows(&[evil_item()]));
-        let css = read("page/style.css");
+        let css = read(STYLE_PATH);
         let fallback = ["sm", "score-other", "pi-L", "pi-X", "tl-low", "tl-undefined", "tags", "sv-MEDIUM", "sv-LOW"];
         for c in re(r#"class="([^"]*)""#).captures_iter(&(page + &evil)) {
             for cls in c[1].split_whitespace() {

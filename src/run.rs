@@ -34,7 +34,6 @@ use crate::wiki;
 
 const WINDOW_DAYS: i64 = 7;
 const SLA_MINUTES: f64 = 60.0;
-const SKELETON: &str = "page/skeleton.html";
 
 // Regions that change on every run without the data changing. They are left out
 // of the "did anything change" fingerprint, otherwise every run writes a new
@@ -46,7 +45,7 @@ pub struct Args {
     /// Build and diff, write nothing
     #[arg(long)]
     pub dry_run: bool,
-    /// Render into page/skeleton.html and save to FILE; no wiki
+    /// Render into stack/wiki/page/skeleton.html and save to FILE; no wiki
     #[arg(long, value_name = "FILE")]
     pub out: Option<PathBuf>,
     /// Loop forever, one run every SECONDS
@@ -432,7 +431,8 @@ fn run(args: &Args) -> Result<(), Fatal> {
     let result;
 
     if let Some(out) = &args.out {
-        let skel = std::fs::read_to_string(SKELETON).map_err(|e| Fatal(format!("cannot read {SKELETON}: {e}")))?;
+        let skel = std::fs::read_to_string(render::SKELETON_PATH)
+            .map_err(|e| Fatal(format!("cannot read {}: {e}", render::SKELETON_PATH)))?;
         let doc = render::apply_regions(&skel, &regions)?;
         std::fs::write(out, &doc).map_err(|e| Fatal(format!("cannot write {}: {e}", out.display())))?;
         println!("wrote {} ({} bytes)", out.display(), thousands(doc.chars().count()));

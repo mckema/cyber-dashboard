@@ -7,8 +7,8 @@
 //!   3. Turn the GraphQL API on (it is off by default).
 //!   4. Create/refresh group "exploit-watch": read+write pages under CTP/run-books/,
 //!      plus manage:pages on the one page (needed to read it; see step_group).
-//!   5. Create the page CTP/run-books/Cyber-Exploit-Watch from page/skeleton.html
-//!      with page/style.css as scriptCss. Done as admin, because the bot key
+//!   5. Create the page CTP/run-books/Cyber-Exploit-Watch from stack/wiki/page/skeleton.html
+//!      with stack/wiki/page/style.css as scriptCss. Done as admin, because the bot key
 //!      deliberately lacks write:styles.
 //!   6. Create API key "exploit-watch" bound to that group, unless .env already holds
 //!      a working one (revoking older "exploit-watch" keys). The key is shown once,
@@ -50,10 +50,10 @@ const KEY_EXPIRATION: &str = "1y";
 #[derive(clap::Args)]
 pub struct Args {
     /// Page content used on create / --reseed
-    #[arg(long, default_value = "page/skeleton.html")]
+    #[arg(long, default_value = crate::render::SKELETON_PATH)]
     pub skeleton: PathBuf,
     /// scriptCss used on create / --update-css
-    #[arg(long, default_value = "page/style.css")]
+    #[arg(long, default_value = crate::render::STYLE_PATH)]
     pub css: PathBuf,
     /// Overwrite page content from --skeleton (as admin)
     #[arg(long)]

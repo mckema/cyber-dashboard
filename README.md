@@ -1,335 +1,339 @@
-# Cyber Threat Exploit Watch — scheduled rebuild
+# Cyber Threat Exploit Watch
 
-Keeps the runbook page at
-**[hostname]/run-books/Cyber-Exploit-Watch**
-current, by pulling five free public feeds on a schedule and writing the result
-back through the Wiki.js GraphQL API.
+Rebuilds the Wiki.js page `CTP/run-books/Cyber-Exploit-Watch` from free public
+vulnerability and advisory feeds, so the page always shows the last 7 days.
 
-No paid threat-intel subscription, no API account, no vendor platform.
+`Lab prototype` · `Local Docker Compose only` · `As of 2026-11-03`
 
-> **Fork note (ediphy-tthau, branch `feature/fr-a1-ingest-threat-feeds`, 2026-11-03).**
-> This fork extends the job to the eight sources named in FR-A1 (CISA KEV,
-> ENISA EUVD, CVE.org cvelistV5, NVD, GitHub, CERT-EU, NCSC-NL, CIRCL OSINT),
-> rewrites the job as a Rust binary (`exploit-watch run | bootstrap | demo`) and adds a
-> self-hosted Wiki.js stack under Docker Compose for local testing. How to run
-> and operate it: **[RUNBOOK.md](RUNBOOK.md)** (Vietnamese). The sections below are
-> the original design and still describe the IAP/WIF deployment path.
+## Contents
 
----
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [How a run works](#how-a-run-works)
+- [Feeds](#feeds)
+- [Getting started](#getting-started)
+- [Operations](#operations)
+- [Configuration](#configuration)
+- [State](#state)
+- [Development](#development)
+- [Known limitations](#known-limitations)
+- [Decisions](#decisions)
+- [Roadmap](#roadmap)
 
-## 1. What already exists
+## Overview
 
-The page is **live and working now**, built by hand on 17 Oct 2026. You are
-automating the refresh, not building the page.
+fairCT is the EU bond Consolidated Tape Provider built by Ediphy. Its DORA
+milestone MS-30 ("Cyber threat dashboard") has one intake requirement, FR-A1:
 
-| Thing | State |
+> Ingest threat feeds from free, credible sources (CERT-EU, ENISA, CISA KEV,
+> NCSC, NVD/CVE, MISP/CIRCL OSINT) into one dashboard. New items appear within
+> 1 hour of publication; source and timestamp shown for each item.
+
+This repository is a fork of Mark McKee's prototype `mckema/cyber-dashboard`
+(2026-10-17), which refreshed the page weekly from three feeds with a Python
+script. The fork:
+
+- reads eight feeds (the FR-A1 sources plus GitHub Advisory);
+- is a single Rust binary, `exploit-watch`;
+- runs against a self-hosted Wiki.js 2.5 in Docker Compose for testing. The
+  production page is on `wiki2.internal.ediphy.io` behind Google Cloud IAP and
+  is not written by this fork yet.
+
+The job only replaces content inside anchored elements of the page (table
+bodies, counters, a stamp). Prose on the page stays hand-editable.
+
+## Architecture
+
+Diagrams follow the [C4 model](https://c4model.com). Level 4 (code) is not
+drawn; [Deployment](#deployment) takes its place.
+
+```mermaid
+flowchart LR
+  classDef person fill:#08427b,stroke:#052e56,color:#fff
+  classDef system fill:#1168bd,stroke:#0b4884,color:#fff
+  classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+  classDef ext fill:#999,stroke:#6b6b6b,color:#fff
+
+  reader["Reader<br/>fairCT team"]:::person
+  op["Operator<br/>ISB Vietnam team"]:::person
+  ew["Exploit Watch<br/>rebuilds the page"]:::system
+  feeds["8 public feeds<br/>CISA KEV · ENISA EUVD · CVE.org · NVD<br/>GitHub Advisory · CERT-EU · NCSC-NL · CIRCL"]:::ext
+  wiki["Wiki.js<br/>page CTP/run-books/Cyber-Exploit-Watch"]:::ext
+
+  feeds -->|"HTTPS: JSON, CSV, RSS"| ew
+  ew -->|"GraphQL pages.update"| wiki
+  reader -->|reads| wiki
+  op -->|"bootstrap, run, reseed"| ew
+```
+
+*Level 1, System Context.*
+
+```mermaid
+flowchart LR
+  classDef container fill:#438dd5,stroke:#2e6295,color:#fff
+  classDef ext fill:#999,stroke:#6b6b6b,color:#fff
+
+  feeds["Public feeds"]:::ext
+  subgraph ew["Exploit Watch"]
+    job["job<br/>Rust binary exploit-watch<br/>run --every N"]:::container
+    state[("state/<br/>HTTP cache, cursors,<br/>seen.json, runs.jsonl")]:::container
+  end
+  subgraph wk["Wiki.js 2.5"]
+    app["wiki<br/>Node.js, GraphQL API"]:::container
+    db[("SQLite<br/>volume wiki-data")]:::container
+  end
+
+  feeds -->|"conditional GET (ETag, Range)"| job
+  job <-->|"read/write files"| state
+  job -->|"GraphQL: read page, update page"| app
+  app --> db
+```
+
+*Level 2, Container.*
+
+```mermaid
+flowchart TB
+  classDef component fill:#85bbf0,stroke:#5d82a8,color:#000
+  classDef ext fill:#999,stroke:#6b6b6b,color:#fff
+
+  main["main.rs<br/>CLI: run · bootstrap · demo"]:::component
+  run["run.rs<br/>window, merge, fingerprint, write"]:::component
+  feeds["feeds/*.rs<br/>one module per publisher"]:::component
+  common["feeds/common.rs<br/>Item contract, GET with ETag cache"]:::component
+  st["feeds/state.rs<br/>atomic files under state/"]:::component
+  render["render.rs<br/>HTML for tables and counters"]:::component
+  wiki["wiki.rs<br/>GraphQL client"]:::component
+  boot["bootstrap.rs<br/>admin setup, key, page, CSS"]:::component
+  wjs["Wiki.js"]:::ext
+
+  main --> run & boot & render
+  run --> feeds --> common --> st
+  run --> render
+  run --> wiki
+  boot --> wiki
+  wiki --> wjs
+```
+
+*Level 3, Component (inside the job).*
+
+### Deployment
+
+| Environment | Runtime | Wiki | Status (2026-11-03) |
+|---|---|---|---|
+| Local lab | Docker Compose: `wiki` + `job`, loop every 1800 s | Wiki.js 2.5.317, page id 1 | Running |
+| Production | Cloud Scheduler + Cloud Run Job, state in GCS | `wiki2.internal.ediphy.io` via IAP, page id 51 | Decided, not built |
+
+## How a run works
+
+1. Set the window to the last 7 days (UTC).
+2. Call each feed module in order. A module whose `CADENCE` has not elapsed
+   reuses the items of its last successful fetch (`state/items/`).
+3. Merge: CISA KEV and ENISA EUVD rows join by CVE into one "exploited" table;
+   NVD scores fill CVE.org records that have no CNA or CISA-ADP score;
+   CERT-EU and NCSC-NL share one advisory table.
+4. Render six tables (feed health, exploited, advisories, dependencies, CVEs,
+   OSINT) and the counters, and splice them into the current page by anchor id.
+5. Fingerprint the data, leaving out regions that change every run (health
+   table, health count, window label). Write only when the fingerprint changed,
+   when `HEARTBEAT_HOURS` has passed since the last write, or when the page no
+   longer carries the current data (after a reseed or a manual edit).
+6. Write with one `pages.update` call. `scriptCss` is never sent by the job.
+7. Record each item's first-seen time in `seen.json` and one line in `runs.jsonl`.
+
+| Condition | Result |
 |---|---|
-| Page | id **51**, path `CTP/run-books/Cyber-Exploit-Watch` |
-| Content | ~144 KB of HTML: prose, three tables, source cards |
-| Styling | ~11 KB in the page's **`scriptCss`** field — **leave this alone** |
-| `scriptJs` | Deliberately **empty**. See §7 — it does not work here |
-| Editor | `code` / contentType `html` |
-| Backend | SQLite |
+| CISA KEV or CVE.org cvelistV5 fails (the `CORE` feeds) | `FATAL`, nothing written, exit 1 |
+| Any other feed fails after an earlier success | Last good items reused, health row "Stale", page written, exit 0 |
+| Any other feed fails with no earlier success | Health row "Error", its table empty |
+| A feed module panics | Treated as that feed failing (`internal error: panic: …`) |
+| Every feed returns nothing | Refuses to publish, exit 1 |
+| A page anchor is missing | `page anchor … not found — re-seed the page skeleton`, exit 1 |
+| No data change, heartbeat not due | `skipping write`, no new page version |
+| `FATAL` while looping (`--every`) | Logged and recorded as `fatal`; next run proceeds |
 
-The job replaces **only** the three `<tbody>` elements and the counters. Prose,
-callouts and source cards stay hand-editable — reword the page freely and the
-next run will not clobber it.
+## Feeds
 
----
+| Source | Endpoint and method | Cadence | Timestamp shown |
+|---|---|---|---|
+| CISA KEV | `cisa.gov` catalog; on failure the GitHub mirror `cisagov/kev-data` with `If-None-Match` | every run | date |
+| ENISA EUVD | `/api/search?fromKEVDate&toKEVDate` (exploited entries only) | every run | date |
+| CVE.org cvelistV5 | Range read of `deltaLog.json` (`Accept-Encoding: identity`), then each changed record; first run backfills from daily zips | every run | second, UTC |
+| NVD API 2.0 | `lastModStartDate` from the cursor minus 15 min; scores only, merged into CVE.org rows | 2 h | — |
+| GitHub Advisory | `type=reviewed`, `published=<date>..<date>`, follows `Link: rel="next"` | every run | second, UTC |
+| CERT-EU | RSS every run; JSON per advisory only when new or changed | every run | second, UTC |
+| NCSC-NL | `changes.csv` with ETag; CSAF document only when new or changed | every run | second, UTC |
+| CIRCL OSINT | MISP `manifest.json` with ETag | every run | date |
 
-## 2. What you need to create
+Measured on 2026-11-03: a normal run makes about 10–40 requests, most answered
+`304 Not Modified`. The first cvelistV5 backfill took 105 requests and 46.7 MB.
 
-Three credentials. None exist yet.
+## Getting started
 
-### 2a. Turn the Wiki.js API on — *it is currently off*
-
-Checked on 17 Oct: `authentication.apiState` is `false` and there are no keys.
-**Nothing can write to the wiki until this is done.**
-
-1. Administration → API → **Enable API**
-2. Create a key, note it (shown once)
-3. Store as repo secret `WIKIJS_API_KEY`
-
-The key inherits the permissions of the group you attach it to. It needs
-`write:pages` on `CTP/run-books/*`. Don't give it admin.
-
-### 2b. A GCP service account that IAP will admit
+Requirements: Docker Desktop with Compose v2.20 or later (for `include`). No
+Rust toolchain is needed. Behind the corporate proxy, set `HTTP_PROXY` and
+`HTTPS_PROXY` on the host; Compose passes them to the build and the job.
 
 ```bash
-PROJECT=<your-project>
-
-gcloud iam service-accounts create exploit-watch-bot \
-  --project="$PROJECT" \
-  --display-name="Exploit Watch page rebuilder"
-
-# Grant access to the IAP-protected resource. Scope this to the specific
-# backend service, not the whole project.
-gcloud iap web add-iam-policy-binding \
-  --resource-type=backend-services \
-  --service=<wiki-backend-service> \
-  --member="serviceAccount:exploit-watch-bot@$PROJECT.iam.gserviceaccount.com" \
-  --role="roles/iap.httpsResourceAccessor"
+docker compose up -d --wait wiki
+docker compose run --rm job bootstrap        # once: admin, API key, page; writes .env
+docker compose run --rm job run --dry-run    # fetch and diff, write nothing
+docker compose up -d                         # start the job loop
 ```
 
-### 2c. Workload Identity Federation, so Actions needs no key file
+The page is at http://localhost:3000/en/CTP/run-books/Cyber-Exploit-Watch.
+Run commands from the repository root (Git Bash on Windows).
+
+## Operations
 
 ```bash
-REPO=<org>/<repo>
-
-gcloud iam workload-identity-pools create github \
-  --project="$PROJECT" --location=global \
-  --display-name="GitHub Actions"
-
-gcloud iam workload-identity-pools providers create-oidc github \
-  --project="$PROJECT" --location=global \
-  --workload-identity-pool=github \
-  --issuer-uri="https://token.actions.githubusercontent.com" \
-  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
-  --attribute-condition="assertion.repository=='$REPO'"
-
-PROJECT_NUM=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
-
-gcloud iam service-accounts add-iam-policy-binding \
-  "exploit-watch-bot@$PROJECT.iam.gserviceaccount.com" \
-  --project="$PROJECT" \
-  --role="roles/iam.workloadIdentityUser" \
-  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUM/locations/global/workloadIdentityPools/github/attribute.repository/$REPO"
+docker compose ps
+docker compose logs -f job
+docker compose run --rm job run                          # one run now
+docker compose run --rm job run --out state/out.html     # render with live data, no write
+docker compose run --rm job bootstrap --update-css       # after editing stack/wiki/page/style.css
+docker compose run --rm job bootstrap --reseed --update-css && docker compose run --rm job run
+                                                         # after editing stack/wiki/page/skeleton.html
+docker compose run --rm job bootstrap --purge-history P7D   # drop page versions older than 7 days (all pages)
+docker compose build job                                 # after any change under src/
+tail -5 state/runs.jsonl
 ```
 
-The `attribute-condition` pinning the repo matters. Without it, any GitHub repo
-anywhere can impersonate this service account.
+`bootstrap` is idempotent: a second run keeps the existing key
+(`bootstrap ok (.env unchanged)`). After `docker compose down -v` the wiki's
+admin and key are gone; run `bootstrap` again to recreate them.
 
----
+## Configuration
 
-## 3. The bit that catches people: two stacked auth layers
+Read from `.env` (created by `bootstrap` from `.env.example`) and the
+environment. Compose overrides `WIKI_BASE` and `STATE_DIR` for the job.
 
-The wiki sits behind **two independent gates**, and they both want the
-`Authorization` header.
+| Variable | Default | Used for |
+|---|---|---|
+| `WIKI_BASE` | `https://wiki2.internal.ediphy.io` (compose: `http://wiki:3000`) | Wiki.js URL |
+| `WIKI_PAGE_ID` | `51` (local bootstrap writes `1`) | Page to update |
+| `WIKIJS_API_KEY` | — | Bot key, sent as `Authorization` |
+| `IAP_ID_TOKEN` | — | Google OIDC token, sent as `Proxy-Authorization` (behind IAP only) |
+| `WIKI_ADMIN_EMAIL`, `WIKI_ADMIN_PASSWORD` | `admin@example.com`, generated | Local admin, used by `bootstrap` only |
+| `STATE_DIR` | `./state` | Job state |
+| `INTERVAL_SECONDS` | `1800` | Seconds between runs in the compose loop |
+| `HEARTBEAT_HOURS` | `6` | Rewrite the page after this long without a data change |
+| `CVE_ROW_CAP` | `300` | Rows shown in the CVE table |
+| `GITHUB_TOKEN` | — | Raises the GitHub API limit from 60 to 5,000 requests/h |
+| `NVD_API_KEY` | — | Removes the 6 s pause between NVD pages |
+| `USER_AGENT` | built-in | User-Agent for feed requests; CERT-EU rejects requests without one |
 
-```
-GitHub Actions
-      │  Proxy-Authorization: Bearer <google-oidc-id-token>   ← outer gate
-      │  Authorization:       Bearer <wikijs-api-key>         ← inner gate
-      ▼
- Google Cloud IAP  ──consumes Proxy-Authorization, forwards Authorization──▶  Wiki.js
-```
+Do not put `$` or quotes in `.env` values: Compose reads the file too.
 
-IAP consumes `Authorization` and **never forwards it**, so a Wiki.js key sent
-that way vanishes in transit and you get a confusing 401 from the app. Sending
-the IAP token as `Proxy-Authorization` instead leaves `Authorization` free for
-Wiki.js. `rebuild.py` already does this (`wiki_headers()`).
+## State
 
-**IAP audience (the OIDC token's `aud`):**
+`state/` is gitignored, owned by uid 1000 (the job's user), and was about
+16 MB on 2026-11-03.
 
-```
-67656592571-61jia7k51h2f8nvej0osatfguirrhsc2.apps.googleusercontent.com
-```
-
-Read off the sign-in redirect from `my_host` on 17 Oct 2026.
-Confirm before relying on it: GCP Console → Security → Identity-Aware Proxy →
-select the resource → ⋮ → **OAuth credentials**.
-
-`id_token_include_email: true` in the workflow is **not optional** — IAP rejects
-service-account tokens that omit the email claim.
-
----
-
-## 4. Repo layout
-
-```
-.
-├── README.md
-├── rebuild.py
-└── .github/workflows/exploit-watch.yml
-```
-
-Drop these into any repo the team already owns. Nothing here is specific to a
-particular repo beyond the WIF binding in §2c.
-
-### Repo configuration
-
-**Secrets** (Settings → Secrets and variables → Actions → Secrets):
-
-| Name | Value |
+| Path | Content |
 |---|---|
-| `WIKIJS_API_KEY` | from §2a |
+| `http/` | Conditional-GET cache: ETag and body of the last `200` |
+| `items/<module>.json` | Items of each feed's last successful fetch |
+| `cursors/` | Per-feed cursors: cvelistV5 `fetchTime`, NVD and CVE stores, CERT-EU and NCSC-NL caches |
+| `seen.json` | Item key → first-seen time, kept 30 days |
+| `wiki.json` | Data fingerprint and time of the last write |
+| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `lag_max_min`, `over_sla` |
 
-**Variables** (same page, Variables tab):
+Reset only what you need: deleting `http/` forces full downloads; deleting
+`cursors/cvelist*` forces a 7-day backfill (about 47 MB); deleting `seen.json`
+makes the next run a baseline with no lag measured. If a root container
+created files in `state/`, the job cannot write them; fix with
+`MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/app" debian:bookworm-slim chown -R 1000:1000 /app/state`.
 
-| Name | Example |
-|---|---|
-| `GCP_WIF_PROVIDER` | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github` |
-| `GCP_SERVICE_ACCOUNT` | `exploit-watch-bot@your-project.iam.gserviceaccount.com` |
-| `IAP_CLIENT_ID` | the audience from §3 |
+## Development
 
-`GITHUB_TOKEN` is supplied automatically by Actions — it lifts the GitHub
-advisories limit from 60 req/hour per IP to 1,000 per repository (5,000 is the
-figure for a personal access token), which matters because GitHub-hosted runners
-share egress IPs.
+```
+compose.yml                 includes stack/wiki and stack/job (project_directory ".")
+stack/wiki/compose.yml      Wiki.js service and volumes
+stack/wiki/page/            skeleton.html (page content with anchor ids), style.css (scriptCss)
+stack/job/compose.yml       job service
+stack/job/Dockerfile        build on rust:1.99.1-slim-bookworm, run on debian:bookworm-slim as uid 1000
+src/                        crate exploit-watch (Rust 1.99, edition 2024)
+tests/fixtures/             trimmed real payloads for unit tests and demo
+```
 
----
-
-## 5. First run
-
-Dry run first. It fetches, builds, diffs and writes **nothing**:
+Unit tests run in a container and make no network calls. Add a test name to
+run one test; add `-- --ignored` for the tests that call the live feeds.
 
 ```bash
-gh workflow run exploit-watch.yml -f dry_run=true
+MSYS_NO_PATHCONV=1 docker run --rm -e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTTPS_PROXY \
+  -v cargo-registry:/usr/local/cargo/registry -v ew-target:/target -e CARGO_TARGET_DIR=/target \
+  -v "$(pwd -W):/src" -w /src rust:1.99.1-slim-bookworm cargo test --quiet
 ```
 
-Expected output:
+`exploit-watch demo OUT.html [--dark]` renders the page from
+`tests/fixtures/render_items.json` for visual review.
 
-```
-window 2026-10-12 -> 2026-10-19
-  KEV            9  (catalog 2026.10.16)
-  NVD crit      27
-  NVD high      98
-  GitHub        71
-content 144132 -> 144580 bytes
-dry run: not writing
-```
+To add a feed, write a module in `src/feeds/` that follows the contract at the
+top of `src/feeds/common.rs` (`NAME`, `TABLE`, `CADENCE`, `fetch(start, end)`
+returning all items or an error, never a partial list) and list it in
+`feeds::all()`. Page markup must not use inline `style` attributes; all styling
+goes in `stack/wiki/page/style.css` (see [Known limitations](#known-limitations)).
 
-Then let it write:
+## Known limitations
 
-```bash
-gh workflow run exploit-watch.yml
-```
+Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 
-Locally, if you have an IAP token to hand:
+**Wiki.js**
 
-```bash
-export WIKIJS_API_KEY=...
-export IAP_ID_TOKEN=$(gcloud auth print-identity-token \
-  --audiences=67656592571-61jia7k51h2f8nvej0osatfguirrhsc2.apps.googleusercontent.com \
-  --impersonate-service-account=exploit-watch-bot@$PROJECT.iam.gserviceaccount.com \
-  --include-email)
-python rebuild.py --dry-run
-```
+- The HTML sanitiser strips `<style>`, `<script>` and `<link>` and mangles long
+  inline `style` attributes, so the page has no JavaScript and no inline styles.
+- `pages.single` checks `manage:pages`, not `read:pages`. The bot key's group has
+  `read:pages`/`write:pages` on `CTP/run-books/` and `manage:pages` on this page only.
+- A wrong key does not return 401: an unknown key reads as guest (HTTP 200,
+  "not authorized"); a revoked key or a disabled API returns HTTP 500.
+- An admin `pages.update` without `scriptCss` clears the page CSS; `bootstrap`
+  always resends it. The bot key has no `write:styles`, so job writes keep it.
+- Every update creates a page version (about 330 KB each). Old versions are
+  removed only by `bootstrap --purge-history`, as admin.
+- `pages.create` reports a misleading "not authorized to delete" message on
+  refusal; only its error code is reliable.
+- Behind the corporate proxy the local wiki cannot fetch its locale files, so
+  its chrome shows raw keys such as `header.search`. The page is not affected.
 
----
+**Feeds**
 
-## 6. What the job does
+- `cisa.gov` returns 403 through the corporate proxy; KEV is read from the
+  GitHub mirror, which trailed catalog releases by 1.1–4.4 h (8 releases,
+  2026-10-21..30).
+- NVD scores few new CVEs: a severity filter returned 156 of 3,371 CVEs over
+  7 days. NVD is used for scores only.
+- The GitHub API allows 60 unauthenticated requests per hour per IP, shared by
+  everyone behind the proxy; `304` responses still count.
+- CERT-EU's RSS dates carry a "CEST" label; the job uses the per-advisory JSON
+  time (UTC). Whether the label changes to "CET" in winter is not verified.
+- Some NCSC-NL documents have only a CVSS 4.0 vector in a note; those items show
+  no score. NCSC-NL titles are in Dutch.
+- CIRCL OSINT has had no new event since 2026-08-13.
+- The CVE table shows the first 300 rows by score (`CVE_ROW_CAP`).
+- Items with a date only (KEV, EUVD, CIRCL) have no measurable lag.
 
-1. Rolling 7-day window from "now" (UTC).
-2. `GET` CISA KEV — from `cisa.gov` directly.
-3. `GET` NVD critical, pause 7s, `GET` NVD high *(5 req/30s unauthenticated)*.
-4. `GET` GitHub advisories `type=reviewed`, critical then high — one call each.
-5. Build the three tables as HTML using the classes the page's CSS already styles.
-6. Read the current page, splice rows into the three `<tbody>`s, update the four
-   stat tiles, three counts, window label and rebuild stamp.
-7. SHA-256 the result; **skip the write entirely if nothing changed**.
-8. One `pages.update` mutation.
+## Decisions
 
-Takes ~15 seconds, five outbound requests, at most one write.
+| Date | Decision | By | Status |
+|---|---|---|---|
+| 2026-11-03 | Build FR-A1 on the prototype: fork, all FR-A1 sources, self-hosted Wiki.js for testing | ISB Vietnam team lead | Decided |
+| 2026-11-03 | "NCSC" in FR-A1 means NCSC-NL | Mark McKee | Decided |
+| 2026-11-03 | Run every 6 hours instead of every 30 minutes | Mark McKee | Decided, not yet applied |
+| 2026-11-03 | Drop CIRCL OSINT | Mark McKee | Decided, not yet applied |
+| 2026-11-03 | Accept the KEV GitHub mirror as fallback until `cisa.gov` is rechecked from GCP | Mark McKee | Decided |
+| 2026-11-03 | "Within 1 hour" is not a hard rule; measure lag from first publication only | Mark McKee | Decided, not yet applied |
+| 2026-11-03 | FR-A2: items matching no fairCT component are marked not relevant by rule; rule name and version recorded as triager | Mark McKee | Decided, not built |
+| 2026-11-03 | Component list: a small test list (Rust or UI libraries) for now; final list to be agreed with Germano | Mark McKee | Decided |
+| 2026-11-03 | FR-A9: a Linear ticket is sufficient for now | Mark McKee | Decided |
+| 2026-11-03 | Production runtime: Cloud Scheduler + Cloud Run Job | Mark McKee | Decided, deferred until the local workflow is verified |
+| 2026-11-03 | Do not create the prototype's GitHub Actions workflow for now | ISB Vietnam team | Decided |
 
----
+## Roadmap
 
-## 7. Wiki.js quirks — learned the hard way, don't re-derive
-
-These were found by trial against *this* instance on 17 Oct. They are encoded in
-`rebuild.py`; this section is so you know why the code looks the way it does.
-
-**Page content is sanitised.** `<style>`, `<script>` and `<link>` are stripped
-from page content. Short `style="..."` attributes survive; **long
-multi-declaration ones get mangled** — the renderer splits them on spaces into
-junk pseudo-attributes (`padding:30px="" 32px;`). Do not try to style this page
-with inline styles. The CSS belongs in `scriptCss`, where it already is.
-
-**`scriptJs` is not executed.** On this version it is dumped into `<body>` as raw
-markup, so the HTML fragments inside JS string literals get parsed as elements
-and splatter across the page. It is deliberately empty. **There is no way to run
-JavaScript on a Wiki.js page here** unless an admin disables
-*Administration → Rendering → html → Sanitize HTML* — which is global and would
-let any wiki editor run script on your IAP-authenticated origin. That is why the
-page has no in-page refresh button and is regenerated by this job instead.
-
-*Fork note (2026-11-03):* the Wiki.js 2.5 source injects the field verbatim
-(`injectCode.body += page.extra.js`), so code wrapped in a `<script>` tag would
-probably run, which is a reason to keep this field empty rather than proof that
-script cannot run. Not tested.
-
-**GraphQL `pages.update`:**
-
-| Quirk | Symptom if ignored |
-|---|---|
-| `tags` is required | `Cannot read properties of undefined (reading 'map')` |
-| `content` is required, even when changing only CSS | `Page content cannot be empty` |
-| Don't request `page { ... }` in the response | `Cannot return null for non-nullable field Page.editor` — **while the write succeeds**, so it looks like a failure and isn't |
-| `editor` cannot be changed by `update` | Silently ignored; use `pages.convert` |
-
-**`scriptCss` is only ever written by hand.** The job never touches it. If the
-page's look needs changing, edit that field directly.
-
----
-
-## 8. Failure behaviour
-
-All-or-nothing on anything that matters. A stale brief beats a half-populated one.
-
-| Condition | Behaviour |
-|---|---|
-| CISA KEV or either NVD call fails | Nothing written, exit 1 |
-| GitHub 403/429 | Exit 1 with an explicit rate-limit message |
-| All feeds return empty | Refuses to publish, exit 1 |
-| A page anchor id is missing | Exit 1 naming the anchor (someone rewrote the skeleton — re-seed it) |
-| Redirected to `accounts.google.com` | Exit 1: IAP token missing/expired, or the SA lacks `roles/iap.httpsResourceAccessor` |
-| HTTP 401 from Wiki.js | Exit 1: API disabled, or key wrong/revoked |
-| Nothing changed since last run | Logs and exits 0 without writing |
-
-Non-zero exit fails the workflow, which is what should page you. Consider adding
-a notification step on `failure()`.
-
----
-
-## 9. Operational notes
-
-**SQLite + version history.** Every write creates a new page version at ~144 KB.
-Weekly is ~52/year (~7 MB) — fine. Daily would be ~365/year (~50 MB) and wants
-periodic history pruning. The cron is currently **Fridays 07:00 UTC**; change it
-in the workflow if you want a different cadence.
-
-**Rate limits.** NVD allows 5 req/30s unauthenticated — hence the 7-second pause,
-which is skipped automatically if you set `NVD_API_KEY` (free, optional). GitHub
-is handled by the built-in `GITHUB_TOKEN`.
-
-**The feeds move under you.** Between two pulls 40 minutes apart on 17 Oct, NVD
-re-scored the same week from 20 critical / 113 high to 27 / 98. Same 133 CVEs,
-different severities. Counts shifting between runs is normal, not a bug.
-
-**Severity is not risk.** The page says this and it bears repeating: CVSS scores
-the flaw, not your exposure. The exploited-in-the-wild table is first because it
-is ordered by evidence rather than theory.
-
-**NVD scoring lags badly.** In the 10–17 Oct window NVD published 5,531 CVEs and
-had scored 409 of them — about one in thirteen. A severity filter hides
-everything still awaiting analysis, so an empty NVD table is not an all-clear.
-The GitHub feed is less affected because reviewed entries are scored on intake.
-
----
-
-## 10. Known limitations
-
-- **No in-page refresh button.** Blocked by the sanitiser, §7. The only route to
-  one is disabling Sanitize HTML globally.
-- **Single page, hardcoded id 51.** Fine for one runbook; parameterise if this
-  pattern spreads.
-- **The window is wall-clock, not a diff.** Each run replaces the whole table
-  with the last 7 days. Something dropping off the bottom is not flagged.
-- **Untested end-to-end.** The GraphQL calls are proven — they are exactly what
-  built the live page — but the IAP service-account path has never run, because
-  the Wiki.js API was off and no service account existed. §5's dry run is the
-  first real test. Expect to iterate on §2b–2c, not on the script.
-
----
-
-## 11. Related files
-
-In `~/Documents/claude/` on Mark's machine:
-
-- `Cyber-Exploit-Watch.html` — the fully interactive single-file version, with a
-  working refresh button. Only usable if Sanitize HTML is ever turned off, or
-  served from somewhere other than the wiki. Opened as a local `file://` URL its
-  button works, which is a handy way to see the intended design.
-- `Cyber-Exploit-Watch-WIKI.html` — **deprecated, do not paste into the wiki.**
-  This is the inline-styled version whose `style` attributes the renderer
-  mangles. It is what produced the garbage on `/en/home`. Delete it.
+| Item | Requirement | Status (2026-11-03) |
+|---|---|---|
+| Apply the 6-hour cadence, drop CIRCL, lag from first publication | FR-A1 | Next |
+| Match items against a component list; mark non-matches by rule | FR-A2 | Planned |
+| One Linear issue per matched item in the Triage inbox; untriaged and open-ticket tables on the page | FR-A2, FR-A3, FR-A9 | Planned (local, fake tracker first) |
+| Monthly and on-demand report to the fairCT COO | FR-A4 | Not started |
+| Cloud Run Job, Cloud Scheduler, GCS state, Terraform; write to `wiki2` via IAP | — | Deferred |

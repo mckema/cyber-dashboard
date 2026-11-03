@@ -1,11 +1,7 @@
-# Local stack: self-hosted Wiki.js 2.x + the Exploit Watch job, every 30 min.
-#
-#   docker compose up -d wiki
-#   docker compose run --rm job bootstrap                  # once; writes .env
-#   docker compose up -d                                   # starts the job loop
+# Self-hosted Wiki.js 2.x that the job writes the Exploit Watch page to.
+# Included from ../../compose.yml with project_directory "." (the repo root).
 #
 # Wiki UI: http://localhost:3000 (bound to 127.0.0.1 only).
-name: exploit-watch
 
 services:
   wiki:
@@ -18,7 +14,7 @@ services:
       DB_FILEPATH: /wiki/data/db.sqlite
       # No proxy env here: Wiki.js uses Node's fetch, which ignores HTTP(S)_PROXY,
       # so locale sync fails behind the corporate proxy either way (cosmetic: the
-      # wiki chrome shows raw keys such as header.search). See RUNBOOK §11.
+      # wiki chrome shows raw keys such as header.search). See README.md, Known limitations.
     volumes:
       # The image runs as non-root `node` (uid 1000). An empty named volume is
       # seeded from the image's /wiki/data, which is owned by node, so the DB file
@@ -38,37 +34,6 @@ services:
       timeout: 5s
       retries: 6
       start_period: 30s
-    restart: unless-stopped
-
-  job:
-    build:
-      context: .
-      args:
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
-        NO_PROXY: wiki,localhost,127.0.0.1
-    image: exploit-watch-job
-    env_file:
-      - path: .env
-        required: false   # `exploit-watch bootstrap` creates it on first run
-    environment:
-      # Containers have no Internet without the proxy (DNS fails). NO_PROXY keeps
-      # Wiki.js traffic on the compose network instead of going via the proxy.
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: wiki,localhost,127.0.0.1
-      # These override any value in .env.
-      WIKI_BASE: http://wiki:3000
-      STATE_DIR: /app/state
-    volumes:
-      # Repo bind mount for state/, page/, .env and tests/fixtures (demo). The
-      # binary is in the image: code changes need `docker compose build job`.
-      - .:/app
-    # The image's entrypoint is `exploit-watch`; this is its subcommand.
-    command: ["run", "--every", "${INTERVAL_SECONDS:-1800}"]
-    depends_on:
-      wiki:
-        condition: service_healthy
     restart: unless-stopped
 
 volumes:

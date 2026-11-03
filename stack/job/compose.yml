@@ -1,0 +1,36 @@
+# The Exploit Watch job: `exploit-watch run --every N` against the wiki service.
+# Included from ../../compose.yml with project_directory "." (the repo root), so
+# every relative path below is relative to the repo root.
+
+services:
+  job:
+    build:
+      context: .
+      dockerfile: stack/job/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: wiki,localhost,127.0.0.1
+    image: exploit-watch-job
+    env_file:
+      - path: .env
+        required: false   # `exploit-watch bootstrap` creates it on first run
+    environment:
+      # Containers have no Internet without the proxy (DNS fails). NO_PROXY keeps
+      # Wiki.js traffic on the compose network instead of going via the proxy.
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: wiki,localhost,127.0.0.1
+      # These override any value in .env.
+      WIKI_BASE: http://wiki:3000
+      STATE_DIR: /app/state
+    volumes:
+      # Repo bind mount for state/, stack/wiki/page/, .env and tests/fixtures
+      # (demo). The binary is in the image: code changes need `docker compose build job`.
+      - .:/app
+    # The image's entrypoint is `exploit-watch`; this is its subcommand.
+    command: ["run", "--every", "${INTERVAL_SECONDS:-1800}"]
+    depends_on:
+      wiki:
+        condition: service_healthy
+    restart: unless-stopped
