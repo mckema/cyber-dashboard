@@ -1,163 +1,148 @@
-<div class="xw">
-
-<div class="hero">
+<div id="ew">
+<header class="masthead"><div class="wrap">
 <p class="eyebrow">Cyber threat brief &middot; rolling seven days &middot; all times UTC</p>
-<h2 class="xh">Exploit Watch</h2>
-<p class="lede">Every exploited, critical and high-severity item published in the last seven days, pulled from eight free public feeds that need no account. Each row names its source and its publication time in UTC. Start at the top: the health table says whether every feed is current, and the first data table is what attackers are already using.</p>
-<div class="strip">
-<div class="kv"><span class="k">Window</span><span class="v" id="winlabel">not generated yet</span></div>
-<div class="kv"><span class="k">Sources</span><span class="v">CISA KEV &middot; ENISA EUVD &middot; CVE.org &middot; NVD &middot; GitHub &middot; CERT-EU &middot; NCSC-NL &middot; CIRCL</span></div>
-<div class="kv"><span class="k">Auth required</span><span class="v">none</span></div>
-</div>
+<h1>Weekly Exploit Watch</h1>
+<p class="dek">Every exploited, critical and high-severity item published in the last seven days, pulled from eight public feeds that cost nothing and need no account. Each row names its source and its publication time. Start at the top: the health table says whether every feed is current, and the first data table is what attackers are already using.</p>
+<div class="stamp"><span>Window <b id="winlabel">not generated yet</b></span> <span>Sources <b>CISA KEV &middot; ENISA EUVD &middot; CVE.org &middot; NVD &middot; GitHub &middot; CERT-EU &middot; NCSC-NL &middot; CIRCL</b></span> <span>Auth required <b>none</b></span></div>
+</div></header>
 <div class="refresh"><div class="wrap"><div class="rstat" id="rstat">Not generated yet.</div></div></div>
+<div class="triage">
+<div class="tile t-exp"><div class="n" id="s-kev">0</div><div class="l">Confirmed exploited in the wild (CISA KEV, ENISA EUVD)</div></div>
+<div class="tile t-crit"><div class="n" id="s-crit">0</div><div class="l">Critical CVEs (CVSS 9.0&ndash;10.0)</div></div>
+<div class="tile t-high"><div class="n" id="s-high">0</div><div class="l">High CVEs (CVSS 7.0&ndash;8.9)</div></div>
+<div class="tile"><div class="n" id="s-dep">0</div><div class="l">Advisories mapped to a package and a fixed version</div></div>
+<div class="tile"><div class="n" id="s-adv">0</div><div class="l">EU and national advisories (CERT-EU, NCSC-NL)</div></div>
+<div class="tile"><div class="n" id="s-osint">0</div><div class="l">OSINT events (CIRCL MISP feed)</div></div>
 </div>
+<main class="wrap">
 
-<div class="stats">
-<div class="stat stat-exp"><span class="n" id="s-kev">0</span><span class="l">Confirmed exploited in the wild (CISA KEV, ENISA EUVD)</span></div>
-<div class="stat stat-crit"><span class="n" id="s-crit">0</span><span class="l">Critical CVEs (CVSS 9.0&ndash;10.0)</span></div>
-<div class="stat stat-high"><span class="n" id="s-high">0</span><span class="l">High CVEs (CVSS 7.0&ndash;8.9)</span></div>
-<div class="stat stat-dep"><span class="n" id="s-dep">0</span><span class="l">Package advisories with a fixed version (GitHub)</span></div>
-<div class="stat stat-adv"><span class="n" id="s-adv">0</span><span class="l">EU and national advisories (CERT-EU, NCSC-NL)</span></div>
-<div class="stat stat-osint"><span class="n" id="s-osint">0</span><span class="l">OSINT events (CIRCL MISP feed)</span></div>
+<section class="block" id="health">
+<div class="shead"><h2>Feed health</h2><span class="count" id="n-health">0 feeds</span></div>
+<p class="snote">FR-A1 asks for threat items from free, credible sources in one place, with the source and timestamp shown for each item and new items appearing within one hour of publication. This table is how to check that on any given day: one row per feed, its status on the last run, how many items it contributed to this window, its newest item and its last successful fetch.</p>
+<div class="legend">
+<p><span class="hs hs-ok">OK</span> fetched on this run. <span class="hs hs-ok">Not modified</span> the source answered HTTP 304: nothing new since the previous fetch.</p>
+<p><span class="hs hs-cached">Cached</span> not fetched on this run (the feed is polled less often than the page is rebuilt); the rows come from the last successful fetch.</p>
+<p><span class="hs hs-stale">Stale</span> the last successful fetch is older than the feed's polling interval allows; rows may be missing.</p>
+<p><span class="hs hs-error">Error</span> the fetch failed on this run; the note says why. A failure of CISA KEV or CVE.org stops the run, so the page is never half-updated.</p>
 </div>
-
-<div class="sec">
-<div class="sec-head"><h2 class="xh">Feed health</h2><span class="cnt" id="n-health">0 feeds</span></div>
-<p class="intro">FR-A1 asks for threat items from free, credible sources in one place, with the source and timestamp shown for each item and new items appearing within one hour of publication. This table is how to check that on any given day: one row per feed, its status on the last run, how many items it contributed to this window, its newest item and its last successful fetch.</p>
-<ul class="legend">
-<li><span class="hs hs-ok">OK</span> fetched on this run. <span class="hs hs-ok">Not modified</span> the source answered HTTP 304: nothing new since the previous fetch.</li>
-<li><span class="hs hs-cached">Cached</span> not fetched on this run (the feed is polled less often than the page is rebuilt); the rows come from the last successful fetch.</li>
-<li><span class="hs hs-stale">Stale</span> the last successful fetch is older than the feed's polling interval allows; rows may be missing.</li>
-<li><span class="hs hs-error">Error</span> the fetch failed on this run; the note says why. A failure of CISA KEV or CVE.org stops the run, so the page is never half-updated.</li>
-</ul>
-<div class="tw"><table class="xt t-health">
-<thead><tr><th>Feed</th><th>Status</th><th class="num">Items</th><th>Newest item (UTC)</th><th>Last success (UTC)</th><th>Note</th></tr></thead>
+<div class="scroller"><table>
+<thead><tr><th>Feed</th><th>Status</th><th class="num">Items</th><th>Newest item</th><th>Last success</th><th>Note</th></tr></thead>
 <tbody id="t-health"><tr><td colspan="6" class="empty">Not generated yet.</td></tr></tbody>
 </table></div>
-</div>
+</section>
 
-<div class="sec">
-<div class="sec-head"><h2 class="xh">Confirmed exploited in the wild</h2><span class="cnt" id="n-kev">0 entries</span></div>
-<p class="intro">CISA adds a CVE to its Known Exploited Vulnerabilities (KEV) catalog only when it has evidence of active exploitation. ENISA's EU Vulnerability Database (EUVD) flags exploited CVEs from a European perspective. A CVE listed by both appears once, with both source labels. US federal agencies get a binding remediation deadline (Fix due, CISA only); for everyone else this is the best free signal of what to patch first.</p>
-<div class="callout warn"><p><b>Edge devices.</b> If you run any of these at the edge &mdash; a VPN concentrator, a firewall, a mail gateway, a support appliance &mdash; treat it as an incident, not a patch ticket. Many entries are unauthenticated remote code execution on devices that terminate untrusted traffic, and public exploitation often predates the fix.</p></div>
-<div class="tw"><table class="xt t-kev">
-<thead><tr><th>CVE</th><th>Product</th><th>Weakness</th><th>Added (UTC)</th><th>Fix due</th></tr></thead>
+<section class="block" id="kev">
+<div class="shead"><h2>Confirmed exploited in the wild</h2><span class="count" id="n-kev">0 entries</span></div>
+<p class="snote">CISA adds a CVE to its Known Exploited Vulnerabilities (KEV) catalog only when it has evidence of active exploitation. ENISA's EU Vulnerability Database (EUVD) flags exploited CVEs from a European perspective; a CVE listed by both appears once, with both source labels. US federal agencies get a binding remediation deadline (Fix due, CISA only); for everyone else this is the single best free signal of what to patch first.</p>
+<div class="callout"><b>If you run any of these at the edge</b> &mdash; a VPN concentrator, a firewall, a mail gateway, a support appliance &mdash; treat it as an incident, not a patch ticket. Many entries are unauthenticated remote code execution on devices that terminate untrusted traffic, and public exploitation often predates the fix.</div>
+<div class="scroller"><table>
+<thead><tr><th>CVE</th><th>Product</th><th>Weakness</th><th>Added</th><th>Fix due</th></tr></thead>
 <tbody id="t-kev"><tr><td colspan="5" class="empty">Not generated yet.</td></tr></tbody>
 </table></div>
-</div>
+</section>
 
-<div class="sec">
-<div class="sec-head"><h2 class="xh">EU and national advisories</h2><span class="cnt" id="n-adv">0 advisories</span></div>
-<p class="intro">CERT-EU writes advisories for EU institutions, bodies and agencies. NCSC-NL, the Dutch National Cyber Security Centre, publishes machine-readable CSAF advisories rated by probability and impact: <b>P</b> is the chance of abuse and <b>I</b> the damage if abused, each High, Medium or Low (NCSC-NL's own "Kans" and "Schade"). NCSC-NL titles are in Dutch. A revised advisory updates its row, marked <i>updated</i>, instead of adding a new one.</p>
-<div class="tw"><table class="xt t-adv">
-<thead><tr><th>Advisory</th><th>Source</th><th>Published (UTC)</th><th>Title</th><th>CVEs</th><th>Rating</th></tr></thead>
-<tbody id="t-adv"><tr><td colspan="6" class="empty">Not generated yet.</td></tr></tbody>
+<section class="block" id="adv">
+<div class="shead"><h2>EU and national advisories</h2><span class="count" id="n-adv">0 advisories</span></div>
+<p class="snote">CERT-EU writes advisories for EU institutions, bodies and agencies. NCSC-NL, the Dutch National Cyber Security Centre, publishes machine-readable CSAF advisories rated by probability and impact: <b>P</b> is the chance of abuse and <b>I</b> the damage if abused, each High, Medium or Low (NCSC-NL's own &ldquo;Kans&rdquo; and &ldquo;Schade&rdquo;). NCSC-NL titles are in Dutch. A revised advisory updates its row, marked <em>updated</em>, instead of adding a new one.</p>
+<div class="scroller"><table>
+<thead><tr><th>Advisory</th><th>Published</th><th>Title</th><th>CVEs</th><th>Rating</th></tr></thead>
+<tbody id="t-adv"><tr><td colspan="5" class="empty">Not generated yet.</td></tr></tbody>
 </table></div>
-</div>
+</section>
 
-<div class="sec">
-<div class="sec-head"><h2 class="xh">Advisories mapped to a package you may depend on</h2><span class="cnt" id="n-dep">0 advisories</span></div>
-<p class="intro">These come from GitHub's human-reviewed advisory set, the only feed here that names the exact package and the first fixed version. If you want an answer to "does this affect our applications" rather than "is this bad in general", this is the table to diff against your lockfiles.</p>
-<div class="tw"><table class="xt t-dep">
+<section class="block" id="deps">
+<div class="shead"><h2>Advisories mapped to a package you may depend on</h2><span class="count" id="n-dep">0 advisories</span></div>
+<p class="snote">These come from GitHub&rsquo;s human-reviewed advisory set, the only feed here that names the exact package and the first fixed version. If you want an answer to &ldquo;does this affect <em>our</em> applications&rdquo; rather than &ldquo;is this bad in general&rdquo;, this is the table to diff against your lockfiles.</p>
+<div class="scroller"><table>
 <thead><tr><th>Advisory</th><th>Sev</th><th>Ecosystem</th><th>Package</th><th>Fixed in</th><th>Issue</th></tr></thead>
 <tbody id="t-dep"><tr><td colspan="6" class="empty">Not generated yet.</td></tr></tbody>
 </table></div>
-</div>
+</section>
 
-<div class="sec">
-<div class="sec-head"><h2 class="xh">Critical and high CVEs</h2><span class="cnt" id="n-nvd">0 CVEs</span></div>
-<p class="intro">New CVE records from CVE.org's cvelistV5 repository. The score is the one in the CVE record itself: from the CVE Numbering Authority (CNA) that assigned the CVE, or from CISA's Authorized Data Publisher (CISA-ADP) container. When NVD has also scored the CVE and disagrees, its score is shown underneath. A CVE whose SSVC exploitation status is "active" is kept whatever its score. <b>AV:N</b> means reachable over the network and <b>PR:N</b> means no credentials needed; the combination is highlighted because it is what turns a high score into an internet-facing emergency.</p>
-<p class="capnote" id="n-cvecap">Not generated yet.</p>
-<div class="tw"><table class="xt t-nvd">
+<section class="block" id="nvd">
+<div class="shead"><h2>All scored critical and high CVEs</h2><span class="count" id="n-nvd">0 CVEs</span></div>
+<p class="snote">New CVE records from CVE.org&rsquo;s cvelistV5 repository, sorted by base score. The score is the one in the CVE record itself: from the CVE Numbering Authority (CNA) that assigned the CVE, or from CISA&rsquo;s Authorized Data Publisher (CISA-ADP) container. When NVD has also scored the CVE and disagrees, its score is shown underneath. A CVE whose SSVC exploitation status is &ldquo;active&rdquo; is kept whatever its score. <code>AV:N</code> means reachable over the network and <code>PR:N</code> means no credentials needed &mdash; the combination is what turns a high score into an internet-facing emergency, so both are called out per row.</p>
+<p class="snote cap" id="n-cvecap">Not generated yet.</p>
+<div class="scroller"><table>
 <thead><tr><th>CVE</th><th>Score</th><th>Vendor</th><th>Description</th></tr></thead>
 <tbody id="t-nvd"><tr><td colspan="4" class="empty">Not generated yet.</td></tr></tbody>
 </table></div>
-</div>
+</section>
 
-<div class="sec">
-<div class="sec-head"><h2 class="xh">OSINT events</h2><span class="cnt" id="n-osint">0 events</span></div>
-<p class="intro">CIRCL, the Computer Incident Response Center Luxembourg, publishes an open MISP feed of OSINT events: indicators of compromise and write-ups of threat-actor campaigns. These are not mapped to any product, so read them as context, not as patch work.</p>
-<div class="callout note"><p><b>Quiet feed.</b> A check on 3 Nov 2026 found no new events in the CIRCL OSINT feed since 13 Aug 2026. The feed is polled once a day. An empty table here means the feed published nothing in the window; the health table above says whether the fetch itself worked.</p></div>
-<div class="tw"><table class="xt t-osint">
-<thead><tr><th>Event</th><th>Published (UTC)</th><th>Threat level</th><th>Tags</th><th>Org</th></tr></thead>
+<section class="block" id="osint">
+<div class="shead"><h2>OSINT events</h2><span class="count" id="n-osint">0 events</span></div>
+<p class="snote">CIRCL, the Computer Incident Response Center Luxembourg, publishes an open MISP feed of OSINT events: indicators of compromise and write-ups of threat-actor campaigns. These are not mapped to any product, so read them as context, not as patch work.</p>
+<div class="callout note"><b>A quiet feed.</b> A check on 3 Nov 2026 found no new events in the CIRCL OSINT feed since 13 Aug 2026. The feed is polled once a day. An empty table here means the feed published nothing in the window; the health table above says whether the fetch itself worked.</div>
+<div class="scroller"><table>
+<thead><tr><th>Event</th><th>Published</th><th>Threat level</th><th>Tags</th><th>Org</th></tr></thead>
 <tbody id="t-osint"><tr><td colspan="5" class="empty">Not generated yet.</td></tr></tbody>
 </table></div>
-</div>
+</section>
 
-<div class="sec">
-<div class="sec-head"><h2 class="xh">The eight feeds behind this page</h2></div>
-<p class="intro">All are operated by a government body, an EU agency, a national CERT or a platform, and are free to query without an account. None of them will ask you to talk to a sales team.</p>
-<div class="cards">
-
-<div class="card"><div class="ch">CISA Known Exploited Vulnerabilities</div><div class="pub">US Cybersecurity &amp; Infrastructure Security Agency</div>
-<p>The authoritative free list of what is being exploited. Small, high signal, updated most weekdays. Start every triage cycle here.</p>
-<div class="meta"><span class="tagp">Public domain</span><span class="tagp">No key</span><span class="tagp role">Exploited table</span></div>
+<section class="block" id="sources">
+<div class="shead"><h2>The eight feeds behind this page</h2></div>
+<p class="snote">All eight are operated by a government body, an EU agency, a national CERT or a platform, and are free to query without an account. None of them will ever ask you to talk to a sales team.</p>
+<div class="srcgrid">
+<div class="src"><div><h3>CISA Known Exploited Vulnerabilities</h3><div class="who">US Cybersecurity &amp; Infrastructure Security Agency</div></div>
+<p>The authoritative free list of what is actually being exploited. Small, high signal, updated most weekdays. Start every triage cycle here.</p>
+<div class="terms"><span class="term">Public domain</span><span class="term">No key</span><span class="term role">Exploited table</span></div>
 <div class="ep">www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json<br>mirror: raw.githubusercontent.com/cisagov/kev-data</div></div>
-
-<div class="card"><div class="ch">ENISA EU Vulnerability Database</div><div class="pub">European Union Agency for Cybersecurity (ENISA)</div>
-<p>The EU's vulnerability database, with its own list of exploited vulnerabilities. Used here as a second exploited signal next to CISA KEV, not as the main CVE feed.</p>
-<div class="meta"><span class="tagp">No key</span><span class="tagp">No ETag</span><span class="tagp role">Exploited table</span></div>
+<div class="src"><div><h3>ENISA EU Vulnerability Database</h3><div class="who">European Union Agency for Cybersecurity (ENISA)</div></div>
+<p>The EU&rsquo;s vulnerability database, with its own list of exploited vulnerabilities. Used here as a second exploited signal next to CISA KEV, not as the main CVE feed.</p>
+<div class="terms"><span class="term">No key</span><span class="term">No ETag</span><span class="term role">Exploited table</span></div>
 <div class="ep">euvdservices.enisa.europa.eu/api/search</div></div>
-
-<div class="card"><div class="ch">CVE List V5</div><div class="pub">CVE Program (CVE.org) &middot; GitHub repo CVEProject/cvelistV5</div>
+<div class="src"><div><h3>CVE List V5</h3><div class="who">CVE Program (CVE.org) &middot; GitHub repo CVEProject/cvelistV5</div></div>
 <p>Every published CVE record, as written by the CNA, with CVSS scores from the CNA or CISA-ADP. New records reach the delta log within minutes, so this is the main CVE feed.</p>
-<div class="meta"><span class="tagp">CVE Terms of Use</span><span class="tagp">No key</span><span class="tagp role">CVE table</span></div>
+<div class="terms"><span class="term">CVE Terms of Use</span><span class="term">No key</span><span class="term role">CVE table</span></div>
 <div class="ep">raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json</div></div>
-
-<div class="card"><div class="ch">NVD CVE API 2.0</div><div class="pub">US National Institute of Standards and Technology (NIST)</div>
-<p>NIST's own scores and product (CPE) matches. Used only to add an NVD score to CVEs already on the page; NVD asks clients to poll for changes no more than once every two hours.</p>
-<div class="meta"><span class="tagp">Public domain</span><span class="tagp">5 req / 30 s without key</span><span class="tagp role">CVE table (enrichment)</span></div>
+<div class="src"><div><h3>NVD CVE API 2.0</h3><div class="who">US National Institute of Standards and Technology (NIST)</div></div>
+<p>NIST&rsquo;s own scores and product (CPE) matches. Used only to add an NVD score to CVEs already on the page; NVD asks clients to poll for changes no more than once every two hours.</p>
+<div class="terms"><span class="term">Public domain</span><span class="term">5 req / 30s without key</span><span class="term role">CVE table (enrichment)</span></div>
 <div class="ep">services.nvd.nist.gov/rest/json/cves/2.0</div></div>
-
-<div class="card"><div class="ch">GitHub Advisory Database</div><div class="pub">GitHub Security Lab &middot; mirrored to OSV.dev</div>
+<div class="src"><div><h3>GitHub Advisory Database</h3><div class="who">GitHub Security Lab &middot; mirrored to OSV.dev</div></div>
 <p>The one that answers the application question. Reviewed entries carry ecosystem, package name and first patched version, so you can match them against a lockfile instead of a product name.</p>
-<div class="meta"><span class="tagp">CC BY 4.0</span><span class="tagp">60 req / h without token</span><span class="tagp role">Package table</span></div>
+<div class="terms"><span class="term">CC BY 4.0</span><span class="term">60 req / hr without token</span><span class="term role">Package table</span></div>
 <div class="ep">api.github.com/advisories?type=reviewed</div></div>
-
-<div class="card"><div class="ch">CERT-EU security advisories</div><div class="pub">Cybersecurity Service for the Union institutions, bodies, offices and agencies</div>
-<p>Advisories on widely used products, about one a week. The RSS feed labels times "CEST" all year, so publication times are taken from each advisory's JSON, which is in UTC.</p>
-<div class="meta"><span class="tagp">CC BY 4.0</span><span class="tagp">No key</span><span class="tagp role">EU and national table</span></div>
+<div class="src"><div><h3>CERT-EU security advisories</h3><div class="who">Cybersecurity Service for the Union institutions, bodies, offices and agencies</div></div>
+<p>Advisories on widely used products, about one a week. The RSS feed labels times &ldquo;CEST&rdquo; all year, so publication times are taken from each advisory&rsquo;s JSON, which is in UTC.</p>
+<div class="terms"><span class="term">CC BY 4.0</span><span class="term">No key</span><span class="term role">EU and national table</span></div>
 <div class="ep">cert.europa.eu/publications/security-advisories-rss</div></div>
-
-<div class="card"><div class="ch">NCSC-NL CSAF advisories</div><div class="pub">Nationaal Cyber Security Centrum (Netherlands)</div>
+<div class="src"><div><h3>NCSC-NL CSAF advisories</h3><div class="who">Nationaal Cyber Security Centrum (Netherlands)</div></div>
 <p>Several advisories a day in CSAF 2.0 JSON, with CVEs, CVSS, affected products and a probability/impact rating. The change list supports conditional requests, so an unchanged poll costs almost nothing.</p>
-<div class="meta"><span class="tagp">No key</span><span class="tagp">CSAF 2.0</span><span class="tagp role">EU and national table</span></div>
+<div class="terms"><span class="term">No key</span><span class="term">CSAF 2.0</span><span class="term role">EU and national table</span></div>
 <div class="ep">advisories.ncsc.nl/csaf/v2/changes.csv</div></div>
-
-<div class="card"><div class="ch">CIRCL OSINT MISP feed</div><div class="pub">Computer Incident Response Center Luxembourg (CIRCL)</div>
+<div class="src"><div><h3>CIRCL OSINT MISP feed</h3><div class="who">Computer Incident Response Center Luxembourg (CIRCL)</div></div>
 <p>OSINT events in MISP format: indicators of compromise and campaign write-ups. Polled once a day. No new events since 13 Aug 2026 (checked 3 Nov 2026).</p>
-<div class="meta"><span class="tagp">TLP:CLEAR</span><span class="tagp">No key</span><span class="tagp role">OSINT table</span></div>
+<div class="terms"><span class="term">TLP:CLEAR</span><span class="term">No key</span><span class="term role">OSINT table</span></div>
 <div class="ep">www.circl.lu/doc/misp/feed-osint/manifest.json</div></div>
-
 </div>
-</div>
+</section>
 
-<div class="sec">
-<div class="sec-head"><h2 class="xh">Check a feed from a terminal</h2></div>
-<p class="intro">These need only <code>curl</code> and <code>jq</code> and work the same on Linux, macOS and Windows (Git Bash). They show raw feed data, not the merged page.</p>
-<pre class="xcode"># 1 · CISA KEV entries added in the last 7 days (GitHub mirror of the catalog)
+<section class="block" id="terminal">
+<div class="shead"><h2>Reproduce this from a terminal</h2></div>
+<p class="snote">These need only <code>curl</code> and <code>jq</code> and work the same on Linux, macOS and Windows (Git Bash). They show raw feed data, not the merged page.</p>
+<pre class="sh"><span class="c"># 1 — CISA KEV entries added in the last 7 days (GitHub mirror of the catalog)</span>
 curl -s https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json \
   | jq -r '(now - 7*86400 | strftime("%Y-%m-%d")) as $d
       | .vulnerabilities[] | select(.dateAdded &gt;= $d)
       | [.dateAdded, .cveID, .vendorProject, .product] | @tsv'
 
-# 2 · reviewed critical GitHub advisories, newest first
+<span class="c"># 2 — reviewed critical GitHub advisories, newest first</span>
 curl -s "https://api.github.com/advisories?type=reviewed&amp;severity=critical&amp;sort=published&amp;direction=desc&amp;per_page=20" \
   | jq -r '.[] | [.published_at, (.cve_id // .ghsa_id), .vulnerabilities[0].package.ecosystem,
       .vulnerabilities[0].package.name, .vulnerabilities[0].first_patched_version] | @tsv'
 
-# 3 · the ten most recently changed NCSC-NL advisories
+<span class="c"># 3 — the ten most recently changed NCSC-NL advisories</span>
 curl -s https://advisories.ncsc.nl/csaf/v2/changes.csv | head -n 10</pre>
-</div>
+</section>
 
-<div class="sec">
-<div class="sec-head"><h2 class="xh">What this list does not cover</h2></div>
-<ul class="lim">
-<li><b>NVD scores only part of the CVE stream.</b> Since 15 Apr 2026 NIST enriches (scores and maps to products) only CVEs in CISA KEV and software used by the US federal government. Most new CVEs never get an NVD score, which is why this page takes the score from the CVE record itself. A CVE published without any score does not appear in the critical and high table, so a short table is not an all-clear.</li>
-<li><b>Severity is not risk.</b> CVSS scores the flaw, not your exposure. A 9.8 in a component you do not deploy outranks nothing; a 6.5 on your public login path may outrank everything on this page. The exploited-in-the-wild table is ordered by evidence, which is why it comes first.</li>
-<li><b>Counts move.</b> Every feed backfills, re-scores and occasionally withdraws entries, so two rebuilds minutes apart can disagree. The CVE table shows the highest-scored rows up to a fixed cap; the line above the table says how many are hidden.</li>
-<li><b>CISA KEV can lag.</b> When cisa.gov blocks the job, the catalog is read from CISA's GitHub mirror, which was about 3 hours behind cisa.gov in a one-day sample (30 Oct 2026). The health table notes when the mirror was used.</li>
-</ul>
-</div>
-
+</main>
+<footer><div class="wrap">
+<h3>What this list does not cover</h3>
+<p><b>NVD scores only part of the CVE stream.</b> Since 15 Apr 2026 NIST enriches (scores and maps to products) only CVEs in CISA KEV and software used by the US federal government. Most new CVEs never get an NVD score, which is why this page takes the score from the CVE record itself. A CVE published without any score does not appear in the critical and high table, so a short table is not an all-clear.</p>
+<p><b>Severity is not risk.</b> CVSS scores the flaw, not your exposure. A 9.8 in a component you do not deploy outranks nothing; a 6.5 on your public login path may outrank everything on this page. The exploited-in-the-wild table is ordered by evidence, which is why it comes first.</p>
+<p><b>Counts move.</b> Every feed backfills, re-scores and occasionally withdraws entries, so two rebuilds minutes apart can disagree. The CVE table shows the highest-scored rows up to a fixed cap; the line above the table says how many are hidden.</p>
+<p><b>CISA KEV can lag.</b> When cisa.gov blocks the job, the catalog is read from CISA&rsquo;s GitHub mirror, which was about 3 hours behind cisa.gov in a one-day sample (30 Oct 2026). The health table notes when the mirror was used.</p>
+<p><b>OSINT is context, not coverage.</b> CIRCL's feed is the only OSINT source on this page, it had published nothing new between 13 Aug and 3 Nov 2026, and its events are not mapped to products. An empty OSINT table means only that this one feed was quiet.</p>
+</div></footer>
 </div>

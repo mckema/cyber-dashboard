@@ -4,8 +4,11 @@
 //! I/O, except demo().
 //!
 //! Every builder emits only the class names styled by page/style.css (the page's
-//! scriptCss) and no long inline style attributes, because the Wiki.js sanitiser
-//! mangles those (README §7).
+//! scriptCss) and no inline style attributes, because the Wiki.js sanitiser
+//! mangles long ones (README §7). The row vocabulary (td.id, sv sv-*, tgt, sub,
+//! desc, due/due past, pkg, eco, fix, score, vecbits, empty) is the one of the
+//! original page's row builders; feed, hs-*, ssrc, ssvc-*, pi-*, tl-*, tag are
+//! the additions for the tables the original did not have.
 //!
 //! Times: every timestamp on the page is UTC and carries the "UTC" label.
 //! Date-only source values (e.g. CISA dueDate) are shown as a date with no time.
@@ -16,7 +19,8 @@
 //!          n-health n-kev n-adv n-dep n-nvd n-cvecap n-osint winlabel
 //!   stamp  rstat   (inner HTML, contains <b>; must never contain a <div>)
 //!
-//! Output is byte-identical to render.py for the same input. Item.extra values
+//! The data logic matches render.py (the class names changed afterwards, when the
+//! page took over the original page's design). Item.extra values
 //! are read with Python's semantics (`x.get(k) or ""`, `str()` of numbers,
 //! iterating a string yields its characters), so a feed that writes a number
 //! where a string is expected renders the same as it did under Python.
@@ -585,6 +589,15 @@ pub fn ftime(s: &str, year: bool) -> String {
     }
 }
 
+/// Table-cell form of ftime: the short date as the cell text ("3 Nov", as on the
+/// original page) and the time on a sub-line ("02:31 UTC"). Same escaping rules.
+pub fn fwhen(s: &str, year: bool) -> String {
+    match py_parse(s) {
+        Some((dt, true)) => format!(r#"{}<span class="sub">{} UTC</span>"#, day(&dt, year), hm(&dt)),
+        _ => ftime(s, year),
+    }
+}
+
 /// Seconds since the epoch as Python's datetime.timestamp() gives it; 0 when unparsable.
 fn ts(s: &str) -> f64 {
     py_parse(s).map_or(0.0, |(dt, _)| dt.timestamp_micros() as f64 / 1e6)
@@ -647,17 +660,9 @@ fn empty(cols: usize, msg: &str) -> String {
     format!(r#"<tr><td colspan="{cols}" class="empty">{}</td></tr>"#, esc(msg))
 }
 
-const SRC_FAMILY: [(&str, &str); 12] = [
-    ("kev", "us"), ("cisa", "us"), ("euvd", "eu"), ("enisa", "eu"), ("cert-eu", "eu"),
-    ("ncsc", "nl"), ("github", "gh"), ("ghsa", "gh"), ("nvd", "cve"), ("cve", "cve"),
-    ("circl", "osint"), ("misp", "osint"),
-];
-
-/// Source label. Colour family is chosen by keyword so feed NAME wording can change freely.
-pub fn src_pill(name: &str) -> String {
-    let n = name.to_lowercase();
-    let fam = SRC_FAMILY.iter().find(|(k, _)| n.contains(k)).map_or("x", |(_, f)| f);
-    format!(r#"<span class="src src-{fam}">{}</span>"#, esc(name))
+/// Source label, e.g. "CISA KEV". Class "feed" because "src" is the source card on the page.
+pub fn feed_pill(name: &str) -> String {
+    format!(r#"<span class="feed">{}</span>"#, esc(name))
 }
 
 fn sev(it: &Item) -> String {
@@ -727,12 +732,12 @@ pub fn build_health_rows(health: &[HealthRow]) -> String {
                 r#"<td class="due">{}</td>"#,
                 r#"<td class="desc">{}</td></tr>"#,
             ),
-            src_pill(&h.source),
+            feed_pill(&h.source),
             cls,
             esc(label),
             thou(h.items as i64),
-            ftime(&h.newest, true),
-            ftime(&h.last_success, true),
+            fwhen(&h.newest, true),
+            fwhen(&h.last_success, true),
             esc(&h.note),
         ));
     }
@@ -777,9 +782,9 @@ pub fn build_kev_rows(items: &[Item], today: &str) -> String {
         }
         let url = if it.url.is_empty() { cve_link(&it.id) } else { it.url.clone() };
         out.push_str(&format!(
-            r#"<tr><td class="id">{}<span class="sv sv-EXPLOITED">Exploited</span><span class="srcs">{}</span>"#,
+            r#"<tr><td class="id">{}<span class="sv sv-EXPLOITED">Exploited</span><span class="feeds">{}</span>"#,
             link(&url, &it.id, ""),
-            srcs.iter().map(|s| src_pill(s)).collect::<String>(),
+            srcs.iter().map(|s| feed_pill(s)).collect::<String>(),
         ));
         if !euvd.is_empty() {
             out.push_str(&format!(r#"<span class="sub mono">{}</span>"#, esc(&euvd)));
@@ -797,7 +802,7 @@ pub fn build_kev_rows(items: &[Item], today: &str) -> String {
         out.push_str(&format!(
             r#"<td class="desc">{}</td><td class="due">{}{}</td><td class="due{}">{}"#,
             esc(&it.title),
-            ftime(&it.published, false),
+            fwhen(&it.published, false),
             since_html,
             if past { " past" } else { "" },
             fdate(&due, false),
@@ -846,10 +851,10 @@ fn rating(it: &Item) -> String {
     or_mdash(parts)
 }
 
-/// CERT-EU and NCSC-NL advisories. 6 columns.
+/// CERT-EU and NCSC-NL advisories. 5 columns (the source label sits under the id).
 pub fn build_adv_rows(items: &[Item]) -> String {
     if items.is_empty() {
-        return empty(6, "No new advisories this window.");
+        return empty(5, "No new advisories this window.");
     }
     let mut out = String::new();
     for it in by_newest(items) {
@@ -868,20 +873,23 @@ pub fn build_adv_rows(items: &[Item]) -> String {
             format!(r#"<span class="sub">{}{extra}</span>"#, esc(&head.join(", ")))
         };
         let cves = or_mdash(more(&it.cves, 3, |c| link(&cve_link(c), c, "mono"), "CVE"));
-        out.push_str(&format!(r#"<tr><td class="id">{}"#, link(&it.url, &it.id, "")));
+        out.push_str(&format!(
+            r#"<tr><td class="id">{}<span class="feeds">{}</span>"#,
+            link(&it.url, &it.id, ""),
+            feed_pill(&it.source),
+        ));
         if !ver.is_empty() {
             out.push_str(&format!(r#"<span class="sub">version {}</span>"#, esc(&ver)));
         }
         out.push_str(&format!(
             concat!(
-                r#"</td><td>{}</td>"#,
+                r#"</td>"#,
                 r#"<td class="due">{}{}</td>"#,
                 r#"<td class="desc">{}{}</td>"#,
                 r#"<td class="cves">{}</td>"#,
                 r#"<td class="rate">{}</td></tr>"#,
             ),
-            src_pill(&it.source),
-            ftime(&it.published, false),
+            fwhen(&it.published, false),
             upd,
             link(&it.url, &it.title, "ttl"),
             prod,
@@ -1087,7 +1095,7 @@ pub fn build_cve_rows(items: &[Item], cap: usize) -> (String, usize, usize) {
             }
             out.push_str("</span>");
         }
-        out.push_str(&format!(r#"{nvd_html}</td><td>{vend}</td><td class="desc">{}"#, esc(&desc)));
+        out.push_str(&format!(r#"{nvd_html}</td><td class="vend">{vend}</td><td class="desc">{}"#, esc(&desc)));
         if !bits.is_empty() {
             out.push_str(&format!(
                 r#"<span class="vecbits{hot}">{}</span>"#,
@@ -1141,7 +1149,7 @@ pub fn build_osint_rows(items: &[Item]) -> String {
             ),
             link(&it.url, title, "ttl"),
             esc(&short_id),
-            ftime(&it.published, true),
+            fwhen(&it.published, true),
             upd,
             esc(&tl.to_lowercase()),
             esc(&tl),
@@ -1156,7 +1164,7 @@ pub fn build_osint_rows(items: &[Item]) -> String {
 
 /// Inner HTML of <div id="rstat">. Contains <b>; never a <div>.
 pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) -> String {
-    let mut s = format!("Rebuilt <b>{}, {} UTC</b>", day(&now, true), hm(&now));
+    let mut s = format!("Generated <b>{}, {} UTC</b>", day(&now, true), hm(&now));
     if !kev_catalog.is_empty() {
         s.push_str(&format!(" &nbsp;&middot;&nbsp; CISA KEV catalog <b>{}</b>", esc(kev_catalog)));
     }
@@ -1164,8 +1172,8 @@ pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) 
         s.push_str(&format!(" &nbsp;&middot;&nbsp; feeds: {}", health_summary(health)));
     }
     s.push_str(
-        " &nbsp;&middot;&nbsp; regenerated on a schedule; this wiki strips JavaScript from \
-         page content, so there is no in-page refresh button.",
+        " &nbsp;&middot;&nbsp; this wiki strips JavaScript from page content, so the brief is \
+         rebuilt by a scheduled job rather than by a button.",
     );
     s
 }
@@ -1510,15 +1518,16 @@ mod tests {
     #[test]
     fn no_stripped_or_document_tags() {
         let s = skel().to_lowercase();
-        for bad in ["<style", "<script", "<link", "<html", "<head", "<body", "style="] {
-            assert!(!s.contains(bad), "{bad}");
+        // \b so that the page's own <header> is not taken for <head>.
+        for bad in [r"<style\b", r"<script\b", r"<link\b", r"<html\b", r"<head\b", r"<body\b", r"\bstyle="] {
+            assert!(!re(bad).is_match(&s), "{bad}");
         }
     }
 
     #[test]
     fn wrapper_and_balanced_divs() {
         let s = skel();
-        assert!(s.trim_start_matches(py_space).starts_with(r#"<div class="xw">"#));
+        assert!(s.trim_start_matches(py_space).starts_with(r#"<div id="ew">"#));
         assert_eq!(s.matches("<div").count(), s.matches("</div>").count());
         assert_eq!(s.matches("<table").count(), s.matches("</table>").count());
     }
@@ -1527,16 +1536,20 @@ mod tests {
     fn css_is_scoped() {
         let css = read("page/style.css");
         let body = re(r"(?s)/\*.*?\*/").replace_all(&css, "").to_string();
+        let body = re(r"@import[^;]*;").replace_all(&body, "").to_string();
         let body = re(r"@media[^{]*\{").replace_all(&body, "").to_string();
         for m in re(r"([^{}]+)\{").captures_iter(&body) {
             for part in m[1].split(',') {
                 let part = py_strip(part);
                 if !part.is_empty() {
-                    assert!(part.contains(".xw"), "{part}");
+                    assert!(part.contains("#ew"), "{part}");
                 }
             }
         }
         assert!(!css.to_lowercase().contains("</style"));
+        // Only the font import may sit outside a rule, and it must come first.
+        assert_eq!(css.matches("@import").count(), 1);
+        assert!(css.starts_with("@import url(https://fonts.googleapis.com/"));
     }
 
     // ------------------------------------------------ HelperTest
@@ -1550,6 +1563,11 @@ mod tests {
         assert_eq!(ftime("2026-08-13T14:02:11Z", true), "13 Aug 2026 14:02 UTC");
         assert_eq!(ftime("", false), "&mdash;");
         assert_eq!(ftime("<b>junk", false), "&lt;b&gt;junk");
+        assert_eq!(fwhen("2026-11-03T02:31:19Z", false), r#"3 Nov<span class="sub">02:31 UTC</span>"#);
+        assert_eq!(fwhen("2026-08-13T14:02:11Z", true), r#"13 Aug 2026<span class="sub">14:02 UTC</span>"#);
+        assert_eq!(fwhen("2026-11-03", false), "3 Nov");
+        assert_eq!(fwhen("", true), "&mdash;");
+        assert_eq!(fwhen("<b>junk", false), "&lt;b&gt;junk");
     }
 
     #[test]
@@ -1688,7 +1706,7 @@ mod tests {
     fn empty_rows() {
         assert!(build_health_rows(&[]).contains(r#"colspan="6" class="empty""#));
         assert!(build_kev_rows(&[], "2026-11-03").contains(r#"colspan="5" class="empty""#));
-        assert!(build_adv_rows(&[]).contains(r#"colspan="6" class="empty""#));
+        assert!(build_adv_rows(&[]).contains(r#"colspan="5" class="empty""#));
         assert!(build_dep_rows(&[]).contains(r#"colspan="6" class="empty""#));
         assert!(build_cve_rows(&[], 300).0.contains(r#"colspan="4" class="empty""#));
         assert!(build_osint_rows(&[]).contains(r#"colspan="5" class="empty""#));
@@ -1744,6 +1762,28 @@ mod tests {
         assert!(once.contains("CVE-2026-111464"));
         assert!(once.contains("NCSC-2026-0464"));
         assert_eq!(once.matches("<div").count(), once.matches("</div>").count());
+        assert!(!once.contains("style="));
+    }
+
+    /// Every class on the filled page has a rule in style.css, except modifiers
+    /// that deliberately fall back to their base class's look.
+    #[test]
+    fn every_class_is_styled() {
+        let (_, r) = load();
+        let page = apply_regions(&skel(), &r).unwrap();
+        let mut evil = String::new();
+        evil.push_str(&build_cve_rows(&[evil_item()], 300).0);
+        evil.push_str(&build_osint_rows(&[evil_item()]));
+        let css = read("page/style.css");
+        let fallback = ["sm", "score-other", "pi-L", "pi-X", "tl-low", "tl-undefined", "tags", "sv-MEDIUM", "sv-LOW"];
+        for c in re(r#"class="([^"]*)""#).captures_iter(&(page + &evil)) {
+            for cls in c[1].split_whitespace() {
+                if fallback.contains(&cls) || c[1].contains('&') {
+                    continue;
+                }
+                assert!(re(&format!(r"\.{}\b", regex::escape(cls))).is_match(&css), "no rule for .{cls}");
+            }
+        }
     }
 
     #[test]
@@ -1829,7 +1869,7 @@ mod tests {
             .map(|p| json!(href(p[0].as_str().unwrap(), p[1].as_str().unwrap()))).collect();
         out.insert("hrefs".into(), Value::Array(hrefs));
         let pills: Vec<Value> = cases["pills"].as_array().unwrap().iter()
-            .map(|p| json!([src_pill(p.as_str().unwrap()), esc(p.as_str().unwrap())])).collect();
+            .map(|p| json!([feed_pill(p.as_str().unwrap()), esc(p.as_str().unwrap())])).collect();
         out.insert("pills".into(), Value::Array(pills));
         let sets: Vec<Value> = cases["item_sets"].as_array().unwrap().iter().map(|c| {
             let items: Vec<Item> = serde_json::from_value(c["items"].clone()).unwrap();
