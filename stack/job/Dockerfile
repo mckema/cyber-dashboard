@@ -1,11 +1,11 @@
 # Image for the exploit-watch binary (subcommands: run, bootstrap, demo).
 #
-# stack/job/compose.yml bind-mounts the repo at /app for state/, stack/wiki/page/, .env and
+# compose.yml bind-mounts the repo at /app for state/, stack/wiki/page/, .env and
 # the test fixtures; the binary itself is built into the image, so code changes
 # need `docker compose build job`.
 #
 # Proxy: HTTP_PROXY / HTTPS_PROXY / NO_PROXY are Docker's predefined build args.
-# stack/job/compose.yml passes them from the host so cargo can reach crates.io and
+# compose.yml passes them from the host so cargo can reach crates.io and
 # apt can reach Debian behind the corporate proxy. They are deliberately not
 # declared with ARG, which keeps them out of `docker history` and the image.
 

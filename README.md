@@ -169,8 +169,7 @@ Measured on 2026-11-03: a normal run makes about 10–40 requests, most answered
 
 ## Getting started
 
-Requirements: Docker Desktop with Compose v2.20 or later (for `include`). No
-Rust toolchain is needed. Behind the corporate proxy, set `HTTP_PROXY` and
+Requirements: Docker Desktop with Compose v2. No Rust toolchain is needed. Behind the corporate proxy, set `HTTP_PROXY` and
 `HTTPS_PROXY` on the host; Compose passes them to the build and the job.
 
 ```bash
@@ -247,11 +246,10 @@ created files in `state/`, the job cannot write them; fix with
 ## Development
 
 ```
-compose.yml                 includes stack/wiki and stack/job (project_directory ".")
-stack/wiki/compose.yml      Wiki.js service and volumes
+compose.yml                 both services: wiki (Wiki.js 2.x) and job
 stack/wiki/page/            skeleton.html (page content with anchor ids), style.css (scriptCss)
-stack/job/compose.yml       job service
 stack/job/Dockerfile        build on rust:1.99.1-slim-bookworm, run on debian:bookworm-slim as uid 1000
+stack/job/Dockerfile.dockerignore   build context: Cargo.toml, Cargo.lock, src/ only
 src/                        crate exploit-watch (Rust 1.99, edition 2024)
 tests/fixtures/             trimmed real payloads for unit tests and demo
 ```

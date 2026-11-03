@@ -1,15 +1,77 @@
 # Local stack: self-hosted Wiki.js 2.x + the Exploit Watch job.
 #
-#   docker compose up -d wiki
+#   docker compose up -d --wait wiki
 #   docker compose run --rm job bootstrap                  # once; writes .env
 #   docker compose up -d                                   # starts the job loop
 #
-# Each service lives in its own folder under stack/. project_directory "." keeps
-# their relative paths (build context, .env, the repo bind mount) at the repo root.
+# Wiki UI: http://localhost:3000 (bound to 127.0.0.1 only).
 name: exploit-watch
 
-include:
-  - path: stack/wiki/compose.yml
-    project_directory: .
-  - path: stack/job/compose.yml
-    project_directory: .
+services:
+  wiki:
+    # Major tag 2 (2.5.317 when this was written). Never use :latest, which is 3.x
+    # with a different API.
+    image: ghcr.io/requarks/wiki:2
+    environment:
+      # SQLite, like the original wiki2.internal.ediphy.io instance.
+      DB_TYPE: sqlite
+      DB_FILEPATH: /wiki/data/db.sqlite
+      # No proxy env here: Wiki.js uses Node's fetch, which ignores HTTP(S)_PROXY,
+      # so locale sync fails behind the corporate proxy either way (cosmetic: the
+      # wiki chrome shows raw keys such as header.search). See README.md, Known limitations.
+    volumes:
+      # The image runs as non-root `node` (uid 1000). An empty named volume is
+      # seeded from the image's /wiki/data, which is owned by node, so the DB file
+      # is writable without a chown step. Do not swap this for a host bind mount
+      # without fixing ownership.
+      - wiki-data:/wiki/data
+      # The image declares VOLUME /wiki/data/content; naming it stops every
+      # `down`/`up` from leaving an orphan anonymous volume behind.
+      - wiki-content:/wiki/data/content
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      # /healthz answers 200 in normal mode; in first-run setup mode every GET
+      # returns the setup page (also 200), so "healthy" means "HTTP is up".
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  job:
+    build:
+      context: .
+      dockerfile: stack/job/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: wiki,localhost,127.0.0.1
+    image: exploit-watch-job
+    env_file:
+      - path: .env
+        required: false   # `exploit-watch bootstrap` creates it on first run
+    environment:
+      # Containers have no Internet without the proxy (DNS fails). NO_PROXY keeps
+      # Wiki.js traffic on the compose network instead of going via the proxy.
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: wiki,localhost,127.0.0.1
+      # These override any value in .env.
+      WIKI_BASE: http://wiki:3000
+      STATE_DIR: /app/state
+    volumes:
+      # Repo bind mount for state/, stack/wiki/page/, .env and tests/fixtures
+      # (demo). The binary is in the image: code changes need `docker compose build job`.
+      - .:/app
+    # The image's entrypoint is `exploit-watch`; this is its subcommand.
+    command: ["run", "--every", "${INTERVAL_SECONDS:-1800}"]
+    depends_on:
+      wiki:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  wiki-data:
+  wiki-content:
