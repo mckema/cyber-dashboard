@@ -25,14 +25,13 @@ pub type FetchFn = fn(DateTime<Utc>, DateTime<Utc>) -> Result<FetchOutput, Sourc
 pub struct Feed {
     pub key: &'static str, // module name; also the state file name (items/<key>.json)
     pub name: &'static str,
-    pub table: &'static str,
     pub cadence: u64,
     pub fetch: FetchFn,
 }
 
 macro_rules! feed {
     ($m:ident) => {
-        Feed { key: stringify!($m), name: $m::NAME, table: $m::TABLE, cadence: $m::CADENCE, fetch: $m::fetch }
+        Feed { key: stringify!($m), name: $m::NAME, cadence: $m::CADENCE, fetch: $m::fetch }
     };
 }
 

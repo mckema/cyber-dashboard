@@ -1,4 +1,4 @@
-//! CISA Known Exploited Vulnerabilities catalog. Port of feeds/kev.py.
+//! CISA Known Exploited Vulnerabilities catalog.
 //!
 //! cisa.gov answers 403 to some egress proxies (ours, 2026-11-03), so the cisagov
 //! GitHub mirror is the fallback. The mirror carries the same file and a weak ETag,
@@ -11,7 +11,6 @@ use serde_json::{Map, Value};
 use super::common::{self, FetchOutput, GetOpts, Item, Response, SourceError, iso_utc, parse_iso};
 
 pub const NAME: &str = "CISA KEV";
-pub const TABLE: &str = "kev";
 pub const CADENCE: u64 = 0;
 
 pub const SOURCES: &[(&str, &str)] = &[
@@ -54,7 +53,7 @@ where
     Err(SourceError::new(errors.join("; ")))
 }
 
-/// v[k] as-is, or "" when the key is missing (Python: v.get(k, "")).
+/// v[k] as-is, or "" when the key is missing.
 fn get_or_empty(v: &Value, k: &str) -> Value {
     v.get(k).cloned().unwrap_or_else(|| Value::String(String::new()))
 }

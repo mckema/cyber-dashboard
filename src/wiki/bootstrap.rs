@@ -1,5 +1,5 @@
-//! Wiki.js setup for the job. Port of bootstrap_wiki.py: same steps, order,
-//! idempotency and printed lines.
+//! Wiki.js setup for the job. Safe to rerun: every step checks first and only
+//! changes what is missing or drifted.
 //!
 //! Steps, each skipped when already done:
 //!   1. Finish the first-run setup wizard (POST /finalize) and wait for the restart.
@@ -34,8 +34,8 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::{Value, json};
 
+use super::{Mode, Wiki, err_chain, head};
 use crate::feeds::common::Fatal;
-use crate::wiki::{Mode, Wiki};
 
 pub const PAGE_PATH: &str = "CTP/run-books/Cyber-Exploit-Watch";
 pub const PAGE_LOCALE: &str = "en";
@@ -144,7 +144,7 @@ pub fn mask(v: &str) -> String {
 
 const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-/// base64url without padding (Python secrets.token_urlsafe alphabet).
+/// base64url without padding (alphabet A-Z a-z 0-9 - _).
 pub fn b64url_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -192,8 +192,8 @@ pub fn jwt_claims(token: &str) -> serde_json::Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// secrets.token_urlsafe(n): n random bytes as base64url ([A-Za-z0-9_-], safe in compose .env).
-fn token_urlsafe(n: usize) -> Result<String, Fatal> {
+/// n random bytes from /dev/urandom as base64url ([A-Za-z0-9_-], safe in compose .env).
+fn random_token(n: usize) -> Result<String, Fatal> {
     let mut buf = vec![0u8; n];
     fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut buf))
@@ -201,46 +201,22 @@ fn token_urlsafe(n: usize) -> Result<String, Fatal> {
     Ok(b64url_encode(&buf))
 }
 
-/// Python repr() of a JSON value, for messages that print a dict as the Python script did.
-pub fn py_repr(v: &Value) -> String {
-    match v {
-        Value::Null => "None".into(),
-        Value::Bool(b) => if *b { "True".into() } else { "False".into() },
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
-        Value::Array(a) => format!("[{}]", a.iter().map(py_repr).collect::<Vec<_>>().join(", ")),
-        Value::Object(o) => format!(
-            "{{{}}}",
-            o.iter().map(|(k, v)| format!("'{k}': {}", py_repr(v))).collect::<Vec<_>>().join(", ")
-        ),
+/// A JSON value as message text: a string as is, anything else as compact JSON.
+/// None when missing, null or "".
+fn text(v: Option<&Value>) -> Option<String> {
+    match v? {
+        Value::Null => None,
+        Value::String(s) if s.is_empty() => None,
+        Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
     }
 }
 
-/// Python str() of a JSON value (strings bare, the rest as repr).
-fn py_str(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(v) => py_repr(v),
-        None => "None".into(),
-    }
-}
-
-fn truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
-    }
-}
-
-/// res.responseResult.succeeded, else Fatal "<what> refused: <message or the whole result>".
+/// res.responseResult.succeeded, else Fatal "<what> refused: <message, or the whole result as JSON>".
 fn check(res: &Value, what: &str) -> Result<(), Fatal> {
-    let rr = res.get("responseResult").filter(|v| truthy(Some(v))).cloned().unwrap_or_else(|| json!({}));
-    if !truthy(rr.get("succeeded")) {
-        let why = if truthy(rr.get("message")) { py_str(rr.get("message")) } else { py_repr(&rr) };
+    let rr = res.get("responseResult").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| json!({}));
+    if rr["succeeded"] != true {
+        let why = text(rr.get("message")).unwrap_or_else(|| rr.to_string());
         return Err(Fatal(format!("{what} refused: {why}")));
     }
     Ok(())
@@ -265,12 +241,12 @@ fn step_setup(w: &Wiki, email: &str, password: &str, site_url: &str) -> Result<b
     println!("setup      finalizing (admin {email}, siteUrl {site_url})");
     let r = w
         .post("/finalize", &json!({"adminEmail": email, "adminPassword": password, "siteUrl": site_url, "telemetry": false}), None)
-        .map_err(|e| Fatal(format!("POST /finalize failed: {}", crate::wiki::err_chain(&e))))?;
+        .map_err(|e| Fatal(format!("POST /finalize failed: {}", err_chain(&e))))?;
     let Some(j) = r.json else {
-        return Err(Fatal(format!("POST /finalize failed: HTTP {}, non-JSON reply: {}", r.status, crate::wiki::head(&r.text, 200))));
+        return Err(Fatal(format!("POST /finalize failed: HTTP {}, non-JSON reply: {}", r.status, head(&r.text, 200))));
     };
-    if !truthy(j.get("ok")) {
-        let why = if truthy(j.get("error")) { py_str(j.get("error")) } else { py_repr(&j) };
+    if j["ok"] != true {
+        let why = text(j.get("error")).unwrap_or_else(|| j.to_string());
         return Err(Fatal(format!("POST /finalize refused: {why}")));
     }
     sleep(Duration::from_secs(3)); // server tears down the setup app and reboots ~1 s after replying
@@ -301,8 +277,8 @@ fn step_login(w: &Wiki, email: &str, password: &str) -> Result<String, Fatal> {
     let res = &d["authentication"]["login"];
     let rr = &res["responseResult"];
     let jwt = res["jwt"].as_str().unwrap_or("");
-    if !truthy(rr.get("succeeded")) || jwt.is_empty() {
-        let msg = if truthy(rr.get("message")) { py_str(rr.get("message")) } else { "no message".into() };
+    if rr["succeeded"] != true || jwt.is_empty() {
+        let msg = text(rr.get("message")).unwrap_or_else(|| "no message".into());
         return Err(Fatal(format!(
             "admin login failed: {}. WIKI_ADMIN_EMAIL / WIKI_ADMIN_PASSWORD in .env do not match this wiki's admin \
              (the wiki-data volume keeps the account from its first setup)",
@@ -315,7 +291,7 @@ fn step_login(w: &Wiki, email: &str, password: &str) -> Result<String, Fatal> {
 
 fn step_api_on(w: &Wiki, jwt: &str) -> Result<(), Fatal> {
     let d = w.gql("{ authentication { apiState } }", Value::Null, Some(jwt), "apiState")?;
-    if truthy(d["authentication"].get("apiState")) {
+    if d["authentication"]["apiState"] == true {
         println!("api        already enabled");
         return Ok(());
     }
@@ -421,16 +397,16 @@ fn key_works(w: &Wiki, key: &str, pid: i64) -> bool {
 fn step_key(w: &Wiki, jwt: &str, gid: i64, current: &str, pid: i64) -> Result<String, Fatal> {
     let d = w.gql("{ authentication { apiKeys { id name isRevoked } } }", Value::Null, Some(jwt), "apiKeys")?;
     let keys: Vec<Value> = d["authentication"]["apiKeys"].as_array().cloned().unwrap_or_default();
-    let live = |k: &Value| k["name"] == KEY_NAME && !truthy(k.get("isRevoked"));
+    let live = |k: &Value| k["name"] == KEY_NAME && k["isRevoked"] != true;
     if !current.is_empty() {
         let c = jwt_claims(current);
         let api = c.get("api").and_then(Value::as_i64);
         let ours = keys.iter().any(|k| api.is_some() && as_id(&k["id"]) == api && live(k));
         if !ours {
-            let shown = if c.is_empty() { "unreadable".to_string() } else { py_repr(&Value::Object(c.clone())) };
+            let shown = if c.is_empty() { "unreadable".to_string() } else { Value::Object(c.clone()).to_string() };
             println!("  .env key is not a live '{KEY_NAME}' key of this wiki (claims {shown})");
         } else if c.get("grp").and_then(Value::as_i64) != Some(gid) {
-            println!("  .env key is bound to group {}, not {gid}", py_str(c.get("grp")));
+            println!("  .env key is bound to group {}, not {gid}", text(c.get("grp")).unwrap_or_else(|| "(none)".into()));
         } else if key_works(w, current, pid) {
             println!("apikey     .env key works, keeping it ({})", mask(current));
             return Ok(current.to_string());
@@ -590,7 +566,7 @@ fn step_page(w: &Wiki, jwt: &str, args: &Args) -> Result<i64, Fatal> {
 }
 
 fn step_smoke(w: &Wiki, key: &str, pid: i64) -> Result<(), Fatal> {
-    // Same read the job does (rebuild READ_PAGE), with the bot key.
+    // Same read the job does (run.rs READ_PAGE), with the bot key.
     let d = w.gql(
         "query ($id: Int!) { pages { single(id: $id) { id path content } } }",
         json!({"id": pid}),
@@ -600,8 +576,8 @@ fn step_smoke(w: &Wiki, key: &str, pid: i64) -> Result<(), Fatal> {
     let p = &d["pages"]["single"];
     println!(
         "smoke      bot key reads page {} ({}, {} B)",
-        py_str(p.get("id")),
-        py_str(p.get("path")),
+        text(p.get("id")).unwrap_or_default(),
+        text(p.get("path")).unwrap_or_default(),
         text_len(&p["content"])
     );
     Ok(())
@@ -670,7 +646,7 @@ pub fn main(args: Args) -> Result<i32, Fatal> {
         updates.push(("WIKI_ADMIN_EMAIL", email.clone()));
     }
     if password.is_empty() {
-        password = token_urlsafe(24)?;
+        password = random_token(24)?;
         updates.push(("WIKI_ADMIN_PASSWORD", password.clone()));
         println!(".env       WIKI_ADMIN_PASSWORD generated {}", mask(&password));
     }
@@ -723,7 +699,7 @@ pub fn main(args: Args) -> Result<i32, Fatal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wiki::testing::{canned, client, serve};
+    use super::super::testing::{canned, client, serve};
 
     const SAMPLE: &str = "# Copy to .env\r\n\
         # Values are read by Docker Compose too.\n\
@@ -739,7 +715,7 @@ mod tests {
         WIKI_PAGE_ID=7\n";
 
     #[test]
-    fn parse_env_like_python() {
+    fn parse_env_strips_quotes_and_later_lines_win() {
         let v = parse_env(SAMPLE);
         assert_eq!(v["WIKI_BASE"], "http://localhost:3000");
         assert_eq!(v["WIKIJS_API_KEY"], "abc");
@@ -770,7 +746,7 @@ mod tests {
              WIKI_PAGE_ID=7\n\
              WIKI_ADMIN_PASSWORD=pw\n"
         );
-        // Only the first WIKI_PAGE_ID line is updated (same as the Python script).
+        // Only the first WIKI_PAGE_ID line is updated; the later duplicate stays as it was.
         assert_eq!(parse_env(&out)["WIKIJS_API_KEY"], "NEW");
         assert_eq!(render_env("", &[("A", "1")]), "A=1\n");
     }
@@ -807,7 +783,7 @@ mod tests {
         assert_eq!(b64url_encode(b"fo"), "Zm8");
         assert_eq!(b64url_encode(b"foo"), "Zm9v");
         assert_eq!(b64url_encode(&[0xfb, 0xff, 0xbf]), "-_-_");
-        assert_eq!(b64url_encode(&[7u8; 24]).len(), 32); // token_urlsafe(24) length
+        assert_eq!(b64url_encode(&[7u8; 24]).len(), 32); // random_token(24) length
         for s in [&b""[..], b"f", b"fo", b"foo", b"foob", &[0xfb, 0xff, 0xbf, 1]] {
             assert_eq!(b64url_decode(&b64url_encode(s)).unwrap(), s);
         }
@@ -823,13 +799,15 @@ mod tests {
     }
 
     #[test]
-    fn python_repr_and_check() {
-        assert_eq!(py_repr(&json!({"a": 1, "b": [true, null, "it's"]})), r#"{'a': 1, 'b': [True, None, 'it\'s']}"#);
+    fn check_reports_message_or_whole_result() {
+        assert_eq!(text(Some(&json!("it's"))).as_deref(), Some("it's"));
+        assert_eq!(text(Some(&json!({"a": 1, "b": [true, null]}))).as_deref(), Some(r#"{"a":1,"b":[true,null]}"#));
+        assert_eq!((text(None), text(Some(&Value::Null)), text(Some(&json!("")))), (None, None, None));
         assert!(check(&json!({"responseResult": {"succeeded": true, "message": "ok"}}), "x").is_ok());
         assert_eq!(check(&json!({"responseResult": {"succeeded": false, "message": "Nope"}}), "x").unwrap_err().0, "x refused: Nope");
         assert_eq!(
             check(&json!({"responseResult": {"succeeded": false, "message": ""}}), "x").unwrap_err().0,
-            "x refused: {'message': '', 'succeeded': False}"
+            r#"x refused: {"message":"","succeeded":false}"#
         );
         assert_eq!(check(&Value::Null, "purge history").unwrap_err().0, "purge history refused: {}");
     }
@@ -852,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn login_errors_map_like_python() {
+    fn login_errors_explain_rate_limit_and_bad_credentials() {
         let (base, _rx) = serve(vec![
             canned(200, r#"{"errors":[{"message":"Too many requests, please try again in 51 seconds."}]}"#),
             canned(200, r#"{"data":{"authentication":{"login":{"jwt":null,"responseResult":{"succeeded":false,"message":"Invalid email / username or password."}}}}}"#),

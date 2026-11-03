@@ -1,4 +1,4 @@
-//! ENISA EU Vulnerability Database, exploited-vulnerability view. Port of feeds/euvd.py.
+//! ENISA EU Vulnerability Database, exploited-vulnerability view.
 //!
 //! /api/vulnerabilities is 404; /api/search with fromKEVDate/toKEVDate is the
 //! documented query (2026-11-03). The API sends Cache-Control: no-store and no
@@ -14,7 +14,6 @@ use serde_json::{Map, Value};
 use super::common::{self, FetchOutput, GetOpts, Item, Response, SourceError, iso_utc, severity_for};
 
 pub const NAME: &str = "ENISA EUVD";
-pub const TABLE: &str = "kev";
 pub const CADENCE: u64 = 0;
 
 pub const URL: &str = "https://euvdservices.enisa.europa.eu/api/search";
@@ -48,7 +47,7 @@ fn date_of(v: &Value, k: &str) -> Option<DateTime<Utc>> {
     v.get(k).and_then(Value::as_str).and_then(parse_date)
 }
 
-/// Python float(x or 0) for a number or a numeric string.
+/// A number or numeric string as f64; 0 when missing, empty or not numeric.
 pub(crate) fn num(v: Option<&Value>) -> f64 {
     match v {
         Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
@@ -57,12 +56,12 @@ pub(crate) fn num(v: Option<&Value>) -> f64 {
     }
 }
 
-/// Python (v.get(k) or ""), for string fields.
+/// v[k] as a string ("" when missing or not a string).
 pub(crate) fn str_or_empty<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
 }
 
-/// Python " ".join(s.split()).
+/// Runs of whitespace collapsed to one space, trimmed at both ends.
 pub(crate) fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -70,7 +69,7 @@ pub(crate) fn squash(s: &str) -> String {
 const LINE_BREAKS: &[char] = &['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'];
 
 pub fn to_item(v: &Value) -> Result<Item, SourceError> {
-    // Python str.splitlines(); empty pieces are dropped, so "\r\n" splitting in two is harmless.
+    // Split at any line boundary; empty pieces are dropped, so "\r\n" splitting in two is harmless.
     let aliases: Vec<&str> = str_or_empty(v, "aliases").split(LINE_BREAKS).map(str::trim).filter(|a| !a.is_empty()).collect();
     let cves: Vec<String> = aliases.iter().filter(|a| a.starts_with("CVE-")).map(|a| a.to_string()).collect();
     let euvd_id = v.get("id").and_then(Value::as_str).ok_or_else(|| SourceError::new(format!("{NAME}: item without id")))?;

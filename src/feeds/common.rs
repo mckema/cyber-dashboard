@@ -1,31 +1,33 @@
-//! Shared contract for every feed module (port of feeds/common.py).
+//! Shared contract for every feed module.
 //!
 //! A feed module exposes:
 //!
 //!   NAME      display name, e.g. "CISA KEV"               (shown in the health table)
-//!   TABLE     page table its items go to: "kev" | "adv" | "dep" | "cve" | "nvd" | "osint"
 //!   CADENCE   minimum seconds between real fetches (0 = every run). Between fetches
 //!             run.rs reuses the items cached from the last success.
 //!   fetch(start, end) -> Result<FetchOutput, SourceError>
 //!             start/end bound the 7-day window (UTC). Return Err on any failure;
 //!             never a partial list.
 //!
-//! Item.extra keys per table (render.rs reads these; anything else is ignored):
+//! Item.extra keys per page table (run.rs decides which feed fills which table;
+//! render reads these keys, anything else is ignored). Values are strings unless
+//! marked otherwise:
 //!
 //!   kev    vendor, product, due (YYYY-MM-DD, CISA only), euvd_id, exploited_since,
 //!          sources (list of feed NAMEs, filled when run.rs merges KEV + EUVD)
-//!   adv    version, products (list[str]), probability, impact (NCSC-NL "Kans"/"Schade": H/M/L)
-//!   dep    ghsa, ecosystems (list), packages (list), fixed (list), npkg (int)
+//!   adv    version, products (list), probability, impact (NCSC-NL "Kans"/"Schade": H/M/L)
+//!   dep    ghsa, ecosystems (list), packages (list), fixed (list), npkg (number)
 //!   cve    score_source ("CNA" | "CISA-ADP" | "NVD"), vector, av, pr, vendors (list),
-//!          ssvc_exploitation ("none" | "poc" | "active" | ""), assigner, nvd_score
+//!          ssvc_exploitation ("none" | "poc" | "active" | ""), assigner,
+//!          nvd_score (number, or "" when NVD has none)
 //!   nvd    vector, vendors (list)      -- enrichment only, merged into "cve" items
 //!   osint  threat_level, tags (list), org
 //!   any    summary (short description, optional)
 //!
 //! Health rows: see render::HealthRow.
 //!
-//! On-disk formats (state/) are shared with the earlier Python job, so a switch
-//! between the two never needs a backfill. Keep field names as they are.
+//! On-disk formats (state/) are kept stable so existing state never needs a
+//! backfill. Keep field names as they are.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -103,6 +105,16 @@ impl Item {
     /// extra[k] as a string ("" when missing or not a string).
     pub fn x(&self, k: &str) -> &str {
         self.extra.get(k).and_then(Value::as_str).unwrap_or("")
+    }
+
+    /// extra[k] as a list of strings (empty when missing or not a list; non-string elements are skipped).
+    pub fn x_list(&self, k: &str) -> Vec<&str> {
+        self.extra.get(k).and_then(Value::as_array).map_or_else(Vec::new, |a| a.iter().filter_map(Value::as_str).collect())
+    }
+
+    /// extra[k] as a number (None when missing or not a number).
+    pub fn x_num(&self, k: &str) -> Option<f64> {
+        self.extra.get(k).and_then(Value::as_f64)
     }
 }
 
@@ -306,22 +318,26 @@ mod tests {
     }
 
     #[test]
-    fn item_roundtrip_matches_python_shape() {
-        // Shape written by the Python job (state/items/*.json).
-        let py = r#"{"source": "CISA KEV", "id": "CVE-1", "url": "u", "title": "t",
+    fn item_json_roundtrip() {
+        // Shape of state/items/*.json (integer score, spaces after separators).
+        let stored = r#"{"source": "CISA KEV", "id": "CVE-1", "url": "u", "title": "t",
                      "published": "2026-11-03", "updated": "", "cves": ["CVE-1"], "score": 0,
-                     "severity": "", "extra": {"vendor": "Ivanti", "sources": ["CISA KEV"]}}"#;
-        let it: Item = serde_json::from_str(py).unwrap();
+                     "severity": "", "extra": {"vendor": "Ivanti", "sources": ["CISA KEV"], "npkg": 5}}"#;
+        let it: Item = serde_json::from_str(stored).unwrap();
         assert_eq!(it.key(), "CISA KEV:CVE-1");
         assert_eq!(it.x("vendor"), "Ivanti");
+        assert_eq!(it.x("npkg"), "");
+        assert_eq!(it.x_list("sources"), ["CISA KEV"]);
+        assert!(it.x_list("vendor").is_empty());
+        assert_eq!((it.x_num("npkg"), it.x_num("vendor")), (Some(5.0), None));
         let back: Item = serde_json::from_str(&serde_json::to_string(&it).unwrap()).unwrap();
         assert_eq!(back, it);
     }
 
     #[test]
-    fn cache_key_matches_python() {
-        // Reference values from Python (hashlib.sha1 / requests' prepared URL), so
-        // the http/ cache written by the earlier Python job carries over.
+    fn cache_key_is_stable() {
+        // sha1 of the full URL, with params encoded as below; the http/ cache
+        // already on disk is keyed this way.
         assert_eq!(cache_name("https://example.org/a"), "http/579f2a2ceeee0bc369f88d8b2b891d6263265b30");
         assert_eq!(
             full_url("https://api.github.com/advisories", &[("published", "2026-10-27..2026-11-03"),

@@ -1,11 +1,12 @@
 //! Wiki.js 2.5 GraphQL client shared by `run` (bot API key, optional IAP token)
-//! and `bootstrap` (admin JWT). Port of rebuild.py `wiki_headers()` + `gql()` and
-//! bootstrap_wiki.py `class Wiki`.
+//! and `bootstrap` (admin JWT; the setup steps themselves are in bootstrap.rs).
 //!
 //! Wiki.js 2.5 never answers 401 for a bad key: an unknown key is treated as a
 //! guest (HTTP 200 + "not authorized" in errors), a revoked key or a disabled API
 //! is HTTP 500 with a message. Proxy settings come from HTTP(S)_PROXY / NO_PROXY
 //! (inside compose the wiki is http://wiki:3000 and NO_PROXY lists `wiki`).
+
+pub mod bootstrap;
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -17,10 +18,10 @@ use serde_json::{Value, json};
 use crate::feeds::common::{self, Fatal};
 
 pub const DEFAULT_BASE: &str = "https://wiki2.internal.ediphy.io";
-/// Per-request timeout of the bootstrap client (bootstrap_wiki.py TIMEOUT).
+/// Per-request timeout of the bootstrap client.
 pub const ADMIN_TIMEOUT_SECS: u64 = 30;
 
-/// First `n` characters of `s` (Python's `s[:n]`; never splits a UTF-8 sequence).
+/// First `n` characters of `s` (never splits a UTF-8 sequence).
 pub fn head(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
         Some((i, _)) => &s[..i],
@@ -61,8 +62,8 @@ pub fn bot_base() -> String {
 }
 
 /// GraphQL call as the job: WIKI_BASE + WIKIJS_API_KEY (+ IAP_ID_TOKEN as
-/// Proxy-Authorization when set). Returns `data`, or Fatal with the same
-/// messages as rebuild.py's gql().
+/// Proxy-Authorization when set). Returns `data`, or Fatal naming what went
+/// wrong (unreachable, IAP sign-in redirect, HTTP status, GraphQL errors).
 pub fn gql_bot(query: &str, variables: Value) -> Result<Value, Fatal> {
     let key = std::env::var("WIKIJS_API_KEY").unwrap_or_default();
     let iap = std::env::var("IAP_ID_TOKEN").unwrap_or_default();
@@ -72,7 +73,6 @@ pub fn gql_bot(query: &str, variables: Value) -> Result<Value, Fatal> {
 /// gql_bot with explicit inputs (tests, or callers with their own client).
 pub fn gql_bot_with(client: &Client, base: &str, key: &str, iap: &str, query: &str, variables: Value)
     -> Result<Value, Fatal> {
-    // wiki_headers()
     if key.is_empty() {
         return Err(Fatal("WIKIJS_API_KEY is empty".into()));
     }
@@ -158,7 +158,7 @@ pub struct Reply {
     pub json: Option<Value>,
 }
 
-/// Admin-side client used by bootstrap (port of bootstrap_wiki.py `class Wiki`).
+/// Admin-side client used by bootstrap.
 pub struct Wiki {
     pub base: String,
     client: Client,

@@ -1,4 +1,4 @@
-//! One rebuild of the Cyber Threat Exploit Watch page. Port of rebuild.py.
+//! One rebuild of the Cyber Threat Exploit Watch page.
 //!
 //! Pulls eight public feeds (see feeds/mod.rs), rebuilds the six table bodies
 //! and the counters on the page, and writes the result back through the
@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 
 use crate::feeds::common::{Fatal, Item, iso_utc, parse_iso};
 use crate::feeds::{self, Feed, state};
-use crate::render::{self, HealthRow, Regions};
+use crate::render::{self, HealthRow, Regions, thousands};
 use crate::wiki;
 
 const WINDOW_DAYS: i64 = 7;
@@ -61,22 +61,10 @@ fn heartbeat() -> Duration {
     Duration::seconds((env_num("HEARTBEAT_HOURS", 6.0_f64) * 3600.0) as i64)
 }
 
-/// Python's str(timedelta) for whole seconds, e.g. "6:00:00".
+/// Whole-second duration as H:MM:SS, e.g. "6:00:00".
 fn td_str(d: Duration) -> String {
     let s = d.num_seconds();
     format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
-}
-
-fn thousands(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -208,17 +196,6 @@ fn merge_exploited(kev: &[Item], euvd: &[Item]) -> Vec<Item> {
     rows
 }
 
-fn truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
-        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
-    }
-}
-
 /// Add NVD's score to CVE.org records; fill the score where the CNA and CISA ADP gave none.
 fn enrich_cves(cves: &[Item], nvd: &[Item]) -> Vec<Item> {
     let by_id: HashMap<&str, &Item> = nvd.iter().map(|i| (i.id.as_str(), i)).collect();
@@ -233,7 +210,7 @@ fn enrich_cves(cves: &[Item], nvd: &[Item]) -> Vec<Item> {
                 if !it.extra.contains_key("vector") {
                     it.extra.insert("vector".into(), n.extra.get("vector").cloned().unwrap_or(json!("")));
                 }
-                if truthy(n.extra.get("vendors")) && !truthy(it.extra.get("vendors")) {
+                if !n.x_list("vendors").is_empty() && it.x_list("vendors").is_empty() {
                     it.extra.insert("vendors".into(), n.extra["vendors"].clone());
                 }
             }
@@ -278,63 +255,6 @@ fn sla_stats(fs: &[Feed], tables: &[Vec<Item>], health: &[HealthRow], now: DateT
 
 // ---------------------------------------------------------------- fingerprint
 
-/// json.dumps(v, sort_keys=True) exactly as Python writes it (", " / ": "
-/// separators, ensure_ascii), so the fingerprint stored by the Python job in
-/// state/wiki.json stays valid after a switch.
-fn py_json(v: &Value, out: &mut String) {
-    match v {
-        Value::Null => out.push_str("null"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Number(n) => out.push_str(&n.to_string()),
-        Value::String(s) => {
-            out.push('"');
-            for c in s.chars() {
-                match c {
-                    '"' => out.push_str("\\\""),
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    '\u{08}' => out.push_str("\\b"),
-                    '\u{0c}' => out.push_str("\\f"),
-                    c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
-                        let mut buf = [0u16; 2];
-                        for u in c.encode_utf16(&mut buf) {
-                            out.push_str(&format!("\\u{u:04x}"));
-                        }
-                    }
-                    c => out.push(c),
-                }
-            }
-            out.push('"');
-        }
-        Value::Array(a) => {
-            out.push('[');
-            for (i, x) in a.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                py_json(x, out);
-            }
-            out.push(']');
-        }
-        Value::Object(o) => {
-            out.push('{');
-            let mut keys: Vec<&String> = o.keys().collect();
-            keys.sort();
-            for (i, k) in keys.into_iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                py_json(&Value::String(k.clone()), out);
-                out.push_str(": ");
-                py_json(&o[k], out);
-            }
-            out.push('}');
-        }
-    }
-}
-
 /// The page with the regions that change on every run (VOLATILE and the stamp)
 /// emptied, so two pages compare equal when they carry the same data.
 fn without_volatile(html: &str) -> Result<String, Fatal> {
@@ -350,6 +270,8 @@ fn without_volatile(html: &str) -> Result<String, Fatal> {
     render::apply_regions(html, &r)
 }
 
+/// sha256 hex of the regions that carry data, plus each feed's status. Stored in
+/// state/wiki.json; an equal fingerprint means there is nothing new to write.
 fn fingerprint(regions: &Regions, health: &[HealthRow]) -> String {
     let pick = |v: &[(String, String)]| -> Map<String, Value> {
         v.iter().filter(|(k, _)| !VOLATILE.contains(&k.as_str())).map(|(k, x)| (k.clone(), json!(x))).collect()
@@ -360,8 +282,8 @@ fn fingerprint(regions: &Regions, health: &[HealthRow]) -> String {
         // Health statuses count (a feed going stale is news); their timestamps don't.
         "health": health.iter().map(|h| json!([h.source, h.status])).collect::<Vec<_>>(),
     });
-    let mut s = String::new();
-    py_json(&stable, &mut s);
+    // serde_json::Map is a BTreeMap (no preserve_order feature), so object keys are serialised sorted.
+    let s = serde_json::to_string(&stable).expect("JSON value");
     hex::encode(Sha256::digest(s.as_bytes()))
 }
 
@@ -532,17 +454,20 @@ mod tests {
     }
 
     #[test]
-    fn py_json_matches_python_dumps() {
-        // python3 -c 'import json; print(json.dumps({"b": ["é", "x\"y"], "a": 1, "c": {"z": None, "y": True}}, sort_keys=True))'
-        let v = json!({"b": ["é", "x\"y"], "a": 1, "c": {"z": null, "y": true}});
-        let mut s = String::new();
-        py_json(&v, &mut s);
-        // Expected strings are Python's output, written with ASCII-only escapes.
-        let bs = char::from_u32(0x5C).unwrap();
-        assert_eq!(s, format!("{{\"a\": 1, \"b\": [\"{bs}u00e9\", \"x{bs}\"y\"], \"c\": {{\"y\": true, \"z\": null}}}}"));
-        let mut e = String::new();
-        py_json(&json!(format!("&middot; {}", char::from_u32(0x1F600).unwrap())), &mut e);
-        assert_eq!(e, format!("\"&middot; {bs}ud83d{bs}ude00\""));
+    fn fingerprint_follows_data_not_volatile_regions() {
+        let regions = |kev: &str, win: &str| Regions {
+            tbody: vec![("t-health".into(), win.into()), ("t-kev".into(), kev.into())],
+            text: vec![("winlabel".into(), win.into()), ("s-kev".into(), "1".into())],
+            stamp: win.into(),
+        };
+        let health = |status: &str| vec![HealthRow { source: "CISA KEV".into(), status: status.into(), ..Default::default() }];
+        let a = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"));
+        assert_eq!(a.len(), 64);
+        assert_eq!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:33"), &health("ok")));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-2</tr>", "06:03"), &health("ok")));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("stale")));
+        // Keys are serialised in sorted order, whatever order the map was built in.
+        assert_eq!(serde_json::to_string(&json!({"b": 1, "a": {"z": 0, "y": 0}})).unwrap(), r#"{"a":{"y":0,"z":0},"b":1}"#);
     }
 
     #[test]
@@ -589,8 +514,6 @@ mod tests {
 
     #[test]
     fn helpers() {
-        assert_eq!(thousands(326927), "326,927");
-        assert_eq!(thousands(15), "15");
         assert_eq!(td_str(Duration::hours(6)), "6:00:00");
         let mut a = item("A", "1");
         a.updated = "2026-11-03T04:00:00Z".into();

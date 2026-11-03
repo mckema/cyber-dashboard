@@ -1,5 +1,5 @@
 //! NVD CVE API 2.0: enrichment only (NVD score and CPE vendors merged into the "cve"
-//! table). Port of feeds/nvd.py.
+//! table).
 //!
 //! NVD asks clients to poll incrementally no more often than every 2 hours with
 //! lastModStartDate/lastModEndDate, so CADENCE is 7200 and each fetch asks only
@@ -9,7 +9,7 @@
 //!
 //! Rate limit: 5 requests / 30 s without a key, 50 with NVD_API_KEY.
 //!
-//! State (same files and shapes as the Python job):
+//! State:
 //!   cursors/nvd.json          {last_mod_end, stats}
 //!   cursors/nvd_records.json  {cveId: Item as JSON} for every CVE published in the window
 
@@ -23,7 +23,6 @@ use super::cvelist::vector_bits;
 use super::state;
 
 pub const NAME: &str = "NVD";
-pub const TABLE: &str = "nvd";
 pub const CADENCE: u64 = 7200;
 
 pub const URL: &str = "https://services.nvd.nist.gov/rest/json/cves/2.0";

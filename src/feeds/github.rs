@@ -1,4 +1,4 @@
-//! GitHub Advisory Database: reviewed critical and high advisories. Port of feeds/github.py.
+//! GitHub Advisory Database: reviewed critical and high advisories.
 //!
 //! The original fetch_gh read one page per severity and silently dropped the rest
 //! (125 high advisories in the 7 days to 2026-11-03 = 2 pages). This follows
@@ -23,7 +23,6 @@ use super::common::{self, FetchOutput, GetOpts, Item, Response, SourceError, iso
 use super::state;
 
 pub const NAME: &str = "GitHub Advisory";
-pub const TABLE: &str = "dep";
 pub const CADENCE: u64 = 0;
 
 pub const URL: &str = "https://api.github.com/advisories";
@@ -164,7 +163,7 @@ where
 {
     let mut n = Counts::default();
     let mut nexts: Map<String, Value> = state::load_json(NEXT).unwrap_or_default();
-    // keyed by GHSA id, first-insertion order kept like a Python dict
+    // keyed by GHSA id, in first-insertion order
     let (mut items, mut pos): (Vec<Item>, HashMap<String, usize>) = (Vec::new(), HashMap::new());
     for sev in SEVERITIES {
         for a in fetch_severity(get, &mut n, sev, start, end, &mut nexts)? {

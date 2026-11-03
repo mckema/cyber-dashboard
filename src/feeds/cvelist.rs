@@ -1,5 +1,5 @@
 //! CVE.org cvelistV5: the primary CVE feed (CNA-published records, minutes after
-//! publication). Port of feeds/cvelist.py.
+//! publication).
 //!
 //! Steady state reads only the head of cves/deltaLog.json (36 MB, newest first)
 //! with a byte Range, takes the entries newer than the saved cursor, and fetches
@@ -14,7 +14,7 @@
 //! Release downloads go to github.com, not api.github.com, so they do not spend
 //! the 60 req/h API budget. Never touch *_all_CVEs_at_midnight (650 MB).
 //!
-//! State (same files and shapes as the Python job):
+//! State:
 //!   cursors/cvelist.json          {fetch_time, run_at, retry: {cveId: [url, tries]}, stats}
 //!   cursors/cvelist_records.json  {cveId: Item as JSON} for every in-window record
 
@@ -30,7 +30,6 @@ use super::common::{self, FetchOutput, GetOpts, Item, Response, SourceError, iso
 use super::state;
 
 pub const NAME: &str = "CVE.org cvelistV5";
-pub const TABLE: &str = "cve";
 pub const CADENCE: u64 = 0;
 
 pub const DELTA_URL: &str = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json";
@@ -91,7 +90,7 @@ pub fn vector_bits(vec: &str) -> (&'static str, &'static str) {
     (av, pr)
 }
 
-/// Python float(x) for a number or a numeric string.
+/// A number or numeric string as f64; None for anything else.
 fn as_score(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),
@@ -133,7 +132,7 @@ pub fn other_severity(metrics: &[Value]) -> &'static str {
     ""
 }
 
-/// Python truthiness for a JSON value.
+/// False for null, false, 0, "", [] and {}; true otherwise.
 fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
@@ -177,7 +176,7 @@ fn bad(what: &str, cid: &str, val: &str) -> SourceError {
 }
 
 /// CVE JSON 5 record -> Item, or None when it is not a published record.
-/// Err when a published record has an unparseable date (Python raised there too).
+/// Err when a published record has an unparseable date.
 pub fn parse_record(rec: &Value) -> Result<Option<Item>, SourceError> {
     let empty = Value::Null;
     let meta = rec.get("cveMetadata").unwrap_or(&empty);
@@ -400,7 +399,7 @@ fn fetch_records<G>(get: &G, cost: &mut Cost, links: &BTreeMap<String, String>) 
 where
     G: Fn(&str, &str, GetOpts) -> Result<Response, SourceError> + Sync,
 {
-    let work: Vec<(&String, &String)> = links.iter().collect(); // sorted by cveId, like Python
+    let work: Vec<(&String, &String)> = links.iter().collect(); // sorted by cveId
     let next = AtomicUsize::new(0);
     let mut results: Vec<(usize, Result<Response, SourceError>)> = Vec::with_capacity(work.len());
     if !work.is_empty() {
@@ -706,7 +705,7 @@ mod tests {
     }
 
     fn delta_log(entries: &[Value]) -> Vec<u8> {
-        // indent=2 like the Python test (and the real file)
+        // indent=2, like the real file
         let mut buf = Vec::new();
         let fmt = serde_json::ser::PrettyFormatter::with_indent(b"  ");
         serde::Serialize::serialize(&entries, &mut serde_json::Serializer::with_formatter(&mut buf, fmt)).unwrap();

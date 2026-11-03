@@ -1,11 +1,11 @@
-//! CERT-EU security advisories. Port of feeds/certeu.py.
+//! CERT-EU security advisories.
 //!
 //! The RSS lists the latest 10 advisories, ordered by latest revision. Its pubDate
 //! carries a zone *label* ("CEST", "CET") that an RFC 2822 parser does not know, so
 //! the exact time comes from the per-advisory JSON, whose publish_date is UTC
 //! without a marker (checked 2026-11-03: RSS 16:36:26 CEST == JSON 14:36:26 on all
 //! 10 items). The JSON is fetched only when a serial is new or its pubDate changed;
-//! the result is kept in cursors/certeu.json (same shape as the Python job writes).
+//! the result is kept in cursors/certeu.json (shape: see Rec).
 //!
 //! The RSS sends no ETag/Last-Modified and answers If-Modified-Since with 200, so
 //! it is fetched unconditionally (~10 KB). The site sits behind an Azure
@@ -24,7 +24,6 @@ use super::common::{self, FetchOutput, GetOpts, Item, Response, SourceError, iso
 use super::state;
 
 pub const NAME: &str = "CERT-EU";
-pub const TABLE: &str = "adv";
 pub const CADENCE: u64 = 0;
 
 pub const RSS: &str = "https://cert.europa.eu/publications/security-advisories-rss";
@@ -54,25 +53,25 @@ pub fn json_url(serial: &str) -> String {
 /// The pluggable GET, so tests can serve fixtures. Production passes common::get.
 pub type Getter<'a> = dyn FnMut(&str, &str, GetOpts) -> Result<Response, SourceError> + 'a;
 
-// ---------------------------------------------------------------- python-compatible text helpers
+// ---------------------------------------------------------------- text helpers
 
-/// Python str.isspace(): Unicode White_Space plus the ASCII separators \x1c..\x1f.
-fn is_py_ws(c: char) -> bool {
+/// Whitespace: Unicode White_Space plus the ASCII separators \x1c..\x1f.
+fn is_space(c: char) -> bool {
     c.is_whitespace() || ('\x1c'..='\x1f').contains(&c)
 }
 
-/// Python " ".join(s.split()).
+/// Runs of whitespace collapsed to one space, trimmed at both ends.
 fn squash(s: &str) -> String {
-    s.split(is_py_ws).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+    s.split(is_space).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
-/// Python s.strip().
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(is_py_ws)
+/// s without leading and trailing whitespace (see is_space).
+fn strip_space(s: &str) -> &str {
+    s.trim_matches(is_space)
 }
 
-/// Python str.splitlines() (without keepends).
-fn py_splitlines(s: &str) -> Vec<&str> {
+/// Lines of s split at any line boundary (\n, \r\n, \r, \x0b, \x0c, \x1c-\x1e, NEL, LS, PS), without the breaks.
+fn split_lines(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut it = s.char_indices().peekable();
@@ -93,8 +92,8 @@ fn py_splitlines(s: &str) -> Vec<&str> {
     out
 }
 
-/// Python repr() of a str, for error messages that quote a value with !r.
-fn py_repr(s: &str) -> String {
+/// s in single quotes with backslash escapes (double quotes when s holds only a single quote), for error messages.
+fn quoted(s: &str) -> String {
     let q = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
     let mut out = String::from(q);
     for c in s.chars() {
@@ -126,8 +125,8 @@ pub struct Entry {
     pub pubdate: String,
 }
 
-/// One advisory as kept in cursors/certeu.json. Field order and names follow the
-/// Python job: id, url, title, published, updated, cves, extra, [fallback], pubdate.
+/// One advisory as kept in cursors/certeu.json. Field order and names are part of
+/// the stored format: id, url, title, published, updated, cves, extra, [fallback], pubdate.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Rec {
     pub id: String,
@@ -158,7 +157,7 @@ impl Rec {
     }
 }
 
-/// RFC 2822 date with numeric or GMT/UT/UTC/Z zone, like Python's parsedate_to_datetime
+/// RFC 2822 date with numeric or GMT/UT/UTC/Z zone
 /// (a leading day name is dropped and not checked; "-0000" means "no zone" and gives None).
 fn parse_rfc2822(s: &str) -> Option<DateTime<Utc>> {
     let mut words: Vec<&str> = s.split_whitespace().collect();
@@ -179,7 +178,7 @@ fn parse_rfc2822(s: &str) -> Option<DateTime<Utc>> {
 
 /// "Fri, 23 Oct 2026 16:36:26 CEST" -> UTC time. None if the zone label is unknown.
 pub fn parse_pubdate(s: &str) -> Option<DateTime<Utc>> {
-    let s = py_strip(s);
+    let s = strip_space(s);
     let (head, zone) = match s.rfind(' ') {
         Some(i) => (&s[..i], &s[i + 1..]),
         None => ("", s),
@@ -193,7 +192,7 @@ pub fn parse_pubdate(s: &str) -> Option<DateTime<Utc>> {
     parse_rfc2822(s)
 }
 
-/// Python Element.findtext(name): text of the first direct child `name` (no namespace),
+/// Text of the first direct child `name` (no namespace),
 /// up to its first child element. None when there is no such child.
 fn findtext(node: roxmltree::Node, name: &str) -> Option<String> {
     let child = node.children().find(|c| c.is_element() && c.tag_name().name() == name && c.tag_name().namespace().is_none())?;
@@ -220,7 +219,7 @@ pub fn parse_rss(content: &[u8]) -> Result<Vec<Entry>, SourceError> {
     let mut seen = BTreeSet::new();
     for it in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "item" && n.tag_name().namespace().is_none()) {
         let title = findtext(it, "title").unwrap_or_default();
-        let Some(m) = SERIAL.captures(py_strip(&title)) else {
+        let Some(m) = SERIAL.captures(strip_space(&title)) else {
             continue; // not an advisory title like "2026-018: …"
         };
         let serial = m[1].to_string();
@@ -228,11 +227,11 @@ pub fn parse_rss(content: &[u8]) -> Result<Vec<Entry>, SourceError> {
             continue; // feed is ordered by latest revision: the first entry wins
         }
         let link = findtext(it, "link").unwrap_or_default();
-        let link = py_strip(&link);
+        let link = strip_space(&link);
         out.push(Entry {
             title: squash(&m[2]),
             url: if link.is_empty() { page(&serial) } else { link.to_string() },
-            pubdate: py_strip(&findtext(it, "pubDate").unwrap_or_default()).to_string(),
+            pubdate: strip_space(&findtext(it, "pubDate").unwrap_or_default()).to_string(),
             serial,
         });
     }
@@ -243,9 +242,9 @@ pub fn parse_rss(content: &[u8]) -> Result<Vec<Entry>, SourceError> {
 pub fn front_matter(md: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     if let Some(m) = FRONT.captures(md) {
-        for line in py_splitlines(&m[1]) {
+        for line in split_lines(&m[1]) {
             if let Some((k, v)) = line.split_once(':') {
-                out.insert(py_strip(k).to_string(), py_strip(v).trim_matches(['\'', '"']).to_string());
+                out.insert(strip_space(k).to_string(), strip_space(v).trim_matches(['\'', '"']).to_string());
             }
         }
     }
@@ -262,19 +261,19 @@ pub fn first_release_date(md: &str, fm: &HashMap<String, String>) -> String {
     fm.get("date").cloned().unwrap_or_default()
 }
 
-/// j[key] as a string; Err in the form Python's str(KeyError) takes ("'serial_number'").
+/// j[key] as a string; Err is the quoted key ("'serial_number'") when it is missing.
 fn key_str(j: &Value, key: &str) -> Result<String, String> {
     match j.get(key) {
         Some(Value::String(s)) => Ok(s.clone()),
         Some(Value::Number(n)) => Ok(n.to_string()),
         Some(other) => Err(format!("{key} is not a string: {other}")),
-        None => Err(py_repr(key)),
+        None => Err(quoted(key)),
     }
 }
 
 /// Advisory JSON -> record. prev is the cached record for the same serial: when it
 /// holds an exact v1.0 time, that stays the published time after revisions.
-/// Err carries the text Python's str(exception) would give.
+/// Err is a one-line reason (missing key, bad date).
 pub fn parse_advisory(j: &Value, prev: Option<&Rec>) -> Result<Rec, String> {
     let serial = key_str(j, "serial_number")?;
     let md = j.get("content_markdown").and_then(Value::as_str).unwrap_or("");
@@ -282,7 +281,7 @@ pub fn parse_advisory(j: &Value, prev: Option<&Rec>) -> Result<Rec, String> {
     let version = fm.get("version").cloned().unwrap_or_default();
     let pd = key_str(j, "publish_date")?;
     let latest = NaiveDateTime::parse_from_str(&pd, "%d-%m-%Y %H:%M:%S")
-        .map_err(|_| format!("time data {} does not match format '%d-%m-%Y %H:%M:%S'", py_repr(&pd)))?;
+        .map_err(|_| format!("time data {} does not match format '%d-%m-%Y %H:%M:%S'", quoted(&pd)))?;
     let latest = iso_utc(latest.and_utc());
     let (published, updated) = if ["", "1", "1.0"].contains(&version.as_str()) {
         (latest, String::new())
@@ -315,7 +314,7 @@ pub fn from_rss(e: &Entry) -> Result<Rec, SourceError> {
         SourceError::new(format!(
             "{NAME}: {} JSON unavailable and pubDate {} has an unknown zone; add it to ZONES",
             e.serial,
-            py_repr(&e.pubdate)
+            quoted(&e.pubdate)
         ))
     })?;
     let mut extra = Map::new();
@@ -363,7 +362,7 @@ pub fn fetch_with(start: DateTime<Utc>, end: DateTime<Utc>, get: &mut Getter) ->
     let mut keep = Map::new();
     let mut items = Vec::new();
     for e in &entries {
-        // A record the Python job wrote is read the same way; an unreadable one counts as a miss.
+        // An unreadable cached record counts as a miss.
         let cached: Option<Rec> = cache.get(&e.serial).and_then(|v| serde_json::from_value(v.clone()).ok());
         let rec = match cached {
             Some(r) if r.pubdate.as_deref() == Some(e.pubdate.as_str()) && !r.fallback => r,
@@ -404,7 +403,7 @@ pub fn fetch_with(start: DateTime<Utc>, end: DateTime<Utc>, get: &mut Getter) ->
     Ok(items.into())
 }
 
-/// Newest first by updated-or-published; stable, like Python's sort(reverse=True).
+/// Newest first by updated-or-published; stable, so ties keep their order.
 fn sort_newest_first(items: &mut [Item]) {
     let key = |i: &Item| if i.updated.is_empty() { i.published.clone() } else { i.updated.clone() };
     items.sort_by(|a, b| key(b).cmp(&key(a)));
@@ -413,7 +412,7 @@ fn sort_newest_first(items: &mut [Item]) {
 // ---------------------------------------------------------------- tests
 
 /// Test seam shared by the certeu, ncscnl and circl tests: a fake GET that serves
-/// fixtures by URL and records the calls (port of FakeGet in tests/test_feeds_adv.py).
+/// fixtures by URL and records the calls.
 #[cfg(test)]
 pub(crate) mod fake {
     use std::collections::HashMap;
@@ -470,15 +469,6 @@ pub(crate) mod fake {
         pub fn clear(&mut self) {
             self.calls.clear();
             self.conditional.clear();
-        }
-    }
-
-    /// Write a parity dump to $PARITY_OUT/rs_<tag>.json (no-op when unset).
-    pub fn dump(tag: &str, v: &serde_json::Value) {
-        if let Some(dir) = std::env::var_os("PARITY_OUT") {
-            let p = Path::new(&dir).join(format!("rs_{tag}.json"));
-            std::fs::write(&p, serde_json::to_vec_pretty(v).unwrap()).unwrap();
-            eprintln!("wrote {}", p.display());
         }
     }
 
@@ -695,10 +685,10 @@ mod tests {
         assert!(err.message.contains("RSS has no advisory items"), "{err}");
     }
 
-    /// Reads a cursor written by the Python job (same file, same shape) and writes it back unchanged.
+    /// The cursor record keeps its stored shape: these keys, pubdate as received, no fallback.
     #[test]
-    fn python_cursor_shape() {
-        let _t = state::testing::temp_state("certeu-pycursor");
+    fn cursor_record_shape() {
+        let _t = state::testing::temp_state("certeu-record");
         let mut fake = routes();
         run(&mut fake).unwrap();
         let cur: Value = state::load_json(CURSOR).unwrap();
@@ -709,50 +699,7 @@ mod tests {
         assert_eq!(keys, BTreeSet::from(["id", "url", "title", "published", "updated", "cves", "extra", "pubdate"]));
     }
 
-    // ------------------------------------------------ parity / live (manual)
-
-    /// PARITY_OUT=<dir> cargo test -- --ignored certeu::tests::parity_dump
-    #[test]
-    #[ignore]
-    fn parity_dump() {
-        use serde_json::json;
-        let pubdates: Map<String, Value> = PUBDATES
-            .iter()
-            .map(|s| (s.to_string(), json!(parse_pubdate(s).map(iso_utc))))
-            .collect();
-        let md = |n: &str| advisory(n)["content_markdown"].as_str().unwrap().to_string();
-        let prev = Rec { published: "2026-10-20T08:00:00Z".into(), ..Default::default() };
-        let fetch_case = |tag: &str, fail_019: bool| {
-            let _t = state::testing::temp_state(tag);
-            let mut fake = routes();
-            if fail_019 {
-                fake.route(&json_url("2026-019"), Err(SourceError::new("CERT-EU 2026-019 JSON: HTTP 503")));
-            }
-            let items = run(&mut fake).unwrap();
-            json!({"items": items, "cursor": state::load_json::<Value>(CURSOR), "calls": fake.calls})
-        };
-        super::fake::dump("certeu", &json!({
-            "pubdate": pubdates,
-            "rss": parse_rss(&fixture("certeu_rss.xml")).unwrap(),
-            "front_matter": {"018": front_matter(&md("certeu_2026-018.json")), "019": front_matter(&md("certeu_2026-019.json"))},
-            "advisory": {
-                "018": parse_advisory(&advisory("certeu_2026-018.json"), None).unwrap(),
-                "019": parse_advisory(&advisory("certeu_2026-019.json"), None).unwrap(),
-                "018_prev": parse_advisory(&advisory("certeu_2026-018.json"), Some(&prev)).unwrap(),
-            },
-            "fetch": fetch_case("certeu-parity", false),
-            "fetch_fallback": fetch_case("certeu-parity-fb", true),
-        }));
-    }
-
-    const PUBDATES: &[&str] = &[
-        "Fri, 23 Oct 2026 16:36:26 CEST", "Mon, 02 Mar 2026 18:00:00 CET", "Mon, 02 Nov 2026 09:17:50 +0000",
-        "Mon, 02 Nov 2026 09:17:50 GMT", "Mon, 02 Nov 2026 09:17:50 EEST", "", "Thu, 15 Oct 2026 11:38:20 CEST",
-        "23 Oct 2026 16:36:26 +0200", "Fri, 23 Oct 2026 16:36:26 -0000", "Fri, 23 Oct 2026 16:36:26 UTC",
-        "Fri, 23 Oct 2026 16:36 CEST", "Sat, 23 Oct 2026 16:36:26 CEST", "garbage", "Fri, 23 Oct 26 16:36:26 +0100",
-        "Fri, 23 Oct 2026 16:36:26 Z", "Fri, 23 Oct 2026 16:36:26 EST", "  Fri, 23 Oct 2026 16:36:26 CEST  ",
-        "Fri, 23 Oct 2026 16:36:26 +0530",
-    ];
+    // ------------------------------------------------ live (manual)
 
     /// EW_STATE_COPY=<copy of state/> cargo test -- --ignored certeu::tests::live_state_copy --nocapture
     #[test]

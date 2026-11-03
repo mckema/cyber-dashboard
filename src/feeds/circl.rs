@@ -1,4 +1,4 @@
-//! CIRCL OSINT MISP feed. Port of feeds/circl.py.
+//! CIRCL OSINT MISP feed.
 //!
 //! manifest.json (~1.4 MB, ~1,700 events) is the only file read: one entry per
 //! event with Orgc, Tag, info, date, analysis, threat_level_id, timestamp. It
@@ -21,7 +21,6 @@ use serde_json::{Map, Value, json};
 use super::common::{self, FetchOutput, GetOpts, Item, Response, SourceError, iso_utc};
 
 pub const NAME: &str = "CIRCL OSINT";
-pub const TABLE: &str = "osint";
 /// An unchanged manifest is one 304 (~1 s); daily polling would break the 1-hour target.
 pub const CADENCE: u64 = 0;
 
@@ -44,7 +43,7 @@ fn level(n: i64) -> &'static str {
 pub type Getter<'a> = dyn FnMut(&str, &str, GetOpts) -> Result<Response, SourceError> + 'a;
 
 /// The manifest as parsed JSON. An object keeps its entries in file order (serde_json's
-/// Map would sort them, and the order decides ties in the final sort, as in Python).
+/// Map would sort them, and the order decides ties in the final sort).
 #[derive(Debug)]
 pub enum Manifest {
     Object(Vec<(String, Value)>),
@@ -61,7 +60,7 @@ impl<'de> Deserialize<'de> for Manifest {
                 f.write_str("a JSON value")
             }
             fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Manifest, A::Error> {
-                // Duplicate keys: last value at the first position, like a Python dict.
+                // Duplicate keys: the last value wins and keeps the position of the first.
                 let mut out: Vec<(String, Value)> = Vec::new();
                 let mut at: HashMap<String, usize> = HashMap::new();
                 while let Some((k, v)) = a.next_entry::<String, Value>()? {
@@ -102,18 +101,19 @@ impl<'de> Deserialize<'de> for Manifest {
     }
 }
 
-// ---------------------------------------------------------------- python-compatible helpers
+// ---------------------------------------------------------------- loose JSON helpers
 
-fn is_py_ws(c: char) -> bool {
+/// Whitespace: Unicode White_Space plus the ASCII separators \x1c..\x1f.
+fn is_space(c: char) -> bool {
     c.is_whitespace() || ('\x1c'..='\x1f').contains(&c)
 }
 
-/// Python " ".join(s.split()).
+/// Runs of whitespace collapsed to one space, trimmed at both ends.
 fn squash(s: &str) -> String {
-    s.split(is_py_ws).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+    s.split(is_space).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
-/// Python truthiness of a JSON value.
+/// False for null, false, 0, "", [] and {}; true otherwise.
 fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
@@ -125,8 +125,8 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
-/// `str(ev.get(k) or "")`.
-fn py_str(v: Option<&Value>) -> String {
+/// v as text: a string as is, true as "True", a number in JSON form; "" when falsy (see truthy).
+fn text_of(v: Option<&Value>) -> String {
     match v.filter(|x| truthy(x)) {
         None => String::new(),
         Some(Value::String(s)) => s.clone(),
@@ -135,8 +135,9 @@ fn py_str(v: Option<&Value>) -> String {
     }
 }
 
-/// `int(ev.get(k) or default)`; None where Python raises TypeError/ValueError/OverflowError.
-fn py_int(v: Option<&Value>, default: i64) -> Option<i64> {
+/// v as an integer (number, bool or integer string; floats truncate); default when falsy,
+/// None when not convertible or out of range.
+fn int_of(v: Option<&Value>, default: i64) -> Option<i64> {
     match v.filter(|x| truthy(x)) {
         None => Some(default),
         Some(Value::Bool(_)) => Some(1),
@@ -163,16 +164,16 @@ pub fn parse_manifest(m: &Manifest, start: DateTime<Utc>, end: DateTime<Utc>) ->
     let (d0, d1) = (start.date_naive().to_string(), end.date_naive().to_string());
     let mut items = Vec::new();
     for (uuid, ev) in events {
-        let day = py_str(ev.get("date"));
-        // datetime.fromtimestamp: years past 9999 raise in Python, so they count as no timestamp.
-        let ts = py_int(ev.get("timestamp"), 0)
+        let day = text_of(ev.get("date"));
+        // Timestamps past the year 9999 count as no timestamp.
+        let ts = int_of(ev.get("timestamp"), 0)
             .filter(|&s| s <= 253_402_300_799)
             .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0));
         let day_in = d0.as_str() <= day.as_str() && day.as_str() <= d1.as_str();
         if !(day_in || ts.is_some_and(|t| start <= t && t <= end)) {
             continue;
         }
-        let threat = py_int(ev.get("threat_level_id"), 4).map_or("Undefined", level);
+        let threat = int_of(ev.get("threat_level_id"), 4).map_or("Undefined", level);
         let tags: Vec<Value> = ev
             .get("Tag")
             .filter(|t| truthy(t))
@@ -187,8 +188,8 @@ pub fn parse_manifest(m: &Manifest, start: DateTime<Utc>, end: DateTime<Utc>) ->
         extra.insert("threat_level".into(), json!(threat));
         extra.insert("tags".into(), Value::Array(tags));
         extra.insert("org".into(), org);
-        let mut item = Item::new(NAME, uuid, &event_url(uuid), &squash(&py_str(ev.get("info"))), &day);
-        // A missing timestamp is epoch 0 in Python, which is still a time: "1970-01-01T00:00:00Z".
+        let mut item = Item::new(NAME, uuid, &event_url(uuid), &squash(&text_of(ev.get("info"))), &day);
+        // A missing timestamp is epoch 0, which is still a time: "1970-01-01T00:00:00Z".
         item.updated = ts.map(iso_utc).unwrap_or_default();
         item.extra = extra;
         items.push(item);
@@ -262,21 +263,7 @@ mod tests {
         assert_eq!(fake.conditional, [true]); // manifest is a conditional GET
     }
 
-    // ------------------------------------------------ parity / live (manual)
-
-    /// PARITY_OUT=<dir> cargo test -- --ignored circl::tests::parity_dump
-    #[test]
-    #[ignore]
-    fn parity_dump() {
-        let m = manifest();
-        let case = |s, e| json!(parse_manifest(&m, s, e).unwrap());
-        super::super::certeu::fake::dump("circl", &json!({
-            "ts_window": case(utc(2026, 10, 27, 3), utc(2026, 11, 3, 3)),
-            "date_window": case(utc(2026, 8, 10, 0), utc(2026, 8, 14, 0)),
-            "wide": case(utc(2000, 1, 1, 0), utc(2030, 1, 1, 0)),
-            "empty": case(utc(2030, 1, 1, 0), utc(2030, 1, 8, 0)),
-        }));
-    }
+    // ------------------------------------------------ live (manual)
 
     /// EW_STATE_COPY=<copy of state/> cargo test -- --ignored circl::tests::live_state_copy --nocapture
     #[test]

@@ -1,11 +1,11 @@
-//! NCSC-NL security advisories, read as CSAF 2.0. Port of feeds/ncscnl.py.
+//! NCSC-NL security advisories, read as CSAF 2.0.
 //!
 //! provider-metadata.json (/.well-known/csaf/) points at the directory
 //! https://advisories.ncsc.nl/csaf/v2/. Its changes.csv (~71 KB, newest first)
 //! lists every document once with the time of its latest revision, and supports
 //! ETag, so most runs cost one 304. Each document is fetched once per
 //! (path, timestamp); the parsed result is kept in cursors/ncscnl.json
-//! ({path: {"ts": <changes.csv time>, "item": <Item>}}, same as the Python job).
+//! ({path: {"ts": <changes.csv time>, "item": <Item>}}).
 //!
 //! The RSS (https://advisories.ncsc.nl/rss/advisories, 25 items, titles like
 //! "NCSC-2026-0464 [1.00] [M/H] …") carries the same data in a lossy form and is
@@ -22,7 +22,6 @@ use super::common::{self, FetchOutput, GetOpts, Item, Response, SourceError, iso
 use super::state;
 
 pub const NAME: &str = "NCSC-NL";
-pub const TABLE: &str = "adv";
 pub const CADENCE: u64 = 0;
 
 pub const BASE: &str = "https://advisories.ncsc.nl/csaf/v2/";
@@ -49,24 +48,25 @@ fn level(s: &str) -> Option<&'static str> {
 /// The pluggable GET, so tests can serve fixtures. Production passes common::get.
 pub type Getter<'a> = dyn FnMut(&str, &str, GetOpts) -> Result<Response, SourceError> + 'a;
 
-// ---------------------------------------------------------------- python-compatible helpers
-// (same as in certeu.rs; kept local so each module reads on its own)
+// ---------------------------------------------------------------- loose JSON / text helpers
+// (text ones as in certeu.rs; kept local so each module reads on its own)
 
-fn is_py_ws(c: char) -> bool {
+/// Whitespace: Unicode White_Space plus the ASCII separators \x1c..\x1f.
+fn is_space(c: char) -> bool {
     c.is_whitespace() || ('\x1c'..='\x1f').contains(&c)
 }
 
-/// Python " ".join(s.split()).
+/// Runs of whitespace collapsed to one space, trimmed at both ends.
 fn squash(s: &str) -> String {
-    s.split(is_py_ws).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+    s.split(is_space).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
-fn py_strip(s: &str) -> &str {
-    s.trim_matches(is_py_ws)
+fn strip_space(s: &str) -> &str {
+    s.trim_matches(is_space)
 }
 
-/// Python repr() of a str.
-fn py_repr(s: &str) -> String {
+/// s in single quotes with backslash escapes (double quotes when s holds only a single quote), for error messages.
+fn quoted(s: &str) -> String {
     let q = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
     let mut out = String::from(q);
     for c in s.chars() {
@@ -87,7 +87,7 @@ fn py_repr(s: &str) -> String {
     out
 }
 
-/// Python truthiness of a JSON value.
+/// False for null, false, 0, "", [] and {}; true otherwise.
 fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
@@ -99,7 +99,8 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
-fn py_type(v: &Value) -> &'static str {
+/// Type name used in error messages (NoneType, bool, float, int, str, list, dict).
+fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "NoneType",
         Value::Bool(_) => "bool",
@@ -111,17 +112,17 @@ fn py_type(v: &Value) -> &'static str {
     }
 }
 
-/// v[k] with the error repr Python's `except … as e: {e!r}` would print.
+/// v[k], or an error in the form KeyError('k') / TypeError('...').
 fn key<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
     match v {
-        Value::Object(o) => o.get(k).ok_or_else(|| format!("KeyError({})", py_repr(k))),
-        other => Err(format!("TypeError({})", py_repr(&format!("'{}' object is not subscriptable", py_type(other))))),
+        Value::Object(o) => o.get(k).ok_or_else(|| format!("KeyError({})", quoted(k))),
+        other => Err(format!("TypeError({})", quoted(&format!("'{}' object is not subscriptable", type_name(other))))),
     }
 }
 
 fn key_str<'a>(v: &'a Value, k: &str) -> Result<&'a str, String> {
     let x = key(v, k)?;
-    x.as_str().ok_or_else(|| format!("TypeError({})", py_repr(&format!("{k}: expected str, got {}", py_type(x)))))
+    x.as_str().ok_or_else(|| format!("TypeError({})", quoted(&format!("{k}: expected str, got {}", type_name(x)))))
 }
 
 /// `(v.get(k) or default)` for a dict-like value.
@@ -136,8 +137,8 @@ pub fn parse_changes(text: &str) -> Vec<(String, String)> {
     let mut rdr = csv::ReaderBuilder::new().has_headers(false).flexible(true).from_reader(text.as_bytes());
     let mut out = Vec::new();
     for row in rdr.records().flatten() {
-        if row.len() >= 2 && PATH.is_match(py_strip(&row[0])) {
-            out.push((py_strip(&row[0]).to_string(), py_strip(&row[1]).to_string()));
+        if row.len() >= 2 && PATH.is_match(strip_space(&row[0])) {
+            out.push((strip_space(&row[0]).to_string(), strip_space(&row[1]).to_string()));
         }
     }
     out
@@ -148,7 +149,7 @@ pub fn products(tree: Option<&Value>) -> Vec<String> {
     fn walk(branches: Option<&Value>, vendor: &str, out: &mut Vec<String>) {
         for b in branches.and_then(Value::as_array).into_iter().flatten() {
             let cat = b.get("category").and_then(Value::as_str);
-            let name = py_strip(b.get("name").and_then(Value::as_str).unwrap_or("")).to_string();
+            let name = strip_space(b.get("name").and_then(Value::as_str).unwrap_or("")).to_string();
             match cat {
                 Some("vendor") => walk(b.get("branches"), &name, out),
                 Some("product_name") => {
@@ -170,17 +171,17 @@ pub fn products(tree: Option<&Value>) -> Vec<String> {
     out
 }
 
-/// Python float() of a JSON value.
-fn py_float(v: &Value) -> Result<f64, String> {
+/// A number, bool or numeric string as f64; any other value is a TypeError/ValueError message.
+fn num_of(v: &Value) -> Result<f64, String> {
     match v {
         Value::Number(n) => Ok(n.as_f64().unwrap_or(0.0)),
         Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-        Value::String(s) => py_strip(s)
+        Value::String(s) => strip_space(s)
             .parse::<f64>()
-            .map_err(|_| format!("ValueError({})", py_repr(&format!("could not convert string to float: {}", py_repr(s))))),
+            .map_err(|_| format!("ValueError({})", quoted(&format!("could not convert string to float: {}", quoted(s))))),
         other => Err(format!(
             "TypeError({})",
-            py_repr(&format!("float() argument must be a string or a real number, not '{}'", py_type(other)))
+            quoted(&format!("float() argument must be a string or a real number, not '{}'", type_name(other)))
         )),
     }
 }
@@ -193,7 +194,7 @@ pub fn max_score(vulns: &[Value]) -> Result<f64, String> {
         for s in get_or(v, "scores").and_then(Value::as_array).into_iter().flatten() {
             for k in ["cvss_v4", "cvss_v3", "cvss_v2"] {
                 let x = match get_or(s, k).and_then(|c| get_or(c, "baseScore")) {
-                    Some(b) => py_float(b)?,
+                    Some(b) => num_of(b)?,
                     None => 0.0,
                 };
                 if x > best {
@@ -207,10 +208,10 @@ pub fn max_score(vulns: &[Value]) -> Result<f64, String> {
 
 fn parse_time(tr: &Value, k: &str) -> Result<DateTime<Utc>, String> {
     let s = key_str(tr, k)?;
-    common::parse_iso(s).ok_or_else(|| format!("ValueError({})", py_repr(&format!("Invalid isoformat string: {}", py_repr(s)))))
+    common::parse_iso(s).ok_or_else(|| format!("ValueError({})", quoted(&format!("Invalid isoformat string: {}", quoted(s)))))
 }
 
-/// CSAF document -> Item. Err is the repr of the exception Python would raise.
+/// CSAF document -> Item. Err names the first problem, e.g. "KeyError('tracking')".
 pub fn parse_csaf(doc: &Value) -> Result<Item, String> {
     let d = key(doc, "document")?;
     let tr = key(d, "tracking")?;
@@ -219,7 +220,7 @@ pub fn parse_csaf(doc: &Value) -> Result<Item, String> {
     for n in get_or(d, "notes").and_then(Value::as_array).into_iter().flatten() {
         let title = n.get("title").and_then(Value::as_str).unwrap_or("");
         let text = n.get("text").and_then(Value::as_str).unwrap_or("");
-        notes.insert(title.to_string(), py_strip(text).to_string());
+        notes.insert(title.to_string(), strip_space(text).to_string());
     }
     let empty = vec![];
     let vulns = get_or(doc, "vulnerabilities").and_then(Value::as_array).unwrap_or(&empty);
@@ -281,7 +282,7 @@ pub fn fetch_with(start: DateTime<Utc>, end: DateTime<Utc>, get: &mut Getter) ->
     let result = (|| -> Result<(), SourceError> {
         for (path, ts) in &rows {
             let t = common::parse_iso(ts).ok_or_else(|| {
-                SourceError::new(format!("{NAME}: changes.csv row {path} has a bad timestamp {}", py_repr(ts)))
+                SourceError::new(format!("{NAME}: changes.csv row {path} has a bad timestamp {}", quoted(ts)))
             })?;
             if !(start <= t && t <= end) {
                 continue; // the row time is the latest revision, so older rows cannot be in the window
@@ -298,7 +299,7 @@ pub fn fetch_with(start: DateTime<Utc>, end: DateTime<Utc>, get: &mut Getter) ->
                     let r = get(&format!("{BASE}{path}"), &format!("{NAME} {path}"), GetOpts { conditional: false, ..Default::default() })?;
                     let body = r.content.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&r.content);
                     let item = serde_json::from_slice::<Value>(body)
-                        .map_err(|e| format!("JSONDecodeError({})", py_repr(&e.to_string())))
+                        .map_err(|e| format!("JSONDecodeError({})", quoted(&e.to_string())))
                         .and_then(|doc| parse_csaf(&doc))
                         .map_err(|e| SourceError::new(format!("{NAME}: {path} is not a readable CSAF document: {e}")))?;
                     (json!({"ts": ts, "item": item}), item)
@@ -434,47 +435,23 @@ mod tests {
         assert_eq!(err.message, "NCSC-NL: 2026/ncsc-2026-0464.json is not a readable CSAF document: KeyError('tracking')");
     }
 
-    /// A cursor written by the Python job is a cache hit for the Rust job.
+    /// A stored cursor entry for the current changes.csv time is a cache hit: no document is fetched.
     #[test]
-    fn python_cursor_is_a_hit() {
-        let _t = state::testing::temp_state("ncscnl-pycursor");
+    fn stored_cursor_is_a_hit() {
+        let _t = state::testing::temp_state("ncscnl-cursor");
         let item = parse_csaf(&doc("ncscnl_2026-0464.json")).unwrap();
-        // Python writes score as 0.0 and keys in dataclass order; both read the same.
-        let py = format!(
+        let stored = format!(
             r#"{{"2026/ncsc-2026-0464.json": {{"ts": "2026-11-02T09:17:50.006979+00:00", "item": {}}}}}"#,
             serde_json::to_string(&item).unwrap()
         );
-        state::save_bytes(CURSOR, py.as_bytes());
+        state::save_bytes(CURSOR, stored.as_bytes());
         let mut fake = routes();
         let items = run(&mut fake, utc(2026, 11, 1, 0)).unwrap();
         assert_eq!(fake.calls, [CHANGES]);
         assert_eq!(items, [item]);
     }
 
-    // ------------------------------------------------ parity / live (manual)
-
-    /// PARITY_OUT=<dir> cargo test -- --ignored ncscnl::tests::parity_dump
-    #[test]
-    #[ignore]
-    fn parity_dump() {
-        let csv = String::from_utf8(fixture("ncscnl_changes.csv")).unwrap() + "\"index.txt\",\"x\"\n\n";
-        let fetch_case = || {
-            let _t = state::testing::temp_state("ncscnl-parity");
-            let mut fake = routes();
-            fake.route(&format!("{BASE}2026/ncsc-2026-0463.json"), Ok(fixture("ncscnl_2026-0463.json")));
-            let items = run(&mut fake, utc(2026, 10, 30, 14)).unwrap();
-            json!({"items": items, "cursor": state::load_json::<Value>(CURSOR), "calls": fake.calls})
-        };
-        super::super::certeu::fake::dump("ncscnl", &json!({
-            "changes": parse_changes(&csv),
-            "csaf": {
-                "0455": parse_csaf(&doc("ncscnl_2026-0455.json")).unwrap(),
-                "0463": parse_csaf(&doc("ncscnl_2026-0463.json")).unwrap(),
-                "0464": parse_csaf(&doc("ncscnl_2026-0464.json")).unwrap(),
-            },
-            "fetch": fetch_case(),
-        }));
-    }
+    // ------------------------------------------------ live (manual)
 
     /// EW_STATE_COPY=<copy of state/> cargo test -- --ignored ncscnl::tests::live_state_copy --nocapture
     #[test]

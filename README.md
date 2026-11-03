@@ -101,9 +101,9 @@ flowchart TB
   feeds["feeds/*.rs<br/>one module per publisher"]:::component
   common["feeds/common.rs<br/>Item contract, GET with ETag cache"]:::component
   st["feeds/state.rs<br/>atomic files under state/"]:::component
-  render["render.rs<br/>HTML for tables and counters"]:::component
-  wiki["wiki.rs<br/>GraphQL client"]:::component
-  boot["bootstrap.rs<br/>admin setup, key, page, CSS"]:::component
+  render["render/<br/>HTML for tables and counters, demo"]:::component
+  wiki["wiki/mod.rs<br/>GraphQL client"]:::component
+  boot["wiki/bootstrap.rs<br/>admin setup, key, page, CSS"]:::component
   wjs["Wiki.js"]:::ext
 
   main --> run & boot & render

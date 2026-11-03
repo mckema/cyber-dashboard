@@ -1,5 +1,5 @@
-//! Small on-disk state under STATE_DIR (default ./state). Port of feeds/state.py;
-//! the file formats are the same so either implementation can pick up the other's state.
+//! Small on-disk state under STATE_DIR (default ./state). The file formats are
+//! kept stable, so a new build picks up the state an older one left behind.
 //!
 //!   http/                 conditional-GET cache (ETag + body), owned by common::get()
 //!   items/<module>.json   items from the last successful fetch, per feed module
@@ -64,7 +64,7 @@ pub fn load_json<T: DeserializeOwned>(name: &str) -> Option<T> {
 }
 
 pub fn save_json<T: Serialize + ?Sized>(name: &str, obj: &T) {
-    // indent=1 like the Python job, so diffs between the two stay readable
+    // indent=1: one space per level keeps the files small and still diffable
     let mut buf = Vec::new();
     let fmt = serde_json::ser::PrettyFormatter::with_indent(b" ");
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, fmt);
