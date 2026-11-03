@@ -7,7 +7,6 @@ pub mod common;
 pub mod state;
 
 pub mod certeu;
-pub mod circl;
 pub mod cvelist;
 pub mod euvd;
 pub mod github;
@@ -36,7 +35,7 @@ macro_rules! feed {
 }
 
 pub fn all() -> Vec<Feed> {
-    vec![feed!(kev), feed!(euvd), feed!(cvelist), feed!(nvd), feed!(github), feed!(certeu), feed!(ncscnl), feed!(circl)]
+    vec![feed!(kev), feed!(euvd), feed!(cvelist), feed!(nvd), feed!(github), feed!(certeu), feed!(ncscnl)]
 }
 
 pub const CORE: &[&str] = &["kev", "cvelist"];

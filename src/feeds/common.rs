@@ -21,7 +21,6 @@
 //!          ssvc_exploitation ("none" | "poc" | "active" | ""), assigner,
 //!          nvd_score (number, or "" when NVD has none)
 //!   nvd    vector, vendors (list)      -- enrichment only, merged into "cve" items
-//!   osint  threat_level, tags (list), org
 //!   any    summary (short description, optional)
 //!
 //! Health rows: see render::HealthRow.
@@ -73,7 +72,7 @@ impl From<SourceError> for Fatal {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub source: String,     // feed NAME that produced the item
-    pub id: String,         // source-native id: CVE-…, GHSA-…, NCSC-2026-0464, 2026-018, MISP uuid
+    pub id: String,         // source-native id: CVE-…, GHSA-…, NCSC-2026-0464, 2026-018
     pub url: String,        // link to the publisher's own page for this item
     pub title: String,
     pub published: String,  // ISO 8601 UTC "2026-11-03T02:31:19Z", or "2026-11-03" if date only

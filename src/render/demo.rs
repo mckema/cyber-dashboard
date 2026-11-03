@@ -34,7 +34,6 @@ pub(super) struct Fixture {
     adv: Vec<Item>,
     dep: Vec<Item>,
     cve: Vec<Item>,
-    osint: Vec<Item>,
     health: Vec<HealthRow>,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
@@ -46,7 +45,7 @@ pub(super) struct Fixture {
 impl Fixture {
     pub(super) fn regions(&self) -> Regions {
         build_regions(
-            &self.kev, &self.adv, &self.dep, &self.cve, &self.osint, &self.health,
+            &self.kev, &self.adv, &self.dep, &self.cve, &self.health,
             self.start, self.end, self.now, &self.kev_catalog, self.cap,
         )
     }
@@ -82,7 +81,6 @@ pub(super) fn load_fixture(path: &Path) -> Result<Fixture, Fatal> {
         adv: items("adv")?,
         dep: items("dep")?,
         cve: items("cve")?,
-        osint: items("osint")?,
         health,
         start: when("start")?,
         end: when("end")?,

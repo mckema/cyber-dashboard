@@ -3,7 +3,7 @@
 //!
 //! Steady state reads only the head of cves/deltaLog.json (36 MB, newest first)
 //! with a byte Range, takes the entries newer than the saved cursor, and fetches
-//! those records' raw JSON (~45 per 30-minute run). Every in-window record lives
+//! those records' raw JSON (~45 per 30 minutes). Every in-window record lives
 //! in a local store, so each run returns the full window and the renderer filters.
 //!
 //! First run, or a cursor too old for the 4 MB deltaLog cap: rebuild the store

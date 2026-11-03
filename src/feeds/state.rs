@@ -4,9 +4,9 @@
 //!   http/                 conditional-GET cache (ETag + body), owned by common::get()
 //!   items/<module>.json   items from the last successful fetch, per feed module
 //!   cursors/<module>.json free-form per-module cursor (e.g. cvelistV5 deltaLog fetchTime)
-//!   seen.json             item key -> first_seen (UTC ISO); basis of the 1-hour SLA measurement
+//!   seen.json             item key -> first_seen (UTC ISO); basis of the publication lag metric
 //!   wiki.json             data fingerprint and time of the last page write
-//!   runs.jsonl            one line per run: counts, errors, SLA lag
+//!   runs.jsonl            one line per run: counts, errors, publication lag
 //!
 //! Writes are atomic (temp file + rename) so a killed run never leaves half a file.
 

@@ -2,8 +2,8 @@
 <header class="masthead"><div class="wrap">
 <p class="eyebrow">Cyber threat brief &middot; rolling seven days &middot; all times UTC</p>
 <h1>Weekly Exploit Watch</h1>
-<p class="dek">Every exploited, critical and high-severity item published in the last seven days, pulled from eight public feeds that cost nothing and need no account. Each row names its source and its publication time. Start at the top: the health table says whether every feed is current, and the first data table is what attackers are already using.</p>
-<div class="stamp"><span>Window <b id="winlabel">not generated yet</b></span> <span>Sources <b>CISA KEV &middot; ENISA EUVD &middot; CVE.org &middot; NVD &middot; GitHub &middot; CERT-EU &middot; NCSC-NL &middot; CIRCL</b></span> <span>Auth required <b>none</b></span></div>
+<p class="dek">Every exploited, critical and high-severity item published in the last seven days, pulled from seven public feeds that cost nothing and need no account. Each row names its source and its publication time. Start at the top: the health table says whether every feed is current, and the first data table is what attackers are already using.</p>
+<div class="stamp"><span>Window <b id="winlabel">not generated yet</b></span> <span>Sources <b>CISA KEV &middot; ENISA EUVD &middot; CVE.org &middot; NVD &middot; GitHub &middot; CERT-EU &middot; NCSC-NL</b></span> <span>Auth required <b>none</b></span></div>
 </div></header>
 <div class="refresh"><div class="wrap"><div class="rstat" id="rstat">Not generated yet.</div></div></div>
 <div class="triage">
@@ -12,13 +12,12 @@
 <div class="tile t-high"><div class="n" id="s-high">0</div><div class="l">High CVEs (CVSS 7.0&ndash;8.9)</div></div>
 <div class="tile"><div class="n" id="s-dep">0</div><div class="l">Advisories mapped to a package and a fixed version</div></div>
 <div class="tile"><div class="n" id="s-adv">0</div><div class="l">EU and national advisories (CERT-EU, NCSC-NL)</div></div>
-<div class="tile"><div class="n" id="s-osint">0</div><div class="l">OSINT events (CIRCL MISP feed)</div></div>
 </div>
 <main class="wrap">
 
 <section class="block" id="health">
 <div class="shead"><h2>Feed health</h2><span class="count" id="n-health">0 feeds</span></div>
-<p class="snote">FR-A1 asks for threat items from free, credible sources in one place, with the source and timestamp shown for each item and new items appearing within one hour of publication. This table is how to check that on any given day: one row per feed, its status on the last run, how many items it contributed to this window, its newest item and its last successful fetch.</p>
+<p class="snote">FR-A1 asks for threat items from free, credible sources in one place, with the source and timestamp shown for each item and new items appearing within one hour of publication. The page is rebuilt every 6 hours; on 3 Nov 2026 the one-hour figure was set as a target to measure, not a hard rule. This table shows how each feed is doing: one row per feed, its status on the last run, how many items it contributed to this window, its newest item and its last successful fetch.</p>
 <div class="legend">
 <p><span class="hs hs-ok">OK</span> fetched on this run. <span class="hs hs-ok">Not modified</span> the source answered HTTP 304: nothing new since the previous fetch.</p>
 <p><span class="hs hs-cached">Cached</span> not fetched on this run (the feed is polled less often than the page is rebuilt); the rows come from the last successful fetch.</p>
@@ -69,19 +68,9 @@
 </table></div>
 </section>
 
-<section class="block" id="osint">
-<div class="shead"><h2>OSINT events</h2><span class="count" id="n-osint">0 events</span></div>
-<p class="snote">CIRCL, the Computer Incident Response Center Luxembourg, publishes an open MISP feed of OSINT events: indicators of compromise and write-ups of threat-actor campaigns. These are not mapped to any product, so read them as context, not as patch work.</p>
-<div class="callout note"><b>A quiet feed.</b> A check on 3 Nov 2026 found no new events in the CIRCL OSINT feed since 13 Aug 2026. The feed is polled once a day. An empty table here means the feed published nothing in the window; the health table above says whether the fetch itself worked.</div>
-<div class="scroller"><table>
-<thead><tr><th>Event</th><th>Published</th><th>Threat level</th><th>Tags</th><th>Org</th></tr></thead>
-<tbody id="t-osint"><tr><td colspan="5" class="empty">Not generated yet.</td></tr></tbody>
-</table></div>
-</section>
-
 <section class="block" id="sources">
-<div class="shead"><h2>The eight feeds behind this page</h2></div>
-<p class="snote">All eight are operated by a government body, an EU agency, a national CERT or a platform, and are free to query without an account. None of them will ever ask you to talk to a sales team.</p>
+<div class="shead"><h2>The seven feeds behind this page</h2></div>
+<p class="snote">All seven are operated by a government body, an EU agency, a national CERT or a platform, and are free to query without an account. None of them will ever ask you to talk to a sales team.</p>
 <div class="srcgrid">
 <div class="src"><div><h3>CISA Known Exploited Vulnerabilities</h3><div class="who">US Cybersecurity &amp; Infrastructure Security Agency</div></div>
 <p>The authoritative free list of what is actually being exploited. Small, high signal, updated most weekdays. Start every triage cycle here.</p>
@@ -111,10 +100,6 @@
 <p>Several advisories a day in CSAF 2.0 JSON, with CVEs, CVSS, affected products and a probability/impact rating. The change list supports conditional requests, so an unchanged poll costs almost nothing.</p>
 <div class="terms"><span class="term">No key</span><span class="term">CSAF 2.0</span><span class="term role">EU and national table</span></div>
 <div class="ep">advisories.ncsc.nl/csaf/v2/changes.csv</div></div>
-<div class="src"><div><h3>CIRCL OSINT MISP feed</h3><div class="who">Computer Incident Response Center Luxembourg (CIRCL)</div></div>
-<p>OSINT events in MISP format: indicators of compromise and campaign write-ups. Polled once a day. No new events since 13 Aug 2026 (checked 3 Nov 2026).</p>
-<div class="terms"><span class="term">TLP:CLEAR</span><span class="term">No key</span><span class="term role">OSINT table</span></div>
-<div class="ep">www.circl.lu/doc/misp/feed-osint/manifest.json</div></div>
 </div>
 </section>
 
@@ -143,6 +128,5 @@ curl -s https://advisories.ncsc.nl/csaf/v2/changes.csv | head -n 10</pre>
 <p><b>Severity is not risk.</b> CVSS scores the flaw, not your exposure. A 9.8 in a component you do not deploy outranks nothing; a 6.5 on your public login path may outrank everything on this page. The exploited-in-the-wild table is ordered by evidence, which is why it comes first.</p>
 <p><b>Counts move.</b> Every feed backfills, re-scores and occasionally withdraws entries, so two rebuilds minutes apart can disagree. The CVE table shows the highest-scored rows up to a fixed cap; the line above the table says how many are hidden.</p>
 <p><b>CISA KEV can lag.</b> When cisa.gov blocks the job, the catalog is read from CISA&rsquo;s GitHub mirror, which was about 3 hours behind cisa.gov in a one-day sample (30 Oct 2026). The health table notes when the mirror was used.</p>
-<p><b>OSINT is context, not coverage.</b> CIRCL's feed is the only OSINT source on this page, it had published nothing new between 13 Aug and 3 Nov 2026, and its events are not mapped to products. An empty OSINT table means only that this one feed was quiet.</p>
 </div></footer>
 </div>

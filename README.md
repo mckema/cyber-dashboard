@@ -33,7 +33,8 @@ This repository is a fork of Mark McKee's prototype `mckema/cyber-dashboard`
 (2026-10-17), which refreshed the page weekly from three feeds with a Python
 script. The fork:
 
-- reads eight feeds (the FR-A1 sources plus GitHub Advisory);
+- reads seven feeds: the FR-A1 sources except MISP/CIRCL OSINT, which Mark
+  McKee dropped on 2026-11-03, plus GitHub Advisory;
 - is a single Rust binary, `exploit-watch`;
 - runs against a self-hosted Wiki.js 2.5 in Docker Compose for testing. The
   production page is on `wiki2.internal.ediphy.io` behind Google Cloud IAP and
@@ -57,7 +58,7 @@ flowchart LR
   reader["Reader<br/>fairCT team"]:::person
   op["Operator<br/>ISB Vietnam team"]:::person
   ew["Exploit Watch<br/>rebuilds the page"]:::system
-  feeds["8 public feeds<br/>CISA KEV · ENISA EUVD · CVE.org · NVD<br/>GitHub Advisory · CERT-EU · NCSC-NL · CIRCL"]:::ext
+  feeds["7 public feeds<br/>CISA KEV · ENISA EUVD · CVE.org · NVD<br/>GitHub Advisory · CERT-EU · NCSC-NL"]:::ext
   wiki["Wiki.js<br/>page CTP/run-books/Cyber-Exploit-Watch"]:::ext
 
   feeds -->|"HTTPS: JSON, CSV, RSS"| ew
@@ -120,7 +121,7 @@ flowchart TB
 
 | Environment | Runtime | Wiki | Status (2026-11-03) |
 |---|---|---|---|
-| Local lab | Docker Compose: `wiki` + `job`, loop every 1800 s | Wiki.js 2.5.317, page id 1 | Running |
+| Local lab | Docker Compose: `wiki` + `job`, loop every 21600 s (6 h) | Wiki.js 2.5.317, page id 1 | Running |
 | Production | Cloud Scheduler + Cloud Run Job, state in GCS | `wiki2.internal.ediphy.io` via IAP, page id 51 | Decided, not built |
 
 ## How a run works
@@ -131,12 +132,12 @@ flowchart TB
 3. Merge: CISA KEV and ENISA EUVD rows join by CVE into one "exploited" table;
    NVD scores fill CVE.org records that have no CNA or CISA-ADP score;
    CERT-EU and NCSC-NL share one advisory table.
-4. Render six tables (feed health, exploited, advisories, dependencies, CVEs,
-   OSINT) and the counters, and splice them into the current page by anchor id.
+4. Render five tables (feed health, exploited, advisories, dependencies, CVEs)
+   and the counters, and splice them into the current page by anchor id.
 5. Fingerprint the data, leaving out regions that change every run (health
    table, health count, window label). Write only when the fingerprint changed,
-   when `HEARTBEAT_HOURS` has passed since the last write, or when the page no
-   longer carries the current data (after a reseed or a manual edit).
+   when `HEARTBEAT_HOURS` (24 h) has passed since the last write, or when the
+   page no longer carries the current data (after a reseed or a manual edit).
 6. Write with one `pages.update` call. `scriptCss` is never sent by the job.
 7. Record each item's first-seen time in `seen.json` and one line in `runs.jsonl`.
 
@@ -162,9 +163,9 @@ flowchart TB
 | GitHub Advisory | `type=reviewed`, `published=<date>..<date>`, follows `Link: rel="next"` | every run | second, UTC |
 | CERT-EU | RSS every run; JSON per advisory only when new or changed | every run | second, UTC |
 | NCSC-NL | `changes.csv` with ETag; CSAF document only when new or changed | every run | second, UTC |
-| CIRCL OSINT | MISP `manifest.json` with ETag | every run | date |
 
-Measured on 2026-11-03: a normal run makes about 10–40 requests, most answered
+Measured on 2026-11-03 at the earlier 30-minute interval: a normal run made
+about 10–40 requests, most answered
 `304 Not Modified`. The first cvelistV5 backfill took 105 requests and 46.7 MB.
 
 ## Getting started
@@ -214,8 +215,8 @@ environment. Compose overrides `WIKI_BASE` and `STATE_DIR` for the job.
 | `IAP_ID_TOKEN` | — | Google OIDC token, sent as `Proxy-Authorization` (behind IAP only) |
 | `WIKI_ADMIN_EMAIL`, `WIKI_ADMIN_PASSWORD` | `admin@example.com`, generated | Local admin, used by `bootstrap` only |
 | `STATE_DIR` | `./state` | Job state |
-| `INTERVAL_SECONDS` | `1800` | Seconds between runs in the compose loop |
-| `HEARTBEAT_HOURS` | `6` | Rewrite the page after this long without a data change |
+| `INTERVAL_SECONDS` | `21600` | Seconds between runs in the compose loop |
+| `HEARTBEAT_HOURS` | `24` | Rewrite the page after this long without a data change |
 | `CVE_ROW_CAP` | `300` | Rows shown in the CVE table |
 | `GITHUB_TOKEN` | — | Raises the GitHub API limit from 60 to 5,000 requests/h |
 | `NVD_API_KEY` | — | Removes the 6 s pause between NVD pages |
@@ -235,7 +236,12 @@ Do not put `$` or quotes in `.env` values: Compose reads the file too.
 | `cursors/` | Per-feed cursors: cvelistV5 `fetchTime`, NVD and CVE stores, CERT-EU and NCSC-NL caches |
 | `seen.json` | Item key → first-seen time, kept 30 days |
 | `wiki.json` | Data fingerprint and time of the last write |
-| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `lag_max_min`, `over_sla` |
+| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min` |
+
+Lag is an item's first-seen time minus its first publication time (`published`;
+a later `updated` time is ignored), in minutes. It is recorded for items new on
+a run whose publication time has a time of day, and not on a feed's first
+(baseline) run. It is a metric, not a pass/fail rule (Mark McKee, 2026-11-03).
 
 Reset only what you need: deleting `http/` forces full downloads; deleting
 `cursors/cvelist*` forces a 7-day backfill (about 47 MB); deleting `seen.json`
@@ -306,9 +312,8 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
   time (UTC). Whether the label changes to "CET" in winter is not verified.
 - Some NCSC-NL documents have only a CVSS 4.0 vector in a note; those items show
   no score. NCSC-NL titles are in Dutch.
-- CIRCL OSINT has had no new event since 2026-08-13.
 - The CVE table shows the first 300 rows by score (`CVE_ROW_CAP`).
-- Items with a date only (KEV, EUVD, CIRCL) have no measurable lag.
+- Items with a date only (KEV, EUVD) have no measurable lag.
 
 ## Decisions
 
@@ -316,10 +321,10 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 |---|---|---|---|
 | 2026-11-03 | Build FR-A1 on the prototype: fork, all FR-A1 sources, self-hosted Wiki.js for testing | ISB Vietnam team lead | Decided |
 | 2026-11-03 | "NCSC" in FR-A1 means NCSC-NL | Mark McKee | Decided |
-| 2026-11-03 | Run every 6 hours instead of every 30 minutes | Mark McKee | Decided, not yet applied |
-| 2026-11-03 | Drop CIRCL OSINT | Mark McKee | Decided, not yet applied |
+| 2026-11-03 | Run every 6 hours instead of every 30 minutes | Mark McKee | Decided, applied |
+| 2026-11-03 | Drop CIRCL OSINT | Mark McKee | Decided, applied |
 | 2026-11-03 | Accept the KEV GitHub mirror as fallback until `cisa.gov` is rechecked from GCP | Mark McKee | Decided |
-| 2026-11-03 | "Within 1 hour" is not a hard rule; measure lag from first publication only | Mark McKee | Decided, not yet applied |
+| 2026-11-03 | "Within 1 hour" is not a hard rule; measure lag from first publication only | Mark McKee | Decided, applied |
 | 2026-11-03 | FR-A2: items matching no fairCT component are marked not relevant by rule; rule name and version recorded as triager | Mark McKee | Decided, not built |
 | 2026-11-03 | Component list: a small test list (Rust or UI libraries) for now; final list to be agreed with Germano | Mark McKee | Decided |
 | 2026-11-03 | FR-A9: a Linear ticket is sufficient for now | Mark McKee | Decided |
@@ -330,7 +335,6 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 
 | Item | Requirement | Status (2026-11-03) |
 |---|---|---|
-| Apply the 6-hour cadence, drop CIRCL, lag from first publication | FR-A1 | Next |
 | Match items against a component list; mark non-matches by rule | FR-A2 | Planned |
 | One Linear issue per matched item in the Triage inbox; untriaged and open-ticket tables on the page | FR-A2, FR-A3, FR-A9 | Planned (local, fake tracker first) |
 | Monthly and on-demand report to the fairCT COO | FR-A4 | Not started |

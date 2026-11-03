@@ -7,16 +7,16 @@
 //! scriptCss) and no inline style attributes, because the Wiki.js sanitiser
 //! mangles long ones (README.md, Known limitations). The row vocabulary (td.id, sv sv-*, tgt, sub,
 //! desc, due/due past, pkg, eco, fix, score, vecbits, empty) is the one of the
-//! original page's row builders; feed, hs-*, ssrc, ssvc-*, pi-*, tl-*, tag are
-//! the additions for the tables the original did not have.
+//! original page's row builders; feed, hs-*, ssrc, ssvc-* and pi-* are the
+//! additions for the tables the original did not have.
 //!
 //! Times: every timestamp on the page is UTC and carries the "UTC" label.
 //! Date-only source values (e.g. CISA dueDate) are shown as a date with no time.
 //!
 //! Anchors filled on the page (see stack/wiki/page/skeleton.html):
-//!   tbody  t-health t-kev t-adv t-dep t-nvd t-osint
-//!   text   s-kev s-crit s-high s-dep s-adv s-osint
-//!          n-health n-kev n-adv n-dep n-nvd n-cvecap n-osint winlabel
+//!   tbody  t-health t-kev t-adv t-dep t-nvd
+//!   text   s-kev s-crit s-high s-dep s-adv
+//!          n-health n-kev n-adv n-dep n-nvd n-cvecap winlabel
 //!   stamp  rstat   (inner HTML, contains <b>; must never contain a <div>)
 //!
 //! Item.extra values are read through Item::x / x_list / x_num, so a value of
@@ -44,14 +44,14 @@ pub use demo::{DemoArgs, demo};
 pub use fmt::{esc, ftime, plural, thousands};
 use fmt::{day, hm};
 use tables::{
-    build_adv_rows, build_cve_rows, build_dep_rows, build_health_rows, build_kev_rows, build_osint_rows, cve_keep,
-    health_summary, kev_overdue, sev,
+    build_adv_rows, build_cve_rows, build_dep_rows, build_health_rows, build_kev_rows, cve_keep, health_summary,
+    kev_overdue, sev,
 };
 
-pub const TBODY_IDS: [&str; 6] = ["t-health", "t-kev", "t-adv", "t-dep", "t-nvd", "t-osint"];
-pub const TEXT_IDS: [&str; 14] = [
-    "s-kev", "s-crit", "s-high", "s-dep", "s-adv", "s-osint",
-    "n-health", "n-kev", "n-adv", "n-dep", "n-nvd", "n-cvecap", "n-osint", "winlabel",
+pub const TBODY_IDS: [&str; 5] = ["t-health", "t-kev", "t-adv", "t-dep", "t-nvd"];
+pub const TEXT_IDS: [&str; 12] = [
+    "s-kev", "s-crit", "s-high", "s-dep", "s-adv",
+    "n-health", "n-kev", "n-adv", "n-dep", "n-nvd", "n-cvecap", "winlabel",
 ];
 pub const STAMP_ID: &str = "rstat";
 
@@ -111,7 +111,7 @@ pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
 #[allow(clippy::too_many_arguments)]
 pub fn build_regions(
-    kev: &[Item], adv: &[Item], dep: &[Item], cve: &[Item], osint: &[Item], health: &[HealthRow],
+    kev: &[Item], adv: &[Item], dep: &[Item], cve: &[Item], health: &[HealthRow],
     start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>, kev_catalog: &str, cap: usize,
 ) -> Regions {
     let today = end.format("%Y-%m-%d").to_string();
@@ -127,7 +127,6 @@ pub fn build_regions(
         build_adv_rows(adv),
         build_dep_rows(dep),
         cve_html,
-        build_osint_rows(osint),
     ];
     let mut n_kev = plural(kev.len(), "entry", Some("entries"));
     if overdue > 0 {
@@ -139,7 +138,6 @@ pub fn build_regions(
         thousands(n_high),
         thousands(dep.len()),
         thousands(adv.len()),
-        thousands(osint.len()),
         health_summary(health),
         n_kev,
         plural(adv.len(), "advisory", Some("advisories")),
@@ -150,7 +148,6 @@ pub fn build_regions(
         } else {
             format!("All {} shown.", thousands(total))
         },
-        plural(osint.len(), "event", None),
         format!("{} {} &rarr; {} {} UTC", day(&start, false), hm(&start), day(&end, false), hm(&end)),
     ];
     Regions {
@@ -261,7 +258,7 @@ mod test_support {
             "probability": EVIL, "impact": "H", "ghsa": EVIL, "ecosystems": [EVIL],
             "packages": [EVIL], "fixed": [EVIL], "npkg": 1, "score_source": EVIL,
             "vector": EVIL, "vendors": [EVIL], "ssvc_exploitation": "active",
-            "assigner": EVIL, "nvd_score": 7.0, "threat_level": EVIL, "tags": [EVIL], "org": EVIL})
+            "assigner": EVIL, "nvd_score": 7.0})
         .as_object()
         .unwrap()
         .clone();
@@ -391,7 +388,7 @@ mod tests {
         let empties = [
             ("t-health", build_health_rows(&[])), ("t-kev", build_kev_rows(&[], "")),
             ("t-adv", build_adv_rows(&[])), ("t-dep", build_dep_rows(&[])),
-            ("t-nvd", build_cve_rows(&[], 300).0), ("t-osint", build_osint_rows(&[])),
+            ("t-nvd", build_cve_rows(&[], 300).0),
         ];
         for (tid, rows) in empties {
             assert_eq!(first_row_cells(&rows), thead_cols(tid), "empty {tid}");
@@ -441,9 +438,8 @@ mod tests {
         let page = apply_regions(&skel(), &r).unwrap();
         let mut evil = String::new();
         evil.push_str(&build_cve_rows(&[evil_item()], 300).0);
-        evil.push_str(&build_osint_rows(&[evil_item()]));
         let css = read(STYLE_PATH);
-        let fallback = ["sm", "score-other", "pi-L", "pi-X", "tl-low", "tl-undefined", "tags", "sv-MEDIUM", "sv-LOW"];
+        let fallback = ["sm", "score-other", "pi-L", "pi-X", "sv-MEDIUM", "sv-LOW"];
         for c in re(r#"class="([^"]*)""#).captures_iter(&(page + &evil)) {
             for cls in c[1].split_whitespace() {
                 if fallback.contains(&cls) || c[1].contains('&') {
@@ -457,7 +453,7 @@ mod tests {
     #[test]
     fn missing_anchor_is_fatal() {
         let r = load();
-        assert!(apply_regions(&skel().replace(r#"id="t-osint""#, r#"id="t-gone""#), &r).is_err());
+        assert!(apply_regions(&skel().replace(r#"id="t-nvd""#, r#"id="t-gone""#), &r).is_err());
         assert!(apply_regions(&skel().replace(r#"id="n-cvecap""#, ""), &r).is_err());
     }
 }

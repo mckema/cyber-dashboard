@@ -114,15 +114,6 @@ pub(super) fn f1(f: f64) -> String {
     format!("{f:.1}")
 }
 
-/// First character upper case, the rest lower case: "HIGH" -> "High".
-pub(super) fn capitalize(s: &str) -> String {
-    let mut cs = s.chars();
-    match cs.next() {
-        Some(first) => first.to_uppercase().chain(cs.as_str().to_lowercase().chars()).collect(),
-        None => String::new(),
-    }
-}
-
 // ---------------------------------------------------------------- HTML pieces
 
 static HTTP_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^https?://").unwrap());
@@ -234,8 +225,6 @@ mod tests {
         assert_eq!(thousands(0), "0");
         assert_eq!(plural(1, "feed", None), "1 feed");
         assert_eq!(plural(1234, "entry", Some("entries")), "1,234 entries");
-        assert_eq!(capitalize("HIGH"), "High");
-        assert_eq!(capitalize(""), "");
     }
 
     #[test]

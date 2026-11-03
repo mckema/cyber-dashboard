@@ -411,7 +411,7 @@ fn sort_newest_first(items: &mut [Item]) {
 
 // ---------------------------------------------------------------- tests
 
-/// Test seam shared by the certeu, ncscnl and circl tests: a fake GET that serves
+/// Test seam shared by the certeu and ncscnl tests: a fake GET that serves
 /// fixtures by URL and records the calls.
 #[cfg(test)]
 pub(crate) mod fake {

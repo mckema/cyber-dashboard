@@ -663,7 +663,7 @@ pub fn main(args: Args) -> Result<i32, Fatal> {
     println!("wiki       {base}");
     let w = Wiki::new(&base)?;
     if let Some(dur) = &args.purge_history {
-        // The job writes a page version on every data change (~48/day at 30 min);
+        // The job writes a page version on every data change (at most 4/day at 6 h);
         // its key cannot purge history, so this runs as admin.
         w.wait(&[Mode::Ready], 60, "purge-history")?;
         let jwt = step_login(&w, &email, &password)?;

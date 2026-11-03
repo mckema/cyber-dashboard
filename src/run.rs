@@ -1,6 +1,6 @@
 //! One rebuild of the Cyber Threat Exploit Watch page.
 //!
-//! Pulls eight public feeds (see feeds/mod.rs), rebuilds the six table bodies
+//! Pulls seven public feeds (see feeds/mod.rs), rebuilds the five table bodies
 //! and the counters on the page, and writes the result back through the
 //! Wiki.js GraphQL API. Only the anchored regions are replaced; prose, callouts
 //! and source cards stay hand-editable.
@@ -12,7 +12,7 @@
 //!   IAP_ID_TOKEN      Google OIDC ID token     -> Proxy-Authorization header (only behind IAP)
 //!   STATE_DIR         ./state                  caches, cursors, seen.json, runs.jsonl
 //!   CVE_ROW_CAP       300                      rows shown in the CVE table
-//!   HEARTBEAT_HOURS   6                        rewrite even without data changes after this long
+//!   HEARTBEAT_HOURS   24                       rewrite even without data changes after this long
 //!   GITHUB_TOKEN      optional, raises the GitHub rate limit
 //!   NVD_API_KEY       optional, raises the NVD rate limit
 
@@ -33,7 +33,6 @@ use crate::render::{self, HealthRow, Regions, thousands};
 use crate::wiki;
 
 const WINDOW_DAYS: i64 = 7;
-const SLA_MINUTES: f64 = 60.0;
 
 // Regions that change on every run without the data changing. They are left out
 // of the "did anything change" fingerprint, otherwise every run writes a new
@@ -58,7 +57,7 @@ fn env_num<T: std::str::FromStr>(k: &str, default: T) -> T {
 }
 
 fn heartbeat() -> Duration {
-    Duration::seconds((env_num("HEARTBEAT_HOURS", 6.0_f64) * 3600.0) as i64)
+    Duration::seconds((env_num("HEARTBEAT_HOURS", 24.0_f64) * 3600.0) as i64)
 }
 
 /// Whole-second duration as H:MM:SS, e.g. "6:00:00".
@@ -160,7 +159,6 @@ fn feed_note(key: &str, items: &[Item], st: &Map<String, Value>) -> String {
                              st.get("mode").and_then(Value::as_str).unwrap_or(""), n("changed"), n("requests")),
         "nvd" => "Enrichment only: adds NVD scores to CVE.org records; polled every 2 h.".into(),
         "github" => format!("{} requests.", n("requests")),
-        "circl" if items.is_empty() => "Fetched; no new or changed events in the window.".into(),
         _ => String::new(),
     }
 }
@@ -219,35 +217,53 @@ fn enrich_cves(cves: &[Item], nvd: &[Item]) -> Vec<Item> {
     }).collect()
 }
 
-/// Record first_seen for every item the page carries; per feed, how late new items were.
-///
-/// A feed's first run is its baseline: everything is "new" but was published
-/// days ago, so no lag is measured. Date-only timestamps (KEV dateAdded) can't
-/// be measured either. NVD only enriches CVE.org rows and has no rows of its own.
-fn sla_stats(fs: &[Feed], tables: &[Vec<Item>], health: &[HealthRow], now: DateTime<Utc>) -> Map<String, Value> {
+/// Minutes from first publication to `now` for each item new on this run. Only
+/// `published` counts, never `updated`: a revision is not a new publication.
+/// Date-only values (KEV dateAdded) give no sample. A feed's first run is its
+/// baseline: everything is "new" but was published days ago, so it gives none either.
+fn lags(items: &[Item], is_new: impl Fn(&Item) -> bool, baseline: bool, now: DateTime<Utc>) -> Vec<f64> {
+    if baseline {
+        return Vec::new();
+    }
+    items.iter()
+        .filter(|i| is_new(i) && i.published.trim().len() > 10)
+        .filter_map(|i| parse_iso(&i.published))
+        .map(|t| (now - t).num_milliseconds() as f64 / 60_000.0)
+        .collect()
+}
+
+/// (max, median) of the lags, one decimal; (None, None) when there are none.
+fn lag_summary(lags: &[f64]) -> (Option<f64>, Option<f64>) {
+    let mut v = lags.to_vec();
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    if n == 0 {
+        return (None, None);
+    }
+    let median = if n.is_multiple_of(2) { (v[n / 2 - 1] + v[n / 2]) / 2.0 } else { v[n / 2] };
+    let r1 = |x: f64| (x * 10.0).round() / 10.0;
+    (Some(r1(v[n - 1])), Some(r1(median)))
+}
+
+/// Record first_seen for every item the page carries; per feed, how late new items
+/// were (a metric, not a pass/fail rule). NVD only enriches CVE.org rows and has
+/// no rows of its own.
+fn lag_stats(fs: &[Feed], tables: &[Vec<Item>], health: &[HealthRow], now: DateTime<Utc>) -> Map<String, Value> {
     let seen_before = state::seen();
     let mut out = Map::new();
     for ((feed, items), h) in fs.iter().zip(tables).zip(health) {
         let src = &h.source;
         if feed.key == "nvd" {
-            out.insert(src.clone(), json!({"status": h.status, "items": items.len(), "sla": "n/a (enrichment only)"}));
+            out.insert(src.clone(), json!({"status": h.status, "items": items.len(), "lag": "n/a (enrichment only)"}));
             continue;
         }
         let prefix = format!("{src}:");
         let baseline = !seen_before.keys().any(|k| k.starts_with(&prefix));
         let new = state::mark_seen(items.iter().map(Item::key), now, 30);
-        let lags: Vec<f64> = items.iter().filter_map(|i| {
-            let ts = if i.updated.is_empty() { &i.published } else { &i.updated };
-            if !new.contains_key(&i.key()) || ts.len() <= 10 || baseline {
-                return None;
-            }
-            parse_iso(ts).map(|t| (now - t).num_milliseconds() as f64 / 60_000.0)
-        }).collect();
-        let max = lags.iter().cloned().fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))));
+        let (max, median) = lag_summary(&lags(items, |i| new.contains_key(&i.key()), baseline, now));
         out.insert(src.clone(), json!({
             "status": h.status, "items": items.len(), "new": new.len(), "baseline": baseline,
-            "lag_max_min": max.map(|m| (m * 10.0).round() / 10.0),
-            "over_sla": lags.iter().filter(|&&x| x > SLA_MINUTES).count(),
+            "lag_max_min": max, "lag_median_min": median,
         }));
     }
     out
@@ -341,7 +357,7 @@ fn run(args: &Args) -> Result<(), Fatal> {
     let adv: Vec<Item> = g("certeu").into_iter().chain(g("ncscnl")).collect();
     let catalog = g("kev").first().map(|i| i.x("catalog_version").to_string()).unwrap_or_default();
 
-    let regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &g("circl"), &health,
+    let regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health,
                                         start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
     let fp = fingerprint(&regions, &health);
 
@@ -409,7 +425,7 @@ fn run(args: &Args) -> Result<(), Fatal> {
     // first_seen is only recorded once the page carries the item (or already did).
     let feeds_rec = if result == "written" || result == "unchanged" {
         let tables: Vec<Vec<Item>> = fs.iter().map(|f| g(f.key)).collect();
-        sla_stats(&fs, &tables, &health, now)
+        lag_stats(&fs, &tables, &health, now)
     } else {
         health.iter().map(|h| (h.source.clone(), json!({"status": h.status, "items": h.items}))).collect()
     };
@@ -510,6 +526,47 @@ mod tests {
         let reseeded = without_volatile(&page("", "", "", "")).unwrap();
         assert_eq!(a, b);
         assert_ne!(a, reseeded);
+    }
+
+    fn published(id: &str, published: &str, updated: &str) -> Item {
+        let mut it = Item::new("CERT-EU", id, "u", "t", published);
+        it.updated = updated.into();
+        it
+    }
+
+    const NOW: &str = "2026-11-03T06:00:00Z";
+
+    #[test]
+    fn lag_uses_published_not_updated() {
+        let now = parse_iso(NOW).unwrap();
+        let revised = published("a", "2026-11-03T04:00:00Z", "2026-11-03T05:30:00Z");
+        assert_eq!(lags(&[revised], |_| true, false, now), vec![120.0]);
+    }
+
+    #[test]
+    fn lag_skips_date_only_and_seen_items() {
+        let now = parse_iso(NOW).unwrap();
+        let items = [
+            published("date-only", "2026-11-03", ""),
+            published("new", "2026-11-03T05:00:00Z", ""),
+            published("seen", "2026-11-03T04:00:00Z", ""),
+        ];
+        assert_eq!(lags(&items, |i| i.id != "seen", false, now), vec![60.0]);
+    }
+
+    #[test]
+    fn lag_skips_baseline() {
+        let now = parse_iso(NOW).unwrap();
+        assert!(lags(&[published("a", "2026-11-03T05:00:00Z", "")], |_| true, true, now).is_empty());
+    }
+
+    #[test]
+    fn lag_summary_max_and_median() {
+        assert_eq!(lag_summary(&[]), (None, None));
+        assert_eq!(lag_summary(&[30.0, 5.0, 12.34]), (Some(30.0), Some(12.3)));
+        assert_eq!(lag_summary(&[40.0, 10.0, 20.0, 35.0]), (Some(40.0), Some(27.5)));
+        let rec = json!({"lag_max_min": lag_summary(&[]).0});
+        assert_eq!(rec.to_string(), r#"{"lag_max_min":null}"#);
     }
 
     #[test]

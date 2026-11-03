@@ -7,8 +7,8 @@ use regex::Regex;
 
 use super::HealthRow;
 use super::fmt::{
-    capitalize, cve_link, empty, esc, f1, fdate, feed_pill, ftime, fwhen, href, link, more, or_mdash, plural, sev_pill,
-    thousands, when_key,
+    cve_link, empty, esc, f1, fdate, feed_pill, ftime, fwhen, href, link, more, or_mdash, plural, sev_pill, thousands,
+    when_key,
 };
 use crate::feeds::common::{Item, severity_for};
 
@@ -74,7 +74,7 @@ pub fn build_health_rows(health: &[HealthRow]) -> String {
     out
 }
 
-/// Plain text for n-health, e.g. '8 feeds &middot; 6 ok &middot; 1 cached &middot; 1 error'.
+/// Plain text for n-health, e.g. '7 feeds &middot; 5 ok &middot; 1 cached &middot; 1 error'.
 pub fn health_summary(health: &[HealthRow]) -> String {
     let mut parts = vec![plural(health.len(), "feed", None)];
     for cls in ["ok", "cached", "stale", "error"] {
@@ -419,56 +419,6 @@ pub fn build_cve_rows(items: &[Item], cap: usize) -> (String, usize, usize) {
     (out, rows.len(), total)
 }
 
-// ---------------------------------------------------------------- OSINT (CIRCL MISP)
-
-/// CIRCL OSINT MISP events. 5 columns.
-pub fn build_osint_rows(items: &[Item]) -> String {
-    if items.is_empty() {
-        return empty(5, "No OSINT events published this window.");
-    }
-    let mut out = String::new();
-    for it in by_newest(items) {
-        // MISP threat_level_id 1-4, or the word the feed already mapped it to.
-        let tl = match it.x("threat_level").trim() {
-            "1" => "High".to_string(),
-            "2" => "Medium".to_string(),
-            "3" => "Low".to_string(),
-            "4" | "" => "Undefined".to_string(),
-            t => capitalize(t),
-        };
-        let tags = it.x_list("tags");
-        let mut tag_html: String = tags.iter().take(4).map(|t| format!(r#"<span class="tag">{}</span>"#, esc(t))).collect();
-        if tags.len() > 4 {
-            tag_html.push_str(&format!(r#"<span class="sub">+ {} more</span>"#, tags.len() - 4));
-        }
-        let mut upd = String::new();
-        if !it.updated.is_empty() && it.updated != it.published {
-            upd = format!(r#"<span class="sub">updated {}</span>"#, ftime(&it.updated, true));
-        }
-        let title = if it.title.is_empty() { &it.id } else { &it.title };
-        let short_id: String = it.id.chars().take(8).collect();
-        out.push_str(&format!(
-            concat!(
-                r#"<tr><td class="desc">{}"#,
-                r#"<span class="sub mono">{}</span></td>"#,
-                r#"<td class="due">{}{}</td>"#,
-                r#"<td><span class="tl tl-{}">{}</span></td>"#,
-                r#"<td class="tags">{}</td>"#,
-                r#"<td>{}</td></tr>"#,
-            ),
-            link(&it.url, title, "ttl"),
-            esc(&short_id),
-            fwhen(&it.published, true),
-            upd,
-            esc(&tl.to_lowercase()),
-            esc(&tl),
-            or_mdash(tag_html),
-            esc(it.x("org")),
-        ));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -513,11 +463,6 @@ mod tests {
         let (out, shown, total) = build_cve_rows(&[evil_item()], 300);
         assert_clean(&out);
         assert_eq!((shown, total), (1, 1));
-    }
-
-    #[test]
-    fn escape_osint() {
-        assert_clean(&build_osint_rows(&[evil_item()]));
     }
 
     // ------------------------------------------------ logic
@@ -602,6 +547,5 @@ mod tests {
         assert!(build_adv_rows(&[]).contains(r#"colspan="5" class="empty""#));
         assert!(build_dep_rows(&[]).contains(r#"colspan="6" class="empty""#));
         assert!(build_cve_rows(&[], 300).0.contains(r#"colspan="4" class="empty""#));
-        assert!(build_osint_rows(&[]).contains(r#"colspan="5" class="empty""#));
     }
 }
