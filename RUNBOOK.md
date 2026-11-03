@@ -23,7 +23,7 @@ Trạng thái ngày 2026-11-03.
 | Thing | State |
 |---|---|
 | Wiki.js | `ghcr.io/requarks/wiki:2` = **2.5.317** (Node 24.22.1), SQLite trong named volume `wiki-data`, chỉ publish ở `127.0.0.1:3000`. Không dùng tag `latest`: `latest` là 3.x, API khác. |
-| Page | `en/CTP/run-books/Cyber-Exploit-Watch`, **id 1** trên wiki local. Instance gốc của Mark là id 51. Content lấy từ `page/skeleton.html`, CSS (`scriptCss`) lấy từ `page/style.css`. |
+| Page | `en/CTP/run-books/Cyber-Exploit-Watch`, **id 1** trên wiki local. Instance gốc của Mark là id 51. Content lấy từ `page/skeleton.html`, CSS (`scriptCss`) lấy từ `page/style.css`. Giao diện dựng theo page gốc "Weekly Exploit Watch", giữ 6 bảng, 6 ô số liệu và 8 nguồn của FR-A1. |
 | Job | Service `job`: binary Rust `exploit-watch run --every 1800` (từ 2026-11-03 06:27 UTC; trước đó là bản Python, xem §13). Image `exploit-watch-job` nặng 140 MB: build bằng `rust:1.99.1-slim-bookworm`, runtime `debian:bookworm-slim`, chạy bằng uid 1000. Repo được bind-mount vào `/app` để dùng `state/`, `page/`, `.env`; binary nằm trong image, nên sửa code phải chạy `docker compose build job`. |
 | Credential của job | API key `exploit-watch`, gắn group `exploit-watch` với quyền tối thiểu (xem §7), hết hạn sau 1 năm. Lưu trong `.env`; file này đã có trong `.gitignore`. |
 | Nguồn feed | 8 module trong `feeds/`. Lượt chạy thật 2026-11-03 03:54 UTC: cả 8 nguồn OK. Số item trong 7 ngày: KEV 8 · EUVD 7 · CVE.org 3.119 · NVD 3.121 · GitHub 136 · CERT-EU 0 · NCSC-NL 10 · CIRCL 1. |
@@ -234,6 +234,18 @@ Những điểm dưới đây được tìm ra bằng chạy thử ngày 2026-11
 | Quota 60 request/giờ của GitHub khi không xác thực dùng chung cho cả IP proxy | Lúc bắt đầu test chỉ còn 16/60. Với request không xác thực, 304 vẫn bị tính quota. |
 | GitHub `published=` dùng timestamp đầy đủ thì URL đổi mỗi lượt và không bao giờ nhận được 304 | Query theo ngày, rồi lọc lại đúng cửa sổ trong code. |
 
+**Giao diện page trên Wiki.js** (dựng theo page gốc trên wiki2, export ngày 2026-11-03)
+
+| Quirk | Hệ quả / cách code xử lý |
+|---|---|
+| Sanitiser giữ `<header>`, `<main>`, `<section>`, `<footer>`, `id`, `title`, và `<span>` trong `<pre>` | Skeleton dùng cấu trúc của page gốc: `#ew > header.masthead`, `.refresh`, `.triage`, `main.wrap > section.block`. |
+| `scriptCss` giữ được `@import` (font IBM Plex / Archivo), nhưng `@import` phải là rule đầu tiên. CSS bị minify khi lưu | Font do trình duyệt của người xem tải; wiki không cần Internet. |
+| Wiki.js bọc h1/h2/h3 bằng `toc-header`, thêm link `toc-anchor`, và cho `.contents p` padding `1rem 0 0` | Giữ các override `!important` của page gốc cho `h1/h2.toc-header`, thêm override cho h3. Các đoạn chú thích mới đặt `padding:0`. |
+| `<ul>` luôn bị Wiki.js thêm bullet, kể cả khi đặt `list-style:none` | Page không dùng list. |
+| Wiki.js dàn layout bằng flex, nên một bảng rộng kéo giãn cả cột nội dung (page gốc bị tràn ở bảng GitHub) | `#ew{contain:inline-size}`; bảng rộng cuộn ngang trong khung. |
+| `.contents table` có viền, đường kẻ cột và nền sọc; `.theme--dark` đổi chúng sang xám | Override dark mode dùng token của page. Dark mode của page **theo theme Wiki.js** (`.theme--dark #ew`), không theo hệ điều hành như page gốc (quyết định 2026-11-03), để không có khối tối giữa wiki sáng. |
+| Chụp màn hình bằng headless Chrome: phải đi qua proxy (`--proxy-server=http://192.168.112.253:3128 --proxy-bypass-list=localhost;127.0.0.1`) thì font mới tải được; `#anchor` trong URL không cuộn được page | Chụp ảnh cao rồi cắt. Plugin Playwright chưa kết nối được trong lần làm này. |
+
 **Rust và bản Python trước đó** (port ngày 2026-11-03)
 
 | Quirk | Hệ quả / cách code xử lý |
@@ -258,6 +270,7 @@ Những điểm dưới đây được tìm ra bằng chạy thử ngày 2026-11
 | Mọi nguồn đều rỗng | `every feed came back empty — refusing to publish an empty brief` | Theo code (giữ nguyên từ Mark) |
 | Page thiếu anchor | `page anchor <tbody id="…"> not found — re-seed the page skeleton` | Unit test |
 | Dữ liệu không đổi, chưa tới heartbeat | `no data change since … — skipping write`, không tạo version mới | 2026-11-03 |
+| Page không còn mang dữ liệu hiện tại (sau `bootstrap --reseed`, hoặc bị sửa tay trong vùng anchor) | Ghi lại ngay ở lượt kế tiếp: `content 15,683 -> 331,634 bytes (page does not carry the current data (reseeded or edited))`. Phép so sánh bỏ qua bảng health, `n-health`, `winlabel` và stamp | 2026-11-03, bản Rust |
 | Đang ở chế độ `--every` mà gặp `Fatal` | In `FATAL: …`, ghi `{"result": "fatal"}` vào `runs.jsonl`, chạy tiếp ở lượt sau. Gặp panic thì in `CRASH: …` và ghi `{"result": "crash"}` | Theo code |
 | Lỗi quyền ghi `state/` | Bản Python: `PermissionError … state/items/kev.json.tmp`. Xem §3 mục 3 | 2026-11-03 (bản Python) |
 
@@ -283,8 +296,12 @@ docker compose up -d job
 # dọn page history cũ hơn 7 ngày (admin, áp dụng cho mọi page)
 docker compose run --rm job bootstrap --purge-history P7D
 
-# đẩy lại skeleton hoặc CSS sau khi sửa page/skeleton.html hoặc page/style.css
+# chỉ sửa page/style.css: đẩy lại CSS, giữ nguyên content
+docker compose run --rm job bootstrap --update-css
+
+# sửa page/skeleton.html: đẩy lại skeleton (các bảng thành rỗng), rồi chạy một lượt để điền lại ngay
 docker compose run --rm job bootstrap --reseed --update-css
+docker compose run --rm job run
 
 # preview page bằng dữ liệu thật mà không ghi wiki
 docker compose run --rm job run --out state/out.html
@@ -388,3 +405,5 @@ MSYS_NO_PATHCONV=1 docker run --rm -e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTT
 | 2026-11-03 06:27 | Cutover: xoá code Python, `Dockerfile` multi-stage, `docker compose up -d` | Job Rust dùng tiếp `state/` của Python: cvelistV5 ở mode `delta` (23 request), NVD dùng cache với lịch "next fetch after 08:03 UTC"; page được ghi vì có 22 CVE thay đổi kể từ lượt Python 06:03 |
 | 2026-11-03 | Kiểm tra lại failure policy trên bản Rust bằng `NO_PROXY` | CERT-EU không ra được Internet: Stale, exit 0. KEV không ra được Internet ở cả hai nguồn: FATAL, exit 1, không ghi page |
 | 2026-11-03 | Chạy lại các lệnh của §5 và §9 bằng bản Rust | `bootstrap` dùng tiếp key do Python tạo (`.env unchanged`); `run --dry-run`: `no data change … skipping write`; `demo` và `--purge-history P7D` chạy được |
+| 2026-11-03 06:53 | Dựng lại page theo page gốc (CSS gốc làm nền, cấu trúc `#ew`, class của các dòng như bản gốc); reseed + update-css trên wiki local | 107 test pass; page có dữ liệu thật, 331.632 ký tự. Proxy công ty từ chối kết nối hai lần (khoảng 06:39 và 06:50 UTC), job báo `FATAL: CISA KEV … network error` rồi chạy được ở lần thử sau |
+| 2026-11-03 07:04 | Sửa lỗ hổng: sau `--reseed`, job bỏ qua lượt ghi vì fingerprint không đổi, nên page rỗng tới 6 giờ | `run.rs` so dữ liệu đang có trên page với dữ liệu mới. Reseed rồi `run`: ghi lại ngay; lượt sau: `skipping write`. 108 test pass |

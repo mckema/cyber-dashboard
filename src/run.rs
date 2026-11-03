@@ -336,6 +336,21 @@ fn py_json(v: &Value, out: &mut String) {
     }
 }
 
+/// The page with the regions that change on every run (VOLATILE and the stamp)
+/// emptied, so two pages compare equal when they carry the same data.
+fn without_volatile(html: &str) -> Result<String, Fatal> {
+    let blank = |ids: &[String]| -> Vec<(String, String)> {
+        ids.iter().filter(|id| VOLATILE.contains(&id.as_str())).map(|id| (id.clone(), String::new())).collect()
+    };
+    let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let r = Regions {
+        tbody: blank(&ids(&render::TBODY_IDS)),
+        text: blank(&ids(&render::TEXT_IDS)),
+        stamp: String::new(),
+    };
+    render::apply_regions(html, &r)
+}
+
 fn fingerprint(regions: &Regions, health: &[HealthRow]) -> String {
     let pick = |v: &[(String, String)]| -> Map<String, Value> {
         v.iter().filter(|(k, _)| !VOLATILE.contains(&k.as_str())).map(|(k, x)| (k.clone(), json!(x))).collect()
@@ -430,7 +445,11 @@ fn run(args: &Args) -> Result<(), Fatal> {
         let doc = render::apply_regions(content, &regions)?;
         let written_at = s(&last, "written_at");
         let due = parse_iso(written_at).is_none_or(|w| now - w >= heartbeat());
-        if fp == s(&last, "fingerprint") && !due {
+        // The page may no longer carry the last written data: `bootstrap --reseed`
+        // empties every table, and anyone can edit the page by hand. Compare what is
+        // on the page with what would be written, ignoring the per-run regions.
+        let page_stale = without_volatile(content)? != without_volatile(&doc)?;
+        if fp == s(&last, "fingerprint") && !due && !page_stale {
             println!("no data change since {written_at} — skipping write");
             result = "unchanged";
         } else if doc == content {
@@ -438,6 +457,7 @@ fn run(args: &Args) -> Result<(), Fatal> {
             result = "unchanged";
         } else {
             let reason = if fp != s(&last, "fingerprint") { "data changed".to_string() }
+                         else if page_stale { "page does not carry the current data (reseeded or edited)".to_string() }
                          else { format!("heartbeat ({})", td_str(heartbeat())) };
             println!("content {} -> {} bytes ({reason})", thousands(content.chars().count()), thousands(doc.chars().count()));
             if args.dry_run {
@@ -554,6 +574,17 @@ mod tests {
         assert_eq!((out[1].score, out[1].severity.as_str()), (8.1, "HIGH"));
         assert_eq!(out[1].extra["score_source"], json!("NVD"));
         assert_eq!(out[1].extra["vendors"], json!(["acme"]));
+    }
+
+    #[test]
+    fn without_volatile_ignores_per_run_regions_only() {
+        let page = |health: &str, kev: &str, win: &str, stamp: &str| format!(
+            r#"<tbody id="t-health">{health}</tbody><tbody id="t-kev">{kev}</tbody><b id="winlabel">{win}</b><span id="n-health">x</span><div class="rstat" id="rstat">{stamp}</div>"#);
+        let a = without_volatile(&page("<tr>ok 06:03</tr>", "<tr>CVE-1</tr>", "06:03", "Generated <b>06:03</b>")).unwrap();
+        let b = without_volatile(&page("<tr>ok 06:33</tr>", "<tr>CVE-1</tr>", "06:33", "Generated <b>06:33</b>")).unwrap();
+        let reseeded = without_volatile(&page("", "", "", "")).unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, reseeded);
     }
 
     #[test]
