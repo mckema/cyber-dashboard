@@ -90,7 +90,8 @@ flowchart LR
     state[("state/<br/>HTTP cache, cursors, seen.json,<br/>triage.json, runs.jsonl")]:::container
     comps["component list<br/>TOML file"]:::container
   end
-  linear["Linear<br/>or the local fake"]:::ext
+  mock["linear-mock<br/>Rust binary, local lab only<br/>state/linear-mock/issues.json"]:::container
+  linear["Linear<br/>real workspace"]:::ext
   subgraph wk["Wiki.js 2.5"]
     app["wiki<br/>Node.js, GraphQL API"]:::container
     db[("SQLite<br/>volume wiki-data")]:::container
@@ -99,7 +100,8 @@ flowchart LR
   feeds -->|"conditional GET (ETag, Range)"| job
   job <-->|"read/write files"| state
   comps --> job
-  job -->|"GraphQL: issues, comments, states"| linear
+  job -->|"GraphQL: issues, comments, states<br/>(compose default)"| mock
+  job -.->|"same calls when LINEAR_API_URL<br/>points to api.linear.app"| linear
   job -->|"GraphQL: read page, update page"| app
   app --> db
 ```
@@ -139,7 +141,7 @@ flowchart TB
 
 | Environment | Runtime | Wiki | Status (2026-11-04) |
 |---|---|---|---|
-| Local lab | Docker Compose: `wiki` + `job`, loop every 21600 s (6 h); tracker `fake` | Wiki.js 2.5.317, page id 1 | Running |
+| Local lab | Docker Compose: `wiki` + `job` + `linear-mock`, loop every 21600 s (6 h); tracker `live` against `linear-mock` | Wiki.js 2.5.317, page id 1 | Running |
 | Production | Cloud Scheduler + Cloud Run Job, state in GCS | `wiki2.internal.ediphy.io` via IAP, page id 51 | Decided, not built |
 
 ## How a run works
@@ -239,12 +241,18 @@ flowchart LR
   the 7-day window), the issue and its last known state. Records older than
   30 days are dropped once closed, declined or not relevant.
 - **Tracker** (`LINEAR_MODE`): `off` (default of the binary) records decisions
-  but files nothing; `fake` (compose default) writes issues to
-  `state/fake-linear.json`, where a person can set `state` to `accepted`,
-  `declined` or `done` with `assignee`, `due` and `reason` to simulate Linear;
-  `live` calls the Linear GraphQL API (`issueCreate` in the team's triage state,
-  `commentCreate` when the item changes, issue states read back each run).
-  `live` is tested against fixtures only; no Linear workspace is connected.
+  but files nothing; `live` calls a Linear GraphQL endpoint (`issueCreate` in
+  the team's triage state, `commentCreate` when the item changes, issue states
+  read back each run). The endpoint is `LINEAR_API_URL`, by default
+  `https://api.linear.app/graphql`; compose points it at the `linear-mock`
+  service, so the same HTTP client runs end to end without a Linear workspace.
+- **linear-mock** (`stack/linear-mock/`, local lab only): answers those four
+  operations with the shapes of Linear's documentation and keeps issues in
+  `state/linear-mock/issues.json`. To simulate triage, edit an issue's `state`
+  (`accepted`, `declined` or `done`) with `assignee`, `due` (YYYY-MM-DD),
+  `reason` and `actor`, and save; the next run reads it back. Rate limits,
+  pagination and other operations are not simulated. No real Linear workspace
+  is connected yet.
 - **Page**: the untriaged table lists matched items with no decision in Linear;
   a row turns red after one business day, counted Monday to Friday in
   Europe/Amsterdam time with no holiday calendar. The open-tickets table lists
@@ -253,8 +261,9 @@ flowchart LR
 
 Local test on 2026-11-04 with the sample list over the 7-day window: 3,393
 items, 2 matched (`clickhouse` and `vite`, rule `vendor-product`), 3,391 not
-relevant by rule; two fake issues filed, one accepted and one declined by hand,
-and the page showed one open ticket and no untriaged item.
+relevant by rule; two issues filed with the file-based tracker used before
+`linear-mock`, one accepted and one declined by hand, and the page showed one
+open ticket and no untriaged item.
 
 ## Getting started
 
@@ -269,7 +278,9 @@ docker compose up -d                         # start the job loop
 ```
 
 The page is at http://localhost:3000/en/CTP/run-books/Cyber-Exploit-Watch.
-Run commands from the repository root (Git Bash on Windows).
+Run commands from the repository root (Git Bash on Windows). Every
+`docker compose run --rm job …` also starts `linear-mock` (the job waits for it
+to be healthy), so its image is built on first use.
 
 ## Operations
 
@@ -284,6 +295,8 @@ docker compose run --rm job bootstrap --reseed --update-css && docker compose ru
 docker compose run --rm job bootstrap --purge-history P7D   # drop page versions older than 7 days (all pages)
 docker compose build job                                 # after any change under stack/job/src/
 docker compose run --rm job triage --report              # match counts over state/items/, no network
+docker compose build linear-mock                         # after any change under stack/linear-mock/src/
+docker compose logs linear-mock                          # one line per GraphQL call from the job
 tail -5 state/runs.jsonl
 ```
 
@@ -294,7 +307,9 @@ admin and key are gone; run `bootstrap` again to recreate them.
 ## Configuration
 
 Read from `.env` (created by `bootstrap` from `.env.example`) and the
-environment. Compose overrides `WIKI_BASE` and `STATE_DIR` for the job.
+environment. Compose overrides `WIKI_BASE` and `STATE_DIR` for the job, and
+supplies `LINEAR_*` defaults that point at `linear-mock` when `.env` leaves
+them empty.
 
 | Variable | Default | Used for |
 |---|---|---|
@@ -311,8 +326,9 @@ environment. Compose overrides `WIKI_BASE` and `STATE_DIR` for the job.
 | `NVD_API_KEY` | — | Removes the 6 s pause between NVD pages |
 | `USER_AGENT` | built-in | User-Agent for feed requests; CERT-EU rejects requests without one |
 | `COMPONENTS_FILE` | `stack/job/components.sample.toml` | Component list for the matcher |
-| `LINEAR_MODE` | `off` (compose: `fake`) | Tracker: `off`, `fake` or `live` |
-| `LINEAR_API_KEY`, `LINEAR_TEAM_ID` | — | Live mode only: personal API key and the team whose Triage inbox receives issues |
+| `LINEAR_MODE` | `off` (compose: `live`) | Tracker: `off` or `live` |
+| `LINEAR_API_URL` | `https://api.linear.app/graphql` (compose: `http://linear-mock:8080/graphql`) | Linear GraphQL endpoint |
+| `LINEAR_API_KEY`, `LINEAR_TEAM_ID` | — (compose: `lin_api_mock`, `mock-team`) | Live mode only: personal API key and the team whose Triage inbox receives issues |
 
 Do not put `$` or quotes in `.env` values: Compose reads the file too.
 
@@ -329,8 +345,8 @@ Do not put `$` or quotes in `.env` values: Compose reads the file too.
 | `seen.json` | Item key → first-seen time, kept 30 days |
 | `wiki.json` | Data fingerprint and time of the last write |
 | `triage.json` | One record per new item: decision, item copy, issue and its state |
-| `fake-linear.json` | Issues of the fake tracker (`LINEAR_MODE=fake`); editable by hand |
-| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min`, and `triage` (`mode`, `new_matched`, `new_not_relevant`, `created`, `commented`, `updated`, `pruned`, `errors`) |
+| `linear-mock/issues.json` | Issues held by the `linear-mock` service; editable by hand to simulate triage |
+| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min`, and `triage` (`mode`, `endpoint` in live mode, `new_matched`, `new_not_relevant`, `created`, `commented`, `updated`, `pruned`, `errors`) |
 
 Lag is an item's first-seen time minus its first publication time (`published`;
 a later `updated` time is ignored), in minutes. It is recorded for items new on
@@ -346,7 +362,7 @@ created files in `state/`, the job cannot write them; fix with
 ## Development
 
 ```
-compose.yml                 both services: wiki (Wiki.js 2.x) and job
+compose.yml                 all services: wiki (Wiki.js 2.x), job, linear-mock; one folder each in stack/
 stack/wiki/page/            skeleton.html (page content with anchor ids), style.css (scriptCss)
 stack/job/Cargo.toml        crate exploit-watch (Rust 1.99, edition 2024), with Cargo.lock
 stack/job/src/              the crate's source
@@ -354,6 +370,7 @@ stack/job/tests/fixtures/   trimmed real payloads for unit tests and demo
 stack/job/Dockerfile        build on rust:1.99.1-slim-bookworm, run on debian:bookworm-slim as uid 1000
 stack/job/Dockerfile.dockerignore   build context: Cargo.toml, Cargo.lock, src/ only
 stack/job/components.sample.toml    sample component list for triage
+stack/linear-mock/          crate linear-mock (local stand-in for the Linear API), with its own Cargo.lock and Dockerfile
 ```
 
 The job container's working directory is the repo root (bind mount `.:/app`),
@@ -369,6 +386,10 @@ MSYS_NO_PATHCONV=1 docker run --rm -e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTT
   -v cargo-registry:/usr/local/cargo/registry -v ew-target:/target -e CARGO_TARGET_DIR=/target \
   -v "$(pwd -W):/src" -w /src/stack/job rust:1.99.1-slim-bookworm cargo test --quiet
 ```
+
+For `linear-mock`, use `-w /src/stack/linear-mock` and a separate target
+volume (`-v ew-target-mock:/target`). After changing either crate, rebuild its
+image: `docker compose build job` or `docker compose build linear-mock`.
 
 `exploit-watch demo OUT.html [--dark]` renders the page from
 `stack/job/tests/fixtures/render_items.json` for visual review.
@@ -426,6 +447,18 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 - The business-day clock has no holiday calendar.
 - Linear behaviour not covered by its documentation (auth error codes, order of
   nested history and comments) is assumed; see `stack/job/src/triage/tracker.rs`.
+  `linear-mock` is built from the same documentation, so a passing local run
+  does not prove the real API behaves the same way.
+- Issue references in `state/triage.json` belong to one tracker. Before
+  pointing `LINEAR_API_URL` at another endpoint (mock to real Linear or back),
+  or when resetting `state/linear-mock/`, move `state/triage.json` aside too.
+  Otherwise a comment on an issue the endpoint does not have fails, and because
+  a run's tracker sync stops at its first error, no issue state is read back
+  until that item leaves the 7-day window.
+- A hand edit to `state/linear-mock/issues.json` reaches the page on the next
+  writing run: within 6 hours in the loop, or now with
+  `docker compose run --rm job run`. Put a decline reason in `reason`;
+  `comments` holds the job's own comments.
 
 ## Decisions
 
@@ -443,13 +476,16 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 | 2026-11-03 | Production runtime: Cloud Scheduler + Cloud Run Job | Mark McKee | Decided, deferred until the local workflow is verified |
 | 2026-11-03 | Do not create the prototype's GitHub Actions workflow for now | ISB Vietnam team | Decided |
 | 2026-11-03 | Business day for FR-A2 counted Monday to Friday in Europe/Amsterdam time | ISB Vietnam team | Decided |
-| 2026-11-03 | `LINEAR_MODE` defaults to `off` in the binary; compose sets `fake` for local tests | ISB Vietnam team | Decided |
+| 2026-11-03 | `LINEAR_MODE` defaults to `off` in the binary; compose sets `fake` for local tests | ISB Vietnam team | Replaced on 2026-11-04 |
+| 2026-11-04 | One folder per compose service under `stack/` (`wiki`, `job`, `linear-mock`); the job stays one process (feeds, triage, render, write), matching one Cloud Run Job in production | ISB Vietnam team | Decided, applied |
+| 2026-11-04 | Local triage tests go through a `linear-mock` service over HTTP; the file-based `fake` tracker is removed and `LINEAR_MODE` is `off` or `live` (compose: `live` against `linear-mock`) | ISB Vietnam team | Decided, applied |
+| 2026-11-04 | Verify `live` against a personal Linear Free workspace before asking Mark McKee for a sandbox team in Ediphy's Linear | ISB Vietnam team | Decided |
 
 ## Roadmap
 
 | Item | Requirement | Status (2026-11-04) |
 |---|---|---|
 | Replace the sample component list with a test list from colleagues (Rust and UI libraries), then the list agreed with Germano | FR-A2 | Waiting for the list |
-| Connect a Linear workspace (`LINEAR_MODE=live`) | FR-A2, FR-A3, FR-A9 | Waiting for a workspace and API key |
+| Run `live` against a personal Linear Free workspace, then ask Mark McKee for a sandbox team in Ediphy's Linear | FR-A2, FR-A3, FR-A9 | Next; tested against `linear-mock` only |
 | Monthly and on-demand report to the fairCT COO | FR-A4 | Not started |
 | Cloud Run Job, Cloud Scheduler, GCS state, Terraform; write to `wiki2` via IAP | — | Deferred |

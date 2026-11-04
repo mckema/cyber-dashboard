@@ -9,7 +9,8 @@
 //!   matcher     the rules (pure functions)
 //!   store       state/triage.json: one record (with an item snapshot) per new item key,
 //!               the page tables, and the Amsterdam business-day clock (overdue = red)
-//!   tracker     where tickets live: nothing (off, default), a JSON file (fake), or Linear (live)
+//!   tracker     where tickets live: nothing (off, default) or the Linear GraphQL API (live;
+//!               LINEAR_API_URL points it at the linear-mock service in the compose lab)
 //!   sync        one tracker round per run: create, comment, read states back, save
 //!   step        the triage part of one run, called by run.rs; builds the page tables
 //!   report      `exploit-watch triage --report`: match counts over state/items/, offline

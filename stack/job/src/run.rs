@@ -16,8 +16,9 @@
 //!   GITHUB_TOKEN      optional, raises the GitHub rate limit
 //!   NVD_API_KEY       optional, raises the NVD rate limit
 //!   COMPONENTS_FILE   stack/job/components.sample.toml   component list for the matcher
-//!   LINEAR_MODE       off                      off | fake (state/fake-linear.json) | live
+//!   LINEAR_MODE       off                      off | live
 //!   LINEAR_API_KEY, LINEAR_TEAM_ID             live mode only
+//!   LINEAR_API_URL    https://api.linear.app/graphql   live mode endpoint (compose lab: the linear-mock service)
 
 use std::collections::HashMap;
 use std::io::Write;

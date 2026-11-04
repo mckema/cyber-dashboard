@@ -74,6 +74,12 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
         "components": comps.version, "mode": mode,
         "new_matched": matched, "new_not_relevant": not_relevant,
     });
+    if mode == "live" {
+        // So a run against linear-mock can be told apart from one against Linear.
+        let url = std::env::var("LINEAR_API_URL").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+            .unwrap_or_else(|| tracker::ENDPOINT.to_string());
+        record["endpoint"] = json!(url);
+    }
     if write {
         match tracker {
             Ok(Some(mut t)) => {

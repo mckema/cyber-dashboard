@@ -11,38 +11,19 @@
 //!
 //!   off    (default, also when unset or empty) no tracker; matched items stay
 //!          untriaged on the page
-//!   fake   FakeTracker: issues in STATE_DIR/fake-linear.json
 //!   live   LinearTracker: Linear GraphQL API, needs LINEAR_API_KEY + LINEAR_TEAM_ID
+//!
+//! Any other value (also the former "fake") is a Config error. LINEAR_API_URL
+//! sets the live tracker's GraphQL endpoint (unset or empty: ENDPOINT, the real
+//! Linear API); the local compose lab points it at the `linear-mock` service,
+//! which serves the same GraphQL API.
 //!
 //! TrackerError's Display is one line (whitespace collapsed, bodies cut), so the
 //! run can put it in the health note; tracker errors never fail the run (sync.rs).
 //!
-//! FakeTracker file (state/fake-linear.json). The job appends issues; a person
-//! simulates triage by editing the five fields marked "edit" and saving:
-//!
-//!   {
-//!    "next": 3,                                   next FAKE-n number
-//!    "issues": [
-//!     {
-//!      "identifier": "FAKE-1",
-//!      "url": "https://linear.invalid/fake/issue/FAKE-1",
-//!      "title": "[CVE-2026-1234] ...",
-//!      "description": "...",                      Markdown, as Linear would get it
-//!      "item_key": "CISA KEV:CVE-2026-1234",
-//!      "created": "2026-11-03T08:00:00Z",
-//!      "state": "triage",        edit: triage | accepted | done | declined
-//!      "assignee": "",           edit: owner name, e.g. "Henry"
-//!      "due": "",                edit: YYYY-MM-DD
-//!      "reason": "",             edit: why it was declined
-//!      "actor": "",              edit: who accepted/declined it
-//!      "changed": "",            optional: when (UTC ISO), "" = unknown
-//!      "comments": [{"at": "2026-11-04T08:00:00Z", "body": "..."}]
-//!     }
-//!    ]
-//!   }
-//!
-//! A file that does not parse is an error, never silently replaced: losing it
-//! would lose the triage state.
+//! FakeTracker exists in test builds only: a file-based test double for the
+//! store and sync tests (file format on FakeTracker). The binary has no
+//! file-based tracker.
 //!
 //! Linear API (https://linear.app/developers/graphql, schema
 //! github.com/linear/linear packages/sdk/src/schema.graphql, read 2026-11-03):
@@ -61,9 +42,12 @@ use serde_json::{Value, json};
 
 use super::types::Match;
 use crate::feeds::common::{self, Item, iso_utc, parse_iso};
+#[cfg(test)]
 use crate::feeds::state;
 
+/// Default GraphQL endpoint of the live tracker; LINEAR_API_URL overrides it.
 pub const ENDPOINT: &str = "https://api.linear.app/graphql";
+#[cfg(test)]
 pub const FAKE_FILE: &str = "fake-linear.json";
 /// Comments the job writes start with this, so they are never read back as a decline reason.
 pub const BOT_PREFIX: &str = "**exploit-watch**";
@@ -154,7 +138,8 @@ pub enum TrackerError {
     /// The answer does not have the expected shape.
     #[error("Linear: unexpected reply to {0}")]
     Reply(String),
-    /// state/fake-linear.json problems.
+    /// state/fake-linear.json problems (FakeTracker, test builds only).
+    #[cfg(test)]
     #[error("fake tracker: {0}")]
     Fake(String),
 }
@@ -180,9 +165,8 @@ pub fn from_vars(var: &dyn Fn(&str) -> Option<String>) -> Result<Option<Box<dyn 
     let mode = var("LINEAR_MODE").unwrap_or_default();
     match mode.trim().to_ascii_lowercase().as_str() {
         "" | "off" => Ok(None),
-        "fake" => Ok(Some(Box::new(FakeTracker::new()))),
         "live" => Ok(Some(Box::new(LinearTracker::from_vars(var)?))),
-        other => Err(TrackerError::Config(format!("LINEAR_MODE={other}: expected off, fake or live"))),
+        other => Err(TrackerError::Config(format!("LINEAR_MODE={other}: expected off or live"))),
     }
 }
 
@@ -289,9 +273,10 @@ pub fn update_comment(item: &Item) -> String {
     )
 }
 
-// ---------------------------------------------------------------- fake
+// ---------------------------------------------------------------- fake (test builds only)
 
-/// One issue in state/fake-linear.json (see the module doc).
+/// One issue in state/fake-linear.json (format on FakeTracker).
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FakeIssue {
     pub identifier: String,
@@ -319,7 +304,8 @@ pub struct FakeIssue {
     pub comments: Vec<FakeComment>,
 }
 
-/// The four states a person can type in the file ("canceled"/"completed" are accepted too).
+/// The four states a test can write in the file ("canceled"/"completed" are accepted too).
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FakeState {
@@ -331,40 +317,72 @@ pub enum FakeState {
     Declined,
 }
 
+#[cfg(test)]
 fn fake_state_default() -> FakeState {
     FakeState::Triage
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FakeComment {
     pub at: String,
     pub body: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FakeFile {
     pub next: u64,
     pub issues: Vec<FakeIssue>,
 }
 
+#[cfg(test)]
 impl Default for FakeFile {
     fn default() -> Self {
         Self { next: 1, issues: vec![] }
     }
 }
 
-/// Local stand-in for Linear. Reads and writes the file on every call, so edits
-/// made between runs (or between calls) are picked up.
+/// Test double for Linear (test builds only), used by the store and sync tests.
+/// Reads and writes STATE_DIR/fake-linear.json on every call, so edits a test
+/// makes between calls are picked up. A test simulates triage by editing the
+/// fields marked "edit":
+///
+///   {
+///    "next": 3,                                   next FAKE-n number
+///    "issues": [
+///     {
+///      "identifier": "FAKE-1",
+///      "url": "https://linear.invalid/fake/issue/FAKE-1",
+///      "title": "[CVE-2026-1234] ...",
+///      "description": "...",                      Markdown, as Linear would get it
+///      "item_key": "CISA KEV:CVE-2026-1234",
+///      "created": "2026-11-03T08:00:00Z",
+///      "state": "triage",        edit: triage | accepted | done | declined
+///      "assignee": "",           edit: owner name, e.g. "Henry"
+///      "due": "",                edit: YYYY-MM-DD
+///      "reason": "",             edit: why it was declined
+///      "actor": "",              edit: who accepted/declined it
+///      "changed": "",            optional: when (UTC ISO), "" = unknown
+///      "comments": [{"at": "2026-11-04T08:00:00Z", "body": "..."}]
+///     }
+///    ]
+///   }
+///
+/// A file that does not parse is an error, never silently replaced.
+#[cfg(test)]
 pub struct FakeTracker {
     clock: fn() -> DateTime<Utc>,
 }
 
+#[cfg(test)]
 impl Default for FakeTracker {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl FakeTracker {
     pub fn new() -> Self {
         Self { clock: state::utcnow }
@@ -391,6 +409,7 @@ impl FakeTracker {
     }
 }
 
+#[cfg(test)]
 impl Tracker for FakeTracker {
     fn create_issue(&mut self, item: &Item, m: &Match) -> Result<IssueRef, TrackerError> {
         let mut f = Self::load()?;
@@ -457,7 +476,8 @@ impl HttpReply {
 }
 
 /// The HTTP layer: POST one JSON body to the GraphQL endpoint. Tests swap it for canned replies.
-pub trait Transport {
+/// `Any` lets tests downcast a LinearTracker's transport to check its endpoint.
+pub trait Transport: std::any::Any {
     fn post(&mut self, body: &Value) -> Result<HttpReply, String>;
 }
 
@@ -612,11 +632,14 @@ impl LinearTracker {
         Self::from_vars(&|k| std::env::var(k).ok())
     }
 
+    /// LINEAR_API_KEY, LINEAR_TEAM_ID (both required) and LINEAR_API_URL (optional,
+    /// default ENDPOINT; the compose lab sets it to the linear-mock service).
     pub fn from_vars(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, TrackerError> {
         let var = |k: &str| get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         let key = var("LINEAR_API_KEY").ok_or_else(|| TrackerError::Config("LINEAR_MODE=live needs LINEAR_API_KEY".into()))?;
         let team = var("LINEAR_TEAM_ID").ok_or_else(|| TrackerError::Config("LINEAR_MODE=live needs LINEAR_TEAM_ID".into()))?;
-        Ok(Self::new(Box::new(HttpTransport::new(ENDPOINT, &key)), &team))
+        let url = var("LINEAR_API_URL").unwrap_or_else(|| ENDPOINT.to_string());
+        Ok(Self::new(Box::new(HttpTransport::new(&url, &key)), &team))
     }
 
     /// One GraphQL call; returns `data`. `label` names the operation in errors.
@@ -907,13 +930,32 @@ mod tests {
         assert!(pick(&[("LINEAR_MODE", "off")]).unwrap().is_none());
         assert!(pick(&[]).unwrap().is_none(), "default is off");
         assert!(pick(&[("LINEAR_MODE", " ")]).unwrap().is_none());
-        assert!(pick(&[("LINEAR_MODE", " Fake ")]).unwrap().is_some());
+        assert_eq!(pick(&[("LINEAR_MODE", " Fake ")]).err().unwrap(),
+                   TrackerError::Config("LINEAR_MODE=fake: expected off or live".into()), "fake mode is gone");
         assert_eq!(pick(&[("LINEAR_MODE", "live"), ("LINEAR_API_KEY", " ")]).err().unwrap(),
                    TrackerError::Config("LINEAR_MODE=live needs LINEAR_API_KEY".into()));
         assert_eq!(pick(&[("LINEAR_MODE", "live"), ("LINEAR_API_KEY", "lin_api_x")]).err().unwrap(),
                    TrackerError::Config("LINEAR_MODE=live needs LINEAR_TEAM_ID".into()));
         assert!(pick(&[("LINEAR_MODE", "live"), ("LINEAR_API_KEY", "lin_api_x"), ("LINEAR_TEAM_ID", "t")]).unwrap().is_some());
         assert!(matches!(pick(&[("LINEAR_MODE", "jira")]).err().unwrap(), TrackerError::Config(m) if m.contains("LINEAR_MODE=jira")));
+    }
+
+    #[test]
+    fn live_endpoint_from_linear_api_url() {
+        let endpoint = |url: Option<&str>| {
+            let l = LinearTracker::from_vars(&|k| match k {
+                "LINEAR_API_KEY" => Some("lin_api_x".into()),
+                "LINEAR_TEAM_ID" => Some("t".into()),
+                "LINEAR_API_URL" => url.map(String::from),
+                _ => None,
+            })
+            .unwrap();
+            let any: &dyn std::any::Any = &*l.transport;
+            any.downcast_ref::<HttpTransport>().expect("HttpTransport").endpoint.clone()
+        };
+        assert_eq!(endpoint(None), ENDPOINT);
+        assert_eq!(endpoint(Some("  ")), ENDPOINT);
+        assert_eq!(endpoint(Some(" http://linear-mock:8080/graphql ")), "http://linear-mock:8080/graphql");
     }
 
     // ------------------------------------------------ Linear (canned replies)

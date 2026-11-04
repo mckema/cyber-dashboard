@@ -1,0 +1,20 @@
+[package]
+name = "linear-mock"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+description = "Local lab stand-in for the four Linear GraphQL operations the exploit-watch job uses."
+
+[[bin]]
+name = "linear-mock"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tiny_http = "0.12"
+
+[profile.release]
+strip = true
