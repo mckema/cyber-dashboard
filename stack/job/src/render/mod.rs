@@ -298,16 +298,17 @@ mod test_support {
 
     use super::{TicketRow, TriageRow, TriageView};
     use crate::feeds::common::Item;
+    pub use crate::feeds::kev::testutil::repo_root;
 
-    pub const ROOT: &str = env!("CARGO_MANIFEST_DIR");
     pub const EVIL: &str = r#"<script>alert(1)</script>"><img src=x onerror=alert(2)>"#;
 
+    /// A file by its path relative to the repo root, such as SKELETON_PATH.
     pub fn read(rel: &str) -> String {
-        super::demo::read_text(&Path::new(ROOT).join(rel)).unwrap()
+        super::demo::read_text(&repo_root().join(rel)).unwrap()
     }
 
     pub fn fixture_path() -> PathBuf {
-        Path::new(ROOT).join("tests/fixtures/render_items.json")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/render_items.json")
     }
 
     pub fn re(p: &str) -> Regex {

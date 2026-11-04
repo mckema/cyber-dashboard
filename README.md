@@ -133,7 +133,7 @@ flowchart TB
   wiki --> wjs
 ```
 
-*Level 3, Component (inside the job).*
+*Level 3, Component (inside the job; modules under `stack/job/src/`).*
 
 ### Deployment
 
@@ -219,7 +219,7 @@ flowchart LR
   lin -->|"Accept: ticket / Decline: reason"| store --> page
 ```
 
-- **Matcher** (`src/triage/matcher.rs`, rule version 1), first rule that fits:
+- **Matcher** (`stack/job/src/triage/matcher.rs`, rule version 1), first rule that fits:
   1. `package`: GitHub advisory ecosystem and package equal a library component.
   2. `cpe`: a CVE.org CPE starts with a component's CPE 2.3 prefix.
   3. `vendor-product`: normalised product (and vendor, if the component lists
@@ -282,7 +282,7 @@ docker compose run --rm job bootstrap --update-css       # after editing stack/w
 docker compose run --rm job bootstrap --reseed --update-css && docker compose run --rm job run
                                                          # after editing stack/wiki/page/skeleton.html
 docker compose run --rm job bootstrap --purge-history P7D   # drop page versions older than 7 days (all pages)
-docker compose build job                                 # after any change under src/
+docker compose build job                                 # after any change under stack/job/src/
 docker compose run --rm job triage --report              # match counts over state/items/, no network
 tail -5 state/runs.jsonl
 ```
@@ -348,11 +348,18 @@ created files in `state/`, the job cannot write them; fix with
 ```
 compose.yml                 both services: wiki (Wiki.js 2.x) and job
 stack/wiki/page/            skeleton.html (page content with anchor ids), style.css (scriptCss)
+stack/job/Cargo.toml        crate exploit-watch (Rust 1.99, edition 2024), with Cargo.lock
+stack/job/src/              the crate's source
+stack/job/tests/fixtures/   trimmed real payloads for unit tests and demo
 stack/job/Dockerfile        build on rust:1.99.1-slim-bookworm, run on debian:bookworm-slim as uid 1000
 stack/job/Dockerfile.dockerignore   build context: Cargo.toml, Cargo.lock, src/ only
-src/                        crate exploit-watch (Rust 1.99, edition 2024)
-tests/fixtures/             trimmed real payloads for unit tests and demo
+stack/job/components.sample.toml    sample component list for triage
 ```
+
+The job container's working directory is the repo root (bind mount `.:/app`),
+so runtime paths such as `stack/wiki/page/skeleton.html` and
+`stack/job/components.sample.toml` are relative to the repo root; tests resolve
+them from the crate directory two levels down.
 
 Unit tests run in a container and make no network calls. Add a test name to
 run one test; add `-- --ignored` for the tests that call the live feeds.
@@ -360,14 +367,14 @@ run one test; add `-- --ignored` for the tests that call the live feeds.
 ```bash
 MSYS_NO_PATHCONV=1 docker run --rm -e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTTPS_PROXY \
   -v cargo-registry:/usr/local/cargo/registry -v ew-target:/target -e CARGO_TARGET_DIR=/target \
-  -v "$(pwd -W):/src" -w /src rust:1.99.1-slim-bookworm cargo test --quiet
+  -v "$(pwd -W):/src" -w /src/stack/job rust:1.99.1-slim-bookworm cargo test --quiet
 ```
 
 `exploit-watch demo OUT.html [--dark]` renders the page from
-`tests/fixtures/render_items.json` for visual review.
+`stack/job/tests/fixtures/render_items.json` for visual review.
 
-To add a feed, write a module in `src/feeds/` that follows the contract at the
-top of `src/feeds/common.rs` (`NAME`, `CADENCE`, `fetch(start, end)` returning
+To add a feed, write a module in `stack/job/src/feeds/` that follows the contract at the
+top of `stack/job/src/feeds/common.rs` (`NAME`, `CADENCE`, `fetch(start, end)` returning
 all items or an error, never a partial list), list it in `feeds::all()`, and
 decide in `run.rs` which table it fills and whether it is triaged. Page markup must not use inline `style` attributes; all styling
 goes in `stack/wiki/page/style.css` (see [Known limitations](#known-limitations)).
@@ -418,7 +425,7 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
   `state/cursors/cvelist*`).
 - The business-day clock has no holiday calendar.
 - Linear behaviour not covered by its documentation (auth error codes, order of
-  nested history and comments) is assumed; see `src/triage/tracker.rs`.
+  nested history and comments) is assumed; see `stack/job/src/triage/tracker.rs`.
 
 ## Decisions
 

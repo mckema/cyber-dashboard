@@ -42,8 +42,10 @@ services:
 
   job:
     build:
-      context: .
-      dockerfile: stack/job/Dockerfile
+      # The crate lives in stack/job; Dockerfile.dockerignore limits the context
+      # to Cargo.toml, Cargo.lock and src/.
+      context: stack/job
+      dockerfile: Dockerfile
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -65,8 +67,10 @@ services:
       # default is off. Set LINEAR_MODE in .env to change it.
       LINEAR_MODE: ${LINEAR_MODE:-fake}
     volumes:
-      # Repo bind mount for state/, stack/wiki/page/, .env and tests/fixtures
-      # (demo). The binary is in the image: code changes need `docker compose build job`.
+      # Repo bind mount for state/, stack/wiki/page/, .env, the component list and
+      # stack/job/tests/fixtures (demo). The working directory /app is the repo root,
+      # so runtime paths are relative to it. The binary is in the image: code
+      # changes need `docker compose build job`.
       - .:/app
     # The image's entrypoint is `exploit-watch`; this is its subcommand.
     command: ["run", "--every", "${INTERVAL_SECONDS:-21600}"]

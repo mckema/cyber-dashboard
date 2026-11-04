@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn sample_list_on_real_fixtures() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(components::DEFAULT_PATH);
+        let p = repo_root().join(components::DEFAULT_PATH);
         let sample = components::load_file(&p).unwrap();
         let mut items = kev::parse(&fixture_json("kev_catalog.json"), "github mirror", start(), end()).unwrap();
         items.extend(fixture_json("github_advisories.json").as_array().unwrap().iter().map(|a| github::to_item(a).unwrap()));

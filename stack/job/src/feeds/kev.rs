@@ -106,6 +106,8 @@ pub fn fetch(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<FetchOutput, So
 #[cfg(test)]
 pub(crate) mod testutil {
     //! Shared by the CVE-side feed tests: fixtures, window and a fake Response.
+    use std::path::{Path, PathBuf};
+
     use chrono::{DateTime, TimeZone, Utc};
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -119,8 +121,15 @@ pub(crate) mod testutil {
         Utc.with_ymd_and_hms(2026, 11, 3, 3, 0, 0).unwrap()
     }
 
+    /// The repo root, two levels above the crate (stack/job). Runtime paths such as
+    /// render::SKELETON_PATH and components::DEFAULT_PATH are relative to it, the same
+    /// way the job resolves them from its working directory /app.
+    pub fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
     pub fn fixture(name: &str) -> Vec<u8> {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
         std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
     }
 

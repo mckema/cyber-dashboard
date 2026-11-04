@@ -16,7 +16,7 @@ pub struct DemoArgs {
     #[arg(long)]
     pub dark: bool,
     /// Fixture with items per table and health rows
-    #[arg(long, default_value = "tests/fixtures/render_items.json")]
+    #[arg(long, default_value = "stack/job/tests/fixtures/render_items.json")]
     pub fixture: PathBuf,
 }
 
@@ -111,7 +111,7 @@ fn render_demo(fixture: &Path, dark: bool, root: &Path) -> Result<String, Fatal>
             r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#,
             "<title>Exploit Watch preview</title><style>{}\n{}</style></head>",
             r#"<body><div class="v-application {}">"#,
-            r#"<div class="preview-note">Preview only: fixture data from tests/fixtures/render_items.json. "#,
+            r#"<div class="preview-note">Preview only: fixture data from stack/job/tests/fixtures/render_items.json. "#,
             "On the wiki, stack/wiki/page/skeleton.html is the page content and stack/wiki/page/style.css is scriptCss.</div>",
             r#"<div class="contents">{}</div></div></body></html>"#,
         ),
@@ -135,12 +135,12 @@ pub fn demo(args: DemoArgs) -> Result<(), Fatal> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{ROOT, fixture_path};
+    use super::super::test_support::{fixture_path, repo_root};
     use super::*;
 
     #[test]
     fn demo_renders() {
-        let out = render_demo(&fixture_path(), false, Path::new(ROOT)).unwrap();
+        let out = render_demo(&fixture_path(), false, &repo_root()).unwrap();
         assert!(out.starts_with("<!doctype html>"));
         assert!(out.contains("<style>"));
         assert!(out.contains("CVE-2026-111464"));

@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn sample_file_parses() {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_PATH);
+        let p = crate::feeds::kev::testutil::repo_root().join(DEFAULT_PATH);
         let c = load_file(&p).unwrap();
         assert!(c.version.starts_with("sample-"), "{}", c.version);
         assert!(c.components.len() >= 12, "{}", c.components.len());
