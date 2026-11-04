@@ -8,16 +8,20 @@
 //! mangles long ones (README.md, Known limitations). The row vocabulary (td.id, sv sv-*, tgt, sub,
 //! desc, due/due past, pkg, eco, fix, score, vecbits, empty) is the one of the
 //! original page's row builders; feed, hs-*, ssrc, ssvc-* and pi-* are the
-//! additions for the tables the original did not have.
+//! additions for the tables the original did not have, and item, pend and
+//! tr.overdue those of the triage tables (FR-A2/A3).
 //!
 //! Times: every timestamp on the page is UTC and carries the "UTC" label.
 //! Date-only source values (e.g. CISA dueDate) are shown as a date with no time.
 //!
 //! Anchors filled on the page (see stack/wiki/page/skeleton.html):
-//!   tbody  t-health t-kev t-adv t-dep t-nvd
-//!   text   s-kev s-crit s-high s-dep s-adv
-//!          n-health n-kev n-adv n-dep n-nvd n-cvecap winlabel
+//!   tbody  t-health t-kev t-adv t-dep t-nvd t-untriaged t-tickets
+//!   text   s-kev s-crit s-high s-dep s-adv s-untriaged s-auto
+//!          n-health n-kev n-adv n-dep n-nvd n-cvecap n-untriaged n-tickets winlabel
 //!   stamp  rstat   (inner HTML, contains <b>; must never contain a <div>)
+//!
+//! The triage tables take a TriageView, built by the caller from the triage
+//! store and the tracker; render does not depend on the triage module's types.
 //!
 //! Item.extra values are read through Item::x / x_list / x_num, so a value of
 //! another type than the one feeds/common.rs lists for its key counts as missing.
@@ -44,14 +48,14 @@ pub use demo::{DemoArgs, demo};
 pub use fmt::{esc, ftime, plural, thousands};
 use fmt::{day, hm};
 use tables::{
-    build_adv_rows, build_cve_rows, build_dep_rows, build_health_rows, build_kev_rows, cve_keep, health_summary,
-    kev_overdue, sev,
+    build_adv_rows, build_cve_rows, build_dep_rows, build_health_rows, build_kev_rows, build_ticket_rows,
+    build_untriaged_rows, cve_keep, health_summary, kev_overdue, sev, tickets_past_due,
 };
 
-pub const TBODY_IDS: [&str; 5] = ["t-health", "t-kev", "t-adv", "t-dep", "t-nvd"];
-pub const TEXT_IDS: [&str; 12] = [
-    "s-kev", "s-crit", "s-high", "s-dep", "s-adv",
-    "n-health", "n-kev", "n-adv", "n-dep", "n-nvd", "n-cvecap", "winlabel",
+pub const TBODY_IDS: [&str; 7] = ["t-health", "t-kev", "t-adv", "t-dep", "t-nvd", "t-untriaged", "t-tickets"];
+pub const TEXT_IDS: [&str; 16] = [
+    "s-kev", "s-crit", "s-high", "s-dep", "s-adv", "s-untriaged", "s-auto",
+    "n-health", "n-kev", "n-adv", "n-dep", "n-nvd", "n-cvecap", "n-untriaged", "n-tickets", "winlabel",
 ];
 pub const STAMP_ID: &str = "rstat";
 
@@ -70,6 +74,50 @@ pub struct HealthRow {
     pub newest: String,
     pub last_success: String,
     pub note: String,
+}
+
+/// One row of the untriaged table: a matched item whose issue is neither accepted nor declined.
+/// first_seen: ISO 8601 UTC. issue_identifier "" means the issue is not created yet ("pending").
+/// overdue: set by the caller when the item has waited more than one business day.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TriageRow {
+    pub item_id: String,
+    pub item_url: String,
+    pub title: String,
+    pub component: String,
+    pub rule: String,
+    pub first_seen: String,
+    pub issue_identifier: String,
+    pub issue_url: String,
+    pub overdue: bool,
+}
+
+/// One row of the open tickets table: an accepted issue that is not closed.
+/// due: YYYY-MM-DD or "" (no due date set).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TicketRow {
+    pub issue_identifier: String,
+    pub issue_url: String,
+    pub item_id: String,
+    pub title: String,
+    pub component: String,
+    pub assignee: String,
+    pub due: String,
+    pub state_name: String,
+}
+
+/// What the triage tables show, built by the caller. auto_not_relevant: items in the
+/// window marked not relevant by rule. mode_note: replaces the empty-row message of
+/// both tables (e.g. when Linear sync is off); rows, when present, are shown as usual.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TriageView {
+    pub untriaged: Vec<TriageRow>,
+    pub tickets: Vec<TicketRow>,
+    pub auto_not_relevant: usize,
+    pub mode_note: Option<String>,
 }
 
 /// Everything the job writes, in a fixed order (tbody ids, then text ids, then rstat).
@@ -109,9 +157,10 @@ pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) 
 }
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
+/// The triage view comes from the caller (TriageView::default() shows empty tables).
 #[allow(clippy::too_many_arguments)]
 pub fn build_regions(
-    kev: &[Item], adv: &[Item], dep: &[Item], cve: &[Item], health: &[HealthRow],
+    kev: &[Item], adv: &[Item], dep: &[Item], cve: &[Item], health: &[HealthRow], triage: &TriageView,
     start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>, kev_catalog: &str, cap: usize,
 ) -> Regions {
     let today = end.format("%Y-%m-%d").to_string();
@@ -120,6 +169,9 @@ pub fn build_regions(
     let n_crit = kept.iter().filter(|it| sev(it) == "CRITICAL").count();
     let n_high = kept.iter().filter(|it| sev(it) == "HIGH").count();
     let overdue = kev_overdue(kev, &today);
+    let note = triage.mode_note.as_deref();
+    let untriaged_late = triage.untriaged.iter().filter(|r| r.overdue).count();
+    let tickets_late = tickets_past_due(&triage.tickets, &today);
 
     let tbody = [
         build_health_rows(health),
@@ -127,10 +179,20 @@ pub fn build_regions(
         build_adv_rows(adv),
         build_dep_rows(dep),
         cve_html,
+        build_untriaged_rows(&triage.untriaged, note),
+        build_ticket_rows(&triage.tickets, &today, note),
     ];
     let mut n_kev = plural(kev.len(), "entry", Some("entries"));
     if overdue > 0 {
         n_kev.push_str(&format!(" &middot; {overdue} past deadline"));
+    }
+    let mut s_untriaged = thousands(triage.untriaged.len());
+    if untriaged_late > 0 {
+        s_untriaged.push_str(&format!(" &middot; {} overdue", thousands(untriaged_late)));
+    }
+    let mut n_tickets = plural(triage.tickets.len(), "ticket", None);
+    if tickets_late > 0 {
+        n_tickets.push_str(&format!(" &middot; {} past due", thousands(tickets_late)));
     }
     let text = [
         thousands(kev.len()),
@@ -138,6 +200,8 @@ pub fn build_regions(
         thousands(n_high),
         thousands(dep.len()),
         thousands(adv.len()),
+        s_untriaged,
+        thousands(triage.auto_not_relevant),
         health_summary(health),
         n_kev,
         plural(adv.len(), "advisory", Some("advisories")),
@@ -148,6 +212,8 @@ pub fn build_regions(
         } else {
             format!("All {} shown.", thousands(total))
         },
+        plural(triage.untriaged.len(), "item", None),
+        n_tickets,
         format!("{} {} &rarr; {} {} UTC", day(&start, false), hm(&start), day(&end, false), hm(&end)),
     ];
     Regions {
@@ -230,6 +296,7 @@ mod test_support {
     use regex::Regex;
     use serde_json::json;
 
+    use super::{TicketRow, TriageRow, TriageView};
     use crate::feeds::common::Item;
 
     pub const ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -265,6 +332,24 @@ mod test_support {
         it
     }
 
+    /// Hostile text in every string field of both triage rows; URLs are javascript:.
+    pub fn evil_triage() -> TriageView {
+        TriageView {
+            untriaged: vec![TriageRow {
+                item_id: EVIL.into(), item_url: "javascript:alert(3)".into(), title: EVIL.into(),
+                component: EVIL.into(), rule: EVIL.into(), first_seen: EVIL.into(),
+                issue_identifier: EVIL.into(), issue_url: "javascript:alert(4)".into(), overdue: true,
+            }],
+            tickets: vec![TicketRow {
+                issue_identifier: EVIL.into(), issue_url: "javascript:alert(5)".into(), item_id: EVIL.into(),
+                title: EVIL.into(), component: EVIL.into(), assignee: EVIL.into(), due: EVIL.into(),
+                state_name: EVIL.into(),
+            }],
+            auto_not_relevant: 1,
+            mode_note: Some(EVIL.into()),
+        }
+    }
+
     pub fn assert_clean(out: &str) {
         assert!(!out.contains("<script"), "{out}");
         assert!(!out.contains("<img"), "{out}");
@@ -275,7 +360,7 @@ mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{evil_item, fixture_path, re, read};
+    use super::test_support::{evil_item, evil_triage, fixture_path, re, read};
     use super::*;
 
     fn skel() -> String {
@@ -283,7 +368,7 @@ mod tests {
     }
 
     fn first_row_cells(rows: &str) -> usize {
-        let first = re(r"(?s)^<tr>(.*?)</tr>").captures(rows).unwrap()[1].to_string();
+        let first = re(r"(?s)^<tr\b[^>]*>(.*?)</tr>").captures(rows).unwrap()[1].to_string();
         let tds: Vec<String> = re(r"<td\b([^>]*)>").captures_iter(&first).map(|c| c[1].to_string()).collect();
         if tds.len() == 1 {
             return re(r#"colspan="(\d+)""#).captures(&tds[0]).map_or(1, |m| m[1].parse().unwrap());
@@ -389,6 +474,9 @@ mod tests {
             ("t-health", build_health_rows(&[])), ("t-kev", build_kev_rows(&[], "")),
             ("t-adv", build_adv_rows(&[])), ("t-dep", build_dep_rows(&[])),
             ("t-nvd", build_cve_rows(&[], 300).0),
+            ("t-untriaged", build_untriaged_rows(&[], None)), ("t-tickets", build_ticket_rows(&[], "", None)),
+            ("t-untriaged", build_untriaged_rows(&[], Some("Linear sync is off."))),
+            ("t-tickets", build_ticket_rows(&[], "", Some("Linear sync is off."))),
         ];
         for (tid, rows) in empties {
             assert_eq!(first_row_cells(&rows), thead_cols(tid), "empty {tid}");
@@ -406,6 +494,25 @@ mod tests {
     }
 
     #[test]
+    fn triage_view_default_and_mode_note() {
+        let t = crate::feeds::common::parse_iso("2026-11-03T02:45:00Z").unwrap();
+        let r = |v: &TriageView| build_regions(&[], &[], &[], &[], &[], v, t, t, t, "", 300);
+        let off = r(&TriageView::default());
+        assert!(off.get("t-untriaged").contains("No matched item is waiting for triage."));
+        assert!(off.get("t-tickets").contains("No open tickets."));
+        assert_eq!((off.get("s-untriaged"), off.get("s-auto")), ("0", "0"));
+        assert_eq!((off.get("n-untriaged"), off.get("n-tickets")), ("0 items", "0 tickets"));
+        let note = TriageView { mode_note: Some("Linear sync is off: no issues are filed.".into()), ..Default::default() };
+        let off = r(&note);
+        assert!(off.get("t-untriaged").contains(r#"class="empty">Linear sync is off: no issues are filed."#));
+        assert!(off.get("t-tickets").contains(r#"class="empty">Linear sync is off: no issues are filed."#));
+        let evil = r(&evil_triage());
+        for id in ["t-untriaged", "t-tickets"] {
+            super::test_support::assert_clean(evil.get(id));
+        }
+    }
+
+    #[test]
     fn counts() {
         let r = load();
         assert_eq!(r.get("s-kev"), "3");
@@ -415,6 +522,10 @@ mod tests {
         assert_eq!(r.get("n-cvecap"), "All 4 shown.");
         assert_eq!(r.get("n-kev"), "3 entries &middot; 1 past deadline");
         assert_eq!(r.get("winlabel"), "27 Oct 02:45 &rarr; 3 Nov 02:45 UTC");
+        assert_eq!(r.get("s-untriaged"), "3 &middot; 1 overdue");
+        assert_eq!(r.get("s-auto"), "412");
+        assert_eq!(r.get("n-untriaged"), "3 items");
+        assert_eq!(r.get("n-tickets"), "2 tickets &middot; 1 past due");
     }
 
     #[test]
@@ -426,6 +537,8 @@ mod tests {
         assert!(!once.contains("Not generated yet."));
         assert!(once.contains("CVE-2026-111464"));
         assert!(once.contains("NCSC-2026-0464"));
+        assert!(once.contains("FAKE-3"));
+        assert!(once.contains(r#"<tr class="overdue">"#));
         assert_eq!(once.matches("<div").count(), once.matches("</div>").count());
         assert!(!once.contains("style="));
     }
@@ -438,6 +551,9 @@ mod tests {
         let page = apply_regions(&skel(), &r).unwrap();
         let mut evil = String::new();
         evil.push_str(&build_cve_rows(&[evil_item()], 300).0);
+        let t = evil_triage();
+        evil.push_str(&build_untriaged_rows(&t.untriaged, None));
+        evil.push_str(&build_ticket_rows(&t.tickets, "2026-11-03", None));
         let css = read(STYLE_PATH);
         let fallback = ["sm", "score-other", "pi-L", "pi-X", "sv-MEDIUM", "sv-LOW"];
         for c in re(r#"class="([^"]*)""#).captures_iter(&(page + &evil)) {
@@ -455,5 +571,7 @@ mod tests {
         let r = load();
         assert!(apply_regions(&skel().replace(r#"id="t-nvd""#, r#"id="t-gone""#), &r).is_err());
         assert!(apply_regions(&skel().replace(r#"id="n-cvecap""#, ""), &r).is_err());
+        assert!(apply_regions(&skel().replace(r#"id="t-tickets""#, r#"id="t-gone""#), &r).is_err());
+        assert!(apply_regions(&skel().replace(r#"id="s-auto""#, ""), &r).is_err());
     }
 }

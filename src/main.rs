@@ -3,13 +3,13 @@
 //!   exploit-watch run [--dry-run] [--out FILE] [--every SECONDS]
 //!   exploit-watch bootstrap [--reseed] [--update-css] [--purge-history P7D]
 //!   exploit-watch demo OUT.html [--dark]
+//!   exploit-watch triage --report
 //!
 //! See README.md (Architecture) for how the pieces fit together.
 
 mod feeds;
 mod render;
 mod run;
-#[allow(dead_code)] // wired into run.rs in a later step
 mod triage;
 mod wiki;
 
@@ -32,6 +32,8 @@ enum Command {
     Bootstrap(wiki::bootstrap::Args),
     /// Render the page from a fixture into a standalone HTML file for review.
     Demo(render::DemoArgs),
+    /// Match the cached feed items against the component list and print the counts (no network).
+    Triage(triage::report::Args),
 }
 
 fn main() {
@@ -40,6 +42,7 @@ fn main() {
         Command::Run(a) => run::main(a),
         Command::Bootstrap(a) => wiki::bootstrap::main(a),
         Command::Demo(a) => render::demo(a).map(|_| 0),
+        Command::Triage(a) => triage::report::main(a),
     };
     match res {
         Ok(code) => std::process::exit(code),

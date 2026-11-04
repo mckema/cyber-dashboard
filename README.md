@@ -3,7 +3,7 @@
 Rebuilds the Wiki.js page `CTP/run-books/Cyber-Exploit-Watch` from free public
 vulnerability and advisory feeds, so the page always shows the last 7 days.
 
-`Lab prototype` · `Local Docker Compose only` · `As of 2026-11-03`
+`Lab prototype` · `Local Docker Compose only` · `As of 2026-11-04`
 
 ## Contents
 
@@ -11,6 +11,7 @@ vulnerability and advisory feeds, so the page always shows the last 7 days.
 - [Architecture](#architecture)
 - [How a run works](#how-a-run-works)
 - [Feeds](#feeds)
+- [Triage](#triage)
 - [Getting started](#getting-started)
 - [Operations](#operations)
 - [Configuration](#configuration)
@@ -40,6 +41,12 @@ script. The fork:
   production page is on `wiki2.internal.ediphy.io` behind Google Cloud IAP and
   is not written by this fork yet.
 
+The job also covers the next two MS-30 requirements, FR-A2 (triage every new
+item: relevant to fairCT or not, with a reason and who decided, within one
+business day) and FR-A3 (a ticket for each relevant item): it matches items
+against a component list, files one Linear issue per match and shows the
+untriaged items and open tickets on the page. See [Triage](#triage).
+
 The job only replaces content inside anchored elements of the page (table
 bodies, counters, a stamp). Prose on the page stays hand-editable.
 
@@ -60,11 +67,14 @@ flowchart LR
   ew["Exploit Watch<br/>rebuilds the page"]:::system
   feeds["7 public feeds<br/>CISA KEV · ENISA EUVD · CVE.org · NVD<br/>GitHub Advisory · CERT-EU · NCSC-NL"]:::ext
   wiki["Wiki.js<br/>page CTP/run-books/Cyber-Exploit-Watch"]:::ext
+  linear["Linear<br/>Triage inbox of the team"]:::ext
 
   feeds -->|"HTTPS: JSON, CSV, RSS"| ew
   ew -->|"GraphQL pages.update"| wiki
+  ew -->|"GraphQL: create issue, comment, read state"| linear
   reader -->|reads| wiki
   op -->|"bootstrap, run, reseed"| ew
+  op -->|"Accept / Decline"| linear
 ```
 
 *Level 1, System Context.*
@@ -77,8 +87,10 @@ flowchart LR
   feeds["Public feeds"]:::ext
   subgraph ew["Exploit Watch"]
     job["job<br/>Rust binary exploit-watch<br/>run --every N"]:::container
-    state[("state/<br/>HTTP cache, cursors,<br/>seen.json, runs.jsonl")]:::container
+    state[("state/<br/>HTTP cache, cursors, seen.json,<br/>triage.json, runs.jsonl")]:::container
+    comps["component list<br/>TOML file"]:::container
   end
+  linear["Linear<br/>or the local fake"]:::ext
   subgraph wk["Wiki.js 2.5"]
     app["wiki<br/>Node.js, GraphQL API"]:::container
     db[("SQLite<br/>volume wiki-data")]:::container
@@ -86,6 +98,8 @@ flowchart LR
 
   feeds -->|"conditional GET (ETag, Range)"| job
   job <-->|"read/write files"| state
+  comps --> job
+  job -->|"GraphQL: issues, comments, states"| linear
   job -->|"GraphQL: read page, update page"| app
   app --> db
 ```
@@ -97,8 +111,10 @@ flowchart TB
   classDef component fill:#85bbf0,stroke:#5d82a8,color:#000
   classDef ext fill:#999,stroke:#6b6b6b,color:#fff
 
-  main["main.rs<br/>CLI: run · bootstrap · demo"]:::component
+  main["main.rs<br/>CLI: run · bootstrap · demo · triage"]:::component
   run["run.rs<br/>window, merge, fingerprint, write"]:::component
+  tri["triage/<br/>components, matcher, store,<br/>tracker, sync, step"]:::component
+  lin["Linear"]:::ext
   feeds["feeds/*.rs<br/>one module per publisher"]:::component
   common["feeds/common.rs<br/>Item contract, GET with ETag cache"]:::component
   st["feeds/state.rs<br/>atomic files under state/"]:::component
@@ -109,6 +125,8 @@ flowchart TB
 
   main --> run & boot & render
   run --> feeds --> common --> st
+  run --> tri --> st
+  tri --> lin
   run --> render
   run --> wiki
   boot --> wiki
@@ -119,9 +137,9 @@ flowchart TB
 
 ### Deployment
 
-| Environment | Runtime | Wiki | Status (2026-11-03) |
+| Environment | Runtime | Wiki | Status (2026-11-04) |
 |---|---|---|---|
-| Local lab | Docker Compose: `wiki` + `job`, loop every 21600 s (6 h) | Wiki.js 2.5.317, page id 1 | Running |
+| Local lab | Docker Compose: `wiki` + `job`, loop every 21600 s (6 h); tracker `fake` | Wiki.js 2.5.317, page id 1 | Running |
 | Production | Cloud Scheduler + Cloud Run Job, state in GCS | `wiki2.internal.ediphy.io` via IAP, page id 51 | Decided, not built |
 
 ## How a run works
@@ -132,14 +150,18 @@ flowchart TB
 3. Merge: CISA KEV and ENISA EUVD rows join by CVE into one "exploited" table;
    NVD scores fill CVE.org records that have no CNA or CISA-ADP score;
    CERT-EU and NCSC-NL share one advisory table.
-4. Render five tables (feed health, exploited, advisories, dependencies, CVEs)
-   and the counters, and splice them into the current page by anchor id.
-5. Fingerprint the data, leaving out regions that change every run (health
+4. Triage (see [Triage](#triage)): match every item against the component
+   list, record new decisions in `triage.json`, and, on a writing run only,
+   sync the tracker.
+5. Render seven tables (feed health, exploited, advisories, dependencies, CVEs,
+   untriaged, open tickets) and the counters, and splice them into the current
+   page by anchor id.
+6. Fingerprint the data, leaving out regions that change every run (health
    table, health count, window label). Write only when the fingerprint changed,
    when `HEARTBEAT_HOURS` (24 h) has passed since the last write, or when the
    page no longer carries the current data (after a reseed or a manual edit).
-6. Write with one `pages.update` call. `scriptCss` is never sent by the job.
-7. Record each item's first-seen time in `seen.json` and one line in `runs.jsonl`.
+7. Write with one `pages.update` call. `scriptCss` is never sent by the job.
+8. Record each item's first-seen time in `seen.json` and one line in `runs.jsonl`.
 
 | Condition | Result |
 |---|---|
@@ -151,6 +173,8 @@ flowchart TB
 | A page anchor is missing | `page anchor … not found — re-seed the page skeleton`, exit 1 |
 | No data change, heartbeat not due | `skipping write`, no new page version |
 | `FATAL` while looping (`--every`) | Logged and recorded as `fatal`; next run proceeds |
+| Component list does not load, or `triage.json` is unreadable | Triage skipped; the triage tables say why; feed tables written as usual |
+| Tracker call fails | Tracker calls stop for this run, progress so far is saved, error in `runs.jsonl` under `triage.errors`; page written |
 
 ## Feeds
 
@@ -167,6 +191,70 @@ flowchart TB
 Measured on 2026-11-03 at the earlier 30-minute interval: a normal run made
 about 10–40 requests, most answered
 `304 Not Modified`. The first cvelistV5 backfill took 105 requests and 46.7 MB.
+
+## Triage
+
+FR-A2 asks for every new item to be triaged within one business day, with a
+reason and who decided; FR-A3 asks for a ticket with owner, due date and status
+for each relevant item. Mark McKee approved this flow on 2026-11-03; the same
+Linear ticket also serves FR-A9 for now.
+
+```mermaid
+flowchart LR
+  classDef component fill:#85bbf0,stroke:#5d82a8,color:#000
+  classDef ext fill:#999,stroke:#6b6b6b,color:#fff
+
+  items["Items of this run<br/>KEV · EUVD · CVE.org · GitHub · CERT-EU · NCSC-NL"]:::ext
+  comps["Component list<br/>COMPONENTS_FILE"]:::ext
+  m["Matcher"]:::component
+  nr["Not relevant by rule<br/>triager: matcher 1/&lt;list version&gt;"]:::component
+  store[("triage.json")]:::component
+  lin["Linear Triage inbox<br/>one issue per match"]:::ext
+  page["Page: untriaged, open tickets"]:::component
+
+  items --> m
+  comps --> m
+  m -->|no match| nr --> store
+  m -->|match| store --> lin
+  lin -->|"Accept: ticket / Decline: reason"| store --> page
+```
+
+- **Matcher** (`src/triage/matcher.rs`, rule version 1), first rule that fits:
+  1. `package`: GitHub advisory ecosystem and package equal a library component.
+  2. `cpe`: a CVE.org CPE starts with a component's CPE 2.3 prefix.
+  3. `vendor-product`: normalised product (and vendor, if the component lists
+     vendors) from KEV, EUVD or CVE.org equals a component.
+  4. `cve-join`: an advisory or other item whose CVE's CVE.org record matches
+     by rules 1–3.
+
+  Affected versions are not checked, so a match is a candidate. An item that
+  matches nothing is recorded as not relevant, with
+  `matcher <rule version>/<component list version>` as the triager.
+- **Component list**: TOML, one `[[component]]` per entry (`id`, `kind` =
+  library | image | infra, `ecosystem`, `names`, optional `vendors` and `cpe`).
+  `stack/job/components.sample.toml` is a sample of 17 entries for testing;
+  the real list is to be agreed with Germano (date not stated).
+- **Store**: `state/triage.json` keeps one record per new item key with the
+  decision, a copy of the item (so an issue can be filed after the item leaves
+  the 7-day window), the issue and its last known state. Records older than
+  30 days are dropped once closed, declined or not relevant.
+- **Tracker** (`LINEAR_MODE`): `off` (default of the binary) records decisions
+  but files nothing; `fake` (compose default) writes issues to
+  `state/fake-linear.json`, where a person can set `state` to `accepted`,
+  `declined` or `done` with `assignee`, `due` and `reason` to simulate Linear;
+  `live` calls the Linear GraphQL API (`issueCreate` in the team's triage state,
+  `commentCreate` when the item changes, issue states read back each run).
+  `live` is tested against fixtures only; no Linear workspace is connected.
+- **Page**: the untriaged table lists matched items with no decision in Linear;
+  a row turns red after one business day, counted Monday to Friday in
+  Europe/Amsterdam time with no holiday calendar. The open-tickets table lists
+  accepted issues with owner, due date (red when past) and state. Only a
+  writing run (not `--dry-run` or `--out`) files issues or saves `triage.json`.
+
+Local test on 2026-11-04 with the sample list over the 7-day window: 3,393
+items, 2 matched (`clickhouse` and `vite`, rule `vendor-product`), 3,391 not
+relevant by rule; two fake issues filed, one accepted and one declined by hand,
+and the page showed one open ticket and no untriaged item.
 
 ## Getting started
 
@@ -195,6 +283,7 @@ docker compose run --rm job bootstrap --reseed --update-css && docker compose ru
                                                          # after editing stack/wiki/page/skeleton.html
 docker compose run --rm job bootstrap --purge-history P7D   # drop page versions older than 7 days (all pages)
 docker compose build job                                 # after any change under src/
+docker compose run --rm job triage --report              # match counts over state/items/, no network
 tail -5 state/runs.jsonl
 ```
 
@@ -221,6 +310,9 @@ environment. Compose overrides `WIKI_BASE` and `STATE_DIR` for the job.
 | `GITHUB_TOKEN` | — | Raises the GitHub API limit from 60 to 5,000 requests/h |
 | `NVD_API_KEY` | — | Removes the 6 s pause between NVD pages |
 | `USER_AGENT` | built-in | User-Agent for feed requests; CERT-EU rejects requests without one |
+| `COMPONENTS_FILE` | `stack/job/components.sample.toml` | Component list for the matcher |
+| `LINEAR_MODE` | `off` (compose: `fake`) | Tracker: `off`, `fake` or `live` |
+| `LINEAR_API_KEY`, `LINEAR_TEAM_ID` | — | Live mode only: personal API key and the team whose Triage inbox receives issues |
 
 Do not put `$` or quotes in `.env` values: Compose reads the file too.
 
@@ -236,7 +328,9 @@ Do not put `$` or quotes in `.env` values: Compose reads the file too.
 | `cursors/` | Per-feed cursors: cvelistV5 `fetchTime`, NVD and CVE stores, CERT-EU and NCSC-NL caches |
 | `seen.json` | Item key → first-seen time, kept 30 days |
 | `wiki.json` | Data fingerprint and time of the last write |
-| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min` |
+| `triage.json` | One record per new item: decision, item copy, issue and its state |
+| `fake-linear.json` | Issues of the fake tracker (`LINEAR_MODE=fake`); editable by hand |
+| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min`, and `triage` (`mode`, `new_matched`, `new_not_relevant`, `created`, `commented`, `updated`, `pruned`, `errors`) |
 
 Lag is an item's first-seen time minus its first publication time (`published`;
 a later `updated` time is ignored), in minutes. It is recorded for items new on
@@ -273,9 +367,9 @@ MSYS_NO_PATHCONV=1 docker run --rm -e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTT
 `tests/fixtures/render_items.json` for visual review.
 
 To add a feed, write a module in `src/feeds/` that follows the contract at the
-top of `src/feeds/common.rs` (`NAME`, `TABLE`, `CADENCE`, `fetch(start, end)`
-returning all items or an error, never a partial list) and list it in
-`feeds::all()`. Page markup must not use inline `style` attributes; all styling
+top of `src/feeds/common.rs` (`NAME`, `CADENCE`, `fetch(start, end)` returning
+all items or an error, never a partial list), list it in `feeds::all()`, and
+decide in `run.rs` which table it fills and whether it is triaged. Page markup must not use inline `style` attributes; all styling
 goes in `stack/wiki/page/style.css` (see [Known limitations](#known-limitations)).
 
 ## Known limitations
@@ -315,6 +409,17 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 - The CVE table shows the first 300 rows by score (`CVE_ROW_CAP`).
 - Items with a date only (KEV, EUVD) have no measurable lag.
 
+**Triage**
+
+- The matcher does not check affected versions; every match needs a person to
+  confirm it in Linear.
+- Items cached before 2026-11-04 lack the `products`, `cpes` and `eco_packages`
+  fields the matcher reads until they are fetched again (for CVE.org: delete
+  `state/cursors/cvelist*`).
+- The business-day clock has no holiday calendar.
+- Linear behaviour not covered by its documentation (auth error codes, order of
+  nested history and comments) is assumed; see `src/triage/tracker.rs`.
+
 ## Decisions
 
 | Date | Decision | By | Status |
@@ -325,17 +430,19 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 | 2026-11-03 | Drop CIRCL OSINT | Mark McKee | Decided, applied |
 | 2026-11-03 | Accept the KEV GitHub mirror as fallback until `cisa.gov` is rechecked from GCP | Mark McKee | Decided |
 | 2026-11-03 | "Within 1 hour" is not a hard rule; measure lag from first publication only | Mark McKee | Decided, applied |
-| 2026-11-03 | FR-A2: items matching no fairCT component are marked not relevant by rule; rule name and version recorded as triager | Mark McKee | Decided, not built |
+| 2026-11-03 | FR-A2: items matching no fairCT component are marked not relevant by rule; rule name and version recorded as triager | Mark McKee | Decided, built (local) |
 | 2026-11-03 | Component list: a small test list (Rust or UI libraries) for now; final list to be agreed with Germano | Mark McKee | Decided |
 | 2026-11-03 | FR-A9: a Linear ticket is sufficient for now | Mark McKee | Decided |
 | 2026-11-03 | Production runtime: Cloud Scheduler + Cloud Run Job | Mark McKee | Decided, deferred until the local workflow is verified |
 | 2026-11-03 | Do not create the prototype's GitHub Actions workflow for now | ISB Vietnam team | Decided |
+| 2026-11-03 | Business day for FR-A2 counted Monday to Friday in Europe/Amsterdam time | ISB Vietnam team | Decided |
+| 2026-11-03 | `LINEAR_MODE` defaults to `off` in the binary; compose sets `fake` for local tests | ISB Vietnam team | Decided |
 
 ## Roadmap
 
-| Item | Requirement | Status (2026-11-03) |
+| Item | Requirement | Status (2026-11-04) |
 |---|---|---|
-| Match items against a component list; mark non-matches by rule | FR-A2 | Planned |
-| One Linear issue per matched item in the Triage inbox; untriaged and open-ticket tables on the page | FR-A2, FR-A3, FR-A9 | Planned (local, fake tracker first) |
+| Replace the sample component list with a test list from colleagues (Rust and UI libraries), then the list agreed with Germano | FR-A2 | Waiting for the list |
+| Connect a Linear workspace (`LINEAR_MODE=live`) | FR-A2, FR-A3, FR-A9 | Waiting for a workspace and API key |
 | Monthly and on-demand report to the fairCT COO | FR-A4 | Not started |
 | Cloud Run Job, Cloud Scheduler, GCS state, Terraform; write to `wiki2` via IAP | — | Deferred |

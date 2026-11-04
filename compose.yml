@@ -61,6 +61,9 @@ services:
       # These override any value in .env.
       WIKI_BASE: http://wiki:3000
       STATE_DIR: /app/state
+      # Triage tickets go to state/fake-linear.json locally; the binary's own
+      # default is off. Set LINEAR_MODE in .env to change it.
+      LINEAR_MODE: ${LINEAR_MODE:-fake}
     volumes:
       # Repo bind mount for state/, stack/wiki/page/, .env and tests/fixtures
       # (demo). The binary is in the image: code changes need `docker compose build job`.

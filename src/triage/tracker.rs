@@ -9,9 +9,13 @@
 //!
 //! LINEAR_MODE selects the tracker (from_env):
 //!
-//!   off    no tracker; matched items stay untriaged on the page
-//!   fake   (default) FakeTracker: issues in STATE_DIR/fake-linear.json
+//!   off    (default, also when unset or empty) no tracker; matched items stay
+//!          untriaged on the page
+//!   fake   FakeTracker: issues in STATE_DIR/fake-linear.json
 //!   live   LinearTracker: Linear GraphQL API, needs LINEAR_API_KEY + LINEAR_TEAM_ID
+//!
+//! TrackerError's Display is one line (whitespace collapsed, bodies cut), so the
+//! run can put it in the health note; tracker errors never fail the run (sync.rs).
 //!
 //! FakeTracker file (state/fake-linear.json). The job appends issues; a person
 //! simulates triage by editing the five fields marked "edit" and saving:
@@ -165,7 +169,7 @@ pub trait Tracker {
     fn fetch_states(&mut self, issues: &[IssueRef]) -> Result<Vec<(IssueRef, IssueStatus)>, TrackerError>;
 }
 
-/// LINEAR_MODE -> tracker. Ok(None) for "off". Nothing is contacted here: the
+/// LINEAR_MODE -> tracker. Ok(None) for "off" or unset. Nothing is contacted here: the
 /// live tracker looks up the triage state on its first create_issue().
 pub fn from_env() -> Result<Option<Box<dyn Tracker>>, TrackerError> {
     from_vars(&|k| std::env::var(k).ok())
@@ -175,8 +179,8 @@ pub fn from_env() -> Result<Option<Box<dyn Tracker>>, TrackerError> {
 pub fn from_vars(var: &dyn Fn(&str) -> Option<String>) -> Result<Option<Box<dyn Tracker>>, TrackerError> {
     let mode = var("LINEAR_MODE").unwrap_or_default();
     match mode.trim().to_ascii_lowercase().as_str() {
-        "off" => Ok(None),
-        "" | "fake" => Ok(Some(Box::new(FakeTracker::new()))),
+        "" | "off" => Ok(None),
+        "fake" => Ok(Some(Box::new(FakeTracker::new()))),
         "live" => Ok(Some(Box::new(LinearTracker::from_vars(var)?))),
         other => Err(TrackerError::Config(format!("LINEAR_MODE={other}: expected off, fake or live"))),
     }
@@ -190,6 +194,13 @@ fn head(s: &str, n: usize) -> &str {
         Some((i, _)) => &s[..i],
         None => s,
     }
+}
+
+/// `s` on one line (whitespace runs collapsed), at most `n` characters ("…" when cut).
+/// For error texts that end up in the one-line health note.
+fn one_line(s: &str, n: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= n { s } else { format!("{}…", head(&s, n - 1)) }
 }
 
 /// "[CVE-2026-1234] <title>", "[CVE-A +2] ..." for several CVEs, "[GHSA-…] ..." without one.
@@ -359,6 +370,7 @@ impl FakeTracker {
         Self { clock: state::utcnow }
     }
 
+    #[cfg(test)]
     pub fn with_clock(clock: fn() -> DateTime<Utc>) -> Self {
         Self { clock }
     }
@@ -594,7 +606,8 @@ impl LinearTracker {
         Self { transport, team_id: team_id.into(), triage_state: None, rate: RateLimit::default() }
     }
 
-    /// LINEAR_API_KEY + LINEAR_TEAM_ID from the environment.
+    /// LINEAR_API_KEY + LINEAR_TEAM_ID from the environment (used by the live test).
+    #[cfg(test)]
     pub fn from_env() -> Result<Self, TrackerError> {
         Self::from_vars(&|k| std::env::var(k).ok())
     }
@@ -611,7 +624,7 @@ impl LinearTracker {
         let r = self
             .transport
             .post(&json!({"query": query, "variables": variables}))
-            .map_err(|e| TrackerError::Network(format!("{label}: {e}")))?;
+            .map_err(|e| TrackerError::Network(format!("{label}: {}", one_line(&e, 240))))?;
         self.rate = RateLimit::from_reply(&r);
         let text = String::from_utf8_lossy(&r.body);
         let j: Option<Value> = serde_json::from_slice(&r.body).ok();
@@ -620,7 +633,8 @@ impl LinearTracker {
             .map(|a| a.iter().filter_map(|e| e.pointer("/extensions/code").and_then(Value::as_str)).map(String::from).collect())
             .unwrap_or_default();
         let message = errs.map(|a| {
-            a.iter().map(|e| e.get("message").and_then(Value::as_str).unwrap_or("?")).collect::<Vec<_>>().join("; ")
+            let m = a.iter().map(|e| e.get("message").and_then(Value::as_str).unwrap_or("?")).collect::<Vec<_>>();
+            one_line(&m.join("; "), 240)
         });
 
         if r.status == 429 || codes.iter().any(|c| c == "RATELIMITED") {
@@ -636,10 +650,10 @@ impl LinearTracker {
             return Err(TrackerError::GraphQl { message: format!("{label}: {m}"), codes });
         }
         if !(200..300).contains(&r.status) {
-            return Err(TrackerError::Http { status: r.status, body: format!("{label}: {}", head(&text, 300)) });
+            return Err(TrackerError::Http { status: r.status, body: format!("{label}: {}", one_line(&text, 200)) });
         }
         let Some(j) = j else {
-            return Err(TrackerError::Reply(format!("{label}: non-JSON body: {}", head(&text, 200))));
+            return Err(TrackerError::Reply(format!("{label}: non-JSON body: {}", one_line(&text, 120))));
         };
         Ok(j.get("data").cloned().unwrap_or(Value::Null))
     }
@@ -791,8 +805,8 @@ mod tests {
         assert!(t.starts_with("[GHSA-abcd-efgh-ijkl] tokio: éé"), "{t}");
         assert_eq!(t.chars().count(), TITLE_MAX);
         assert!(t.ends_with('…'));
-        let empty = Item::new("CIRCL MISP", "uuid-1", "u", "  ", "2026-11-03");
-        assert_eq!(issue_title(&empty), "[uuid-1] CIRCL MISP");
+        let empty = Item::new("NCSC-NL", "NCSC-2026-0464", "u", "  ", "2026-11-03");
+        assert_eq!(issue_title(&empty), "[NCSC-2026-0464] NCSC-NL");
     }
 
     #[test]
@@ -891,7 +905,8 @@ mod tests {
             from_vars(&move |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()))
         };
         assert!(pick(&[("LINEAR_MODE", "off")]).unwrap().is_none());
-        assert!(pick(&[]).unwrap().is_some());
+        assert!(pick(&[]).unwrap().is_none(), "default is off");
+        assert!(pick(&[("LINEAR_MODE", " ")]).unwrap().is_none());
         assert!(pick(&[("LINEAR_MODE", " Fake ")]).unwrap().is_some());
         assert_eq!(pick(&[("LINEAR_MODE", "live"), ("LINEAR_API_KEY", " ")]).err().unwrap(),
                    TrackerError::Config("LINEAR_MODE=live needs LINEAR_API_KEY".into()));
@@ -989,6 +1004,7 @@ mod tests {
         assert_eq!(declined.reason, "Not relevant: we only use tokio in the test harness.");
         assert_eq!((declined.actor.as_str(), declined.changed.as_str()), ("Tran Trung Hau", "2026-11-03T10:00:00Z"));
         let dup = by("CTP-126");
+        assert_eq!(IssueState::from_linear("duplicate"), Some(IssueState::Declined));
         assert_eq!((dup.state, dup.actor.as_str()), (IssueState::Declined, "Triage Intelligence"));
         assert_eq!(dup.reason, "", "the job's own comments are never a reason");
         assert_eq!(st[0].0.url, "https://linear.app/ediphy/issue/CTP-123/x");
@@ -1042,6 +1058,25 @@ mod tests {
         assert!(matches!(&e, TrackerError::Config(m) if m.contains("has no triage state")), "{e}");
         let r = IssueRef { id: "x".into(), identifier: "CTP-1".into(), url: String::new() };
         assert!(matches!(l.fetch_states(&[r]).unwrap_err(), TrackerError::Reply(m) if m.contains("\"paused\"")));
+    }
+
+    /// Error texts go into a one-line health note: no newlines, bounded length.
+    #[test]
+    fn linear_errors_are_one_line() {
+        let page = format!("<html>\n<head><title>502 Bad Gateway</title></head>\n<body>\n{}\n</body></html>", "x ".repeat(500));
+        let many = (0..30).map(|i| format!(r#"{{"message":"Field 'f{i}' is\nnot defined"}}"#)).collect::<Vec<_>>().join(",");
+        let (mut l, _) = linear(vec![
+            Err(format!("error sending request\n{}", "for url ".repeat(100))),
+            reply(502, &page, &[]),
+            reply(200, &page, &[]),
+            reply(200, &format!(r#"{{"errors":[{many}],"data":null}}"#), &[]),
+        ]);
+        for _ in 0..4 {
+            let e = l.gql("{ viewer { id } }", json!({}), "viewer").unwrap_err().to_string();
+            assert!(!e.contains('\n') && e.chars().count() <= 320, "{} chars: {e}", e.chars().count());
+        }
+        assert_eq!(one_line(" a \n b ", 10), "a b");
+        assert_eq!(one_line("abcdef", 4), "abc…");
     }
 
     /// Live, against a THROWAWAY Linear team with Triage turned on: creates one

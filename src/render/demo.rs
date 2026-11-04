@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use super::{HealthRow, Regions, SKELETON_PATH, STYLE_PATH, apply_regions, build_regions, thousands};
+use super::{HealthRow, Regions, SKELETON_PATH, STYLE_PATH, TriageView, apply_regions, build_regions, thousands};
 use crate::feeds::common::{Fatal, Item, parse_iso};
 
 #[derive(clap::Args)]
@@ -28,13 +28,14 @@ body{margin:0;background:#f2f3f5;font-family:Roboto,"Segoe UI",Helvetica,Arial,s
 .theme--dark .contents{background:#212121;color:#ddd}
 "#;
 
-/// The demo fixture: items per table, health rows and the window.
+/// The demo fixture: items per table, health rows, the triage view and the window.
 pub(super) struct Fixture {
     kev: Vec<Item>,
     adv: Vec<Item>,
     dep: Vec<Item>,
     cve: Vec<Item>,
     health: Vec<HealthRow>,
+    triage: TriageView,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -45,7 +46,7 @@ pub(super) struct Fixture {
 impl Fixture {
     pub(super) fn regions(&self) -> Regions {
         build_regions(
-            &self.kev, &self.adv, &self.dep, &self.cve, &self.health,
+            &self.kev, &self.adv, &self.dep, &self.cve, &self.health, &self.triage,
             self.start, self.end, self.now, &self.kev_catalog, self.cap,
         )
     }
@@ -76,12 +77,18 @@ pub(super) fn load_fixture(path: &Path) -> Result<Fixture, Fatal> {
         Some(v) => serde_json::from_value(v.clone()).map_err(|e| bad(format!("health: {e}")))?,
         None => return Err(bad("health: missing".into())),
     };
+    // Missing: empty triage tables.
+    let triage = match d.get("triage") {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| bad(format!("triage: {e}")))?,
+        None => TriageView::default(),
+    };
     Ok(Fixture {
         kev: items("kev")?,
         adv: items("adv")?,
         dep: items("dep")?,
         cve: items("cve")?,
         health,
+        triage,
         start: when("start")?,
         end: when("end")?,
         now: when("now")?,

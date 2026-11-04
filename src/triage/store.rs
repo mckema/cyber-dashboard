@@ -8,21 +8,28 @@
 //!     "issue_status": {"state": "accepted", "assignee": "…", "due": "2026-11-10", …},  null until read back
 //!     "item_fingerprint": "3f9c…",       hash of the item fields that matter; a change -> comment
 //!     "updated": "2026-11-03T08:00:00Z", last change of this record
-//!     "title": "…", "url": "…"           for the page tables (the item may have left the 7-day window)
+//!     "item": {"source": "CISA KEV", "id": "CVE-2026-1234", "url": "…", "title": "…", …}
+//!                                        the item as last seen (feeds/common.rs Item): the issue
+//!                                        is created from it and the page tables show it, also
+//!                                        after the item has left the 7-day feed window
 //!    },
 //!    "GitHub:GHSA-…": {"decision": {"decision": "not-relevant-by-rule", "triager": "matcher 1/3"}, …}
 //!   }
 //!
 //! The store is what keeps one issue per item: an issue is created only for a
 //! matched record without one, and set_issue() refuses a second. Save it right
-//! after each create, so a crash between create and save cannot cause a duplicate.
+//! after each create, so a crash between create and save cannot cause a duplicate
+//! (sync.rs does).
+//!
+//! FR-A2 "triaged within 1 business day" is counted in Amsterdam local time
+//! (Ediphy), Monday to Friday, no holiday calendar: business_time() / is_overdue().
 //!
 //! Everything here is pure except load()/save(); the clock is a parameter.
 //! Records are kept 30 days (like seen.json) unless their ticket is still open.
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Datelike, Duration, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -46,10 +53,9 @@ pub struct Record {
     pub issue_status: Option<IssueStatus>,
     pub item_fingerprint: String,
     pub updated: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub url: String,
+    /// The item as last seen: at first sight, refreshed while no issue exists
+    /// (refresh_pending) and after each update comment (mark_commented).
+    pub item: Item,
 }
 
 impl Record {
@@ -62,6 +68,14 @@ impl Record {
 
     pub fn state(&self) -> Option<IssueState> {
         self.issue_status.as_ref().map(|s| s.state)
+    }
+
+    pub fn title(&self) -> &str {
+        &self.item.title
+    }
+
+    pub fn url(&self) -> &str {
+        &self.item.url
     }
 }
 
@@ -86,15 +100,45 @@ pub fn fingerprint(item: &Item) -> String {
     hex::encode(&Sha256::digest(v.to_string().as_bytes())[..8])
 }
 
-/// Time between `start` and `end` that falls on Monday to Friday (UTC days, no
-/// holiday calendar). Zero when end <= start.
+// ---------------------------------------------------------------- Amsterdam business time
+
+/// Last Sunday of March or October (both have 31 days).
+fn last_sunday(year: i32, month: u32) -> NaiveDate {
+    let last = NaiveDate::from_ymd_opt(year, month, 31).expect("March or October");
+    last - Duration::days(i64::from(last.weekday().num_days_from_sunday()))
+}
+
+/// Amsterdam's UTC offset at `t`, by the EU rule (no tz database): CEST = UTC+2
+/// from 01:00 UTC on the last Sunday of March to 01:00 UTC on the last Sunday of
+/// October, CET = UTC+1 otherwise.
+pub fn amsterdam_offset(t: DateTime<Utc>) -> Duration {
+    let switch = |month| last_sunday(t.year(), month).and_hms_opt(1, 0, 0).unwrap().and_utc();
+    if switch(3) <= t && t < switch(10) { Duration::hours(2) } else { Duration::hours(1) }
+}
+
+/// Amsterdam wall-clock time at `t`.
+pub fn to_amsterdam(t: DateTime<Utc>) -> NaiveDateTime {
+    t.naive_utc() + amsterdam_offset(t)
+}
+
+/// The instant of an Amsterdam wall-clock time. A time in the autumn hour that
+/// occurs twice is its first (CEST) occurrence; one in the spring hour that does
+/// not exist comes out an hour later. Midnight is never either.
+pub fn from_amsterdam(local: NaiveDateTime) -> DateTime<Utc> {
+    let cest = (local - Duration::hours(2)).and_utc();
+    if amsterdam_offset(cest) == Duration::hours(2) { cest } else { (local - Duration::hours(1)).and_utc() }
+}
+
+/// Time between `start` and `end` that falls on Monday to Friday in Amsterdam
+/// local time (no holiday calendar). Zero when end <= start.
 pub fn business_time(start: DateTime<Utc>, end: DateTime<Utc>) -> Duration {
     let mut total = Duration::zero();
     let mut t = start;
     while t < end {
-        let midnight = (t.date_naive() + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let local = to_amsterdam(t);
+        let midnight = from_amsterdam((local.date() + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap());
         let seg_end = midnight.min(end);
-        if !matches!(t.weekday(), Weekday::Sat | Weekday::Sun) {
+        if !matches!(local.weekday(), Weekday::Sat | Weekday::Sun) {
             total += seg_end - t;
         }
         t = seg_end;
@@ -106,6 +150,8 @@ pub fn business_time(start: DateTime<Utc>, end: DateTime<Utc>) -> Duration {
 pub fn is_overdue(first_seen: &str, now: DateTime<Utc>) -> bool {
     parse_iso(first_seen).is_none_or(|t| business_time(t, now) > Duration::days(1))
 }
+
+// ---------------------------------------------------------------- store
 
 impl Store {
     /// The store, or an empty one when the file does not exist. Err when it does
@@ -132,23 +178,41 @@ impl Store {
         let stamp = iso_utc(now);
         self.records.insert(key, Record {
             first_seen: stamp.clone(), decision, issue: None, issue_status: None,
-            item_fingerprint: fingerprint(item), updated: stamp, title: item.title.clone(), url: item.url.clone(),
+            item_fingerprint: fingerprint(item), updated: stamp, item: item.clone(),
         });
         true
     }
 
-    /// Matched records that still need an issue: (key, match), oldest first. The
-    /// caller finds the Item by key among this run's items (a create that failed
-    /// last run is retried while the item is still in the feed window).
-    pub fn pending_issues(&self) -> Vec<(&str, &Match)> {
-        let mut v: Vec<(&str, &Match, &str)> = self
+    /// Records without an issue take the current version of their item from this
+    /// run, so the issue is created from the latest fields (nothing to comment on
+    /// yet). Items that left the window keep their snapshot. Returns how many changed.
+    pub fn refresh_pending(&mut self, items: &[Item], now: DateTime<Utc>) -> usize {
+        let mut n = 0;
+        for it in items {
+            let Some(r) = self.records.get_mut(&it.key()) else { continue };
+            if r.issue.is_some() || r.item == *it {
+                continue;
+            }
+            r.item_fingerprint = fingerprint(it);
+            r.item = it.clone();
+            r.updated = iso_utc(now);
+            n += 1;
+        }
+        n
+    }
+
+    /// Matched records that still need an issue: (key, item snapshot, match),
+    /// oldest first. The snapshot is enough to create the issue, so a create that
+    /// failed earlier is retried even after the item has left the feed window.
+    pub fn pending_issues(&self) -> Vec<(&str, &Item, &Match)> {
+        let mut v: Vec<(&str, &Record, &Match)> = self
             .records
             .iter()
             .filter(|(_, r)| r.issue.is_none())
-            .filter_map(|(k, r)| r.matched().map(|m| (k.as_str(), m, r.first_seen.as_str())))
+            .filter_map(|(k, r)| r.matched().map(|m| (k.as_str(), r, m)))
             .collect();
-        v.sort_by(|a, b| a.2.cmp(b.2).then(a.0.cmp(b.0)));
-        v.into_iter().map(|(k, m, _)| (k, m)).collect()
+        v.sort_by(|a, b| a.1.first_seen.cmp(&b.1.first_seen).then(a.0.cmp(b.0)));
+        v.into_iter().map(|(k, r, m)| (k, &r.item, m)).collect()
     }
 
     /// Attach the created issue. False when the key is unknown or already has an issue.
@@ -180,8 +244,7 @@ impl Store {
     pub fn mark_commented(&mut self, item: &Item, now: DateTime<Utc>) {
         if let Some(r) = self.records.get_mut(&item.key()) {
             r.item_fingerprint = fingerprint(item);
-            r.title = item.title.clone();
-            r.url = item.url.clone();
+            r.item = item.clone();
             r.updated = iso_utc(now);
         }
     }
@@ -257,10 +320,20 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::triage::tracker::{FakeTracker, Tracker, update_comment};
+    use crate::triage::sync::sync;
+    use crate::triage::tracker::FakeTracker;
 
     fn at(d: u32, h: u32, m: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap() // 2026-11-02 is a Monday
+    }
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        parse_iso(s).unwrap()
+    }
+
+    /// Amsterdam wall-clock time -> instant.
+    fn ams(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
+        from_amsterdam(NaiveDate::from_ymd_opt(y, mo, d).unwrap().and_hms_opt(h, mi, 0).unwrap())
     }
 
     fn item(id: &str) -> Item {
@@ -287,22 +360,91 @@ mod tests {
     }
 
     #[test]
+    fn amsterdam_offset_follows_eu_rule() {
+        let h = Duration::hours;
+        assert_eq!(last_sunday(2026, 3), NaiveDate::from_ymd_opt(2026, 3, 29).unwrap());
+        assert_eq!(last_sunday(2026, 10), NaiveDate::from_ymd_opt(2026, 10, 25).unwrap());
+        assert_eq!(last_sunday(2027, 3), NaiveDate::from_ymd_opt(2027, 3, 28).unwrap());
+        assert_eq!(last_sunday(2027, 10), NaiveDate::from_ymd_opt(2027, 10, 31).unwrap(), "the 31st itself is a Sunday");
+
+        assert_eq!(amsterdam_offset(utc("2026-01-15T12:00:00Z")), h(1));
+        assert_eq!(amsterdam_offset(utc("2026-03-29T00:59:59Z")), h(1));
+        assert_eq!(amsterdam_offset(utc("2026-03-29T01:00:00Z")), h(2));
+        assert_eq!(amsterdam_offset(utc("2026-07-01T12:00:00Z")), h(2));
+        assert_eq!(amsterdam_offset(utc("2026-10-25T00:59:59Z")), h(2));
+        assert_eq!(amsterdam_offset(utc("2026-10-25T01:00:00Z")), h(1));
+        assert_eq!(amsterdam_offset(utc("2026-12-31T23:30:00Z")), h(1));
+
+        let local = |s: &str| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        assert_eq!(to_amsterdam(utc("2026-07-01T10:00:00Z")), local("2026-07-01 12:00"));
+        assert_eq!(to_amsterdam(utc("2026-12-31T23:30:00Z")), local("2027-01-01 00:30"));
+        assert_eq!(from_amsterdam(local("2026-11-09 00:00")), utc("2026-11-08T23:00:00Z"));
+        assert_eq!(from_amsterdam(local("2026-07-01 00:00")), utc("2026-06-30T22:00:00Z"));
+        assert_eq!(from_amsterdam(local("2026-10-25 02:30")), utc("2026-10-25T00:30:00Z"), "repeated hour: first one");
+        assert_eq!(from_amsterdam(local("2026-10-25 03:00")), utc("2026-10-25T02:00:00Z"));
+        assert_eq!(from_amsterdam(local("2026-03-29 02:30")), utc("2026-03-29T01:30:00Z"), "missing hour: one later");
+        assert_eq!(from_amsterdam(local("2026-03-29 03:00")), utc("2026-03-29T01:00:00Z"));
+    }
+
+    #[test]
     fn business_time_weekends_and_edges() {
         let h = Duration::hours;
-        assert_eq!(business_time(at(3, 10, 0), at(4, 10, 0)), h(24)); // Tue -> Wed
-        assert_eq!(business_time(at(6, 10, 0), at(9, 10, 0)), h(24)); // Fri -> Mon: weekend skipped
-        assert_eq!(business_time(at(7, 9, 0), at(8, 23, 0)), h(0)); // Sat -> Sun
-        assert_eq!(business_time(at(7, 9, 0), at(9, 6, 0)), h(6)); // Sat -> Mon morning
-        assert_eq!(business_time(at(2, 0, 0), at(16, 0, 0)), h(240)); // two full weeks
+        assert_eq!(business_time(ams(2026, 11, 3, 10, 0), ams(2026, 11, 4, 10, 0)), h(24)); // Tue -> Wed
+        assert_eq!(business_time(ams(2026, 11, 6, 10, 0), ams(2026, 11, 9, 10, 0)), h(24)); // Fri -> Mon
+        assert_eq!(business_time(ams(2026, 11, 7, 9, 0), ams(2026, 11, 8, 23, 0)), h(0)); // Sat -> Sun
+        assert_eq!(business_time(ams(2026, 11, 7, 9, 0), ams(2026, 11, 9, 6, 0)), h(6)); // Sat -> Mon morning
+        assert_eq!(business_time(ams(2026, 11, 2, 0, 0), ams(2026, 11, 16, 0, 0)), h(240)); // two full weeks
         assert_eq!(business_time(at(4, 0, 0), at(3, 0, 0)), h(0));
+        // Days are Amsterdam days, not UTC days: Fri 23:30 UTC is already Saturday there,
+        // Sun 23:30 UTC is already Monday.
+        assert_eq!(business_time(utc("2026-11-06T23:30:00Z"), utc("2026-11-09T00:00:00Z")), h(1));
+        assert_eq!(business_time(utc("2026-11-06T22:30:00Z"), utc("2026-11-06T23:30:00Z")), Duration::minutes(30));
+        assert_eq!(business_time(utc("2026-11-08T22:00:00Z"), utc("2026-11-08T23:30:00Z")), Duration::minutes(30));
+    }
 
-        // Fri 10:00 -> overdue only after Mon 10:00.
-        assert!(!is_overdue("2026-11-06T10:00:00Z", at(9, 9, 59)));
-        assert!(!is_overdue("2026-11-06T10:00:00Z", at(9, 10, 0)), "exactly one business day is not more than one");
-        assert!(is_overdue("2026-11-06T10:00:00Z", at(9, 10, 1)));
-        // Seen on Saturday: the clock starts Monday 00:00.
-        assert!(!is_overdue("2026-11-07T12:00:00Z", at(9, 23, 59)));
-        assert!(is_overdue("2026-11-07T12:00:00Z", at(10, 0, 1)));
+    #[test]
+    fn business_time_over_dst_weekends() {
+        let h = Duration::hours;
+        // Weekends only, including the switch nights: nothing counts.
+        assert_eq!(business_time(ams(2026, 10, 24, 0, 0), ams(2026, 10, 26, 0, 0)), h(0));
+        assert_eq!(business_time(ams(2026, 3, 28, 0, 0), ams(2026, 3, 30, 0, 0)), h(0));
+        // Friday counts 24 h although 73 h (autumn) or 71 h (spring) pass on the wall clock.
+        assert_eq!(ams(2026, 10, 26, 0, 0) - ams(2026, 10, 23, 0, 0), h(73));
+        assert_eq!(business_time(ams(2026, 10, 23, 0, 0), ams(2026, 10, 26, 0, 0)), h(24));
+        assert_eq!(ams(2026, 3, 30, 0, 0) - ams(2026, 3, 27, 0, 0), h(71));
+        assert_eq!(business_time(ams(2026, 3, 27, 0, 0), ams(2026, 3, 30, 0, 0)), h(24));
+
+        // Autumn: Fri 2026-10-23 17:00 CEST (15:00Z) -> due Mon 2026-10-26 17:00 CET (16:00Z).
+        let fri = "2026-10-23T15:00:00Z";
+        assert_eq!(business_time(utc(fri), utc("2026-10-26T16:00:00Z")), h(24));
+        assert!(!is_overdue(fri, utc("2026-10-26T16:00:00Z")));
+        assert!(is_overdue(fri, utc("2026-10-26T16:00:01Z")));
+        // Spring: Fri 2026-03-27 17:00 CET (16:00Z) -> due Mon 2026-03-30 17:00 CEST (15:00Z).
+        let fri = "2026-03-27T16:00:00Z";
+        assert!(!is_overdue(fri, utc("2026-03-30T15:00:00Z")));
+        assert!(is_overdue(fri, utc("2026-03-30T15:00:01Z")));
+    }
+
+    #[test]
+    fn overdue_after_one_amsterdam_business_day() {
+        // Fri 2026-11-06 18:00 CET: 6 h on Friday, the other 18 h on Monday -> Mon 18:00 CET (17:00Z).
+        let fri = "2026-11-06T17:00:00Z";
+        assert!(!is_overdue(fri, utc("2026-11-09T16:59:59Z")));
+        assert!(!is_overdue(fri, utc("2026-11-09T17:00:00Z")), "exactly one business day is not more than one");
+        assert!(is_overdue(fri, utc("2026-11-09T17:00:01Z")));
+        // Fri 23:30 UTC = Sat 00:30 in Amsterdam: the clock starts Mon 00:00, due Tue 00:00 (Mon 23:00Z).
+        let late = "2026-11-06T23:30:00Z";
+        assert!(!is_overdue(late, utc("2026-11-09T23:00:00Z")));
+        assert!(is_overdue(late, utc("2026-11-09T23:00:01Z")));
+        // Sunday noon: same, the clock starts Monday 00:00 Amsterdam.
+        let sun = "2026-11-08T12:00:00Z";
+        assert!(!is_overdue(sun, utc("2026-11-09T23:00:00Z")));
+        assert!(is_overdue(sun, utc("2026-11-09T23:00:01Z")));
+        // Sun 23:30 UTC = Mon 00:30 in Amsterdam: due Tue 00:30 (Mon 23:30Z).
+        let sun_late = "2026-11-08T23:30:00Z";
+        assert!(!is_overdue(sun_late, utc("2026-11-09T23:30:00Z")));
+        assert!(is_overdue(sun_late, utc("2026-11-09T23:30:01Z")));
+        // Weekday morning.
         assert!(!is_overdue("2026-11-03T08:00:00Z", at(4, 7, 0)));
         assert!(is_overdue("2026-11-03T08:00:00Z", at(4, 9, 0)));
         assert!(is_overdue("garbage", at(4, 9, 0)));
@@ -317,8 +459,9 @@ mod tests {
         assert!(!s.record_decision(&item("CVE-1"), not_relevant(), at(3, 10, 0)), "first decision stands");
         assert_eq!(s.records["CISA KEV:CVE-1"].matched().unwrap().component, "tokio");
 
-        let p: Vec<&str> = s.pending_issues().into_iter().map(|(k, _)| k).collect();
-        assert_eq!(p, ["CISA KEV:CVE-1", "CISA KEV:CVE-2"]);
+        let p: Vec<(&str, &str, &str)> =
+            s.pending_issues().into_iter().map(|(k, i, m)| (k, i.id.as_str(), m.component.as_str())).collect();
+        assert_eq!(p, [("CISA KEV:CVE-1", "CVE-1", "tokio"), ("CISA KEV:CVE-2", "CVE-2", "nginx")]);
         assert!(s.set_issue("CISA KEV:CVE-1", iref(1), at(3, 8, 1)));
         assert!(!s.set_issue("CISA KEV:CVE-1", iref(9), at(3, 8, 2)), "never a second issue");
         assert!(!s.set_issue("CISA KEV:nope", iref(9), at(3, 8, 2)));
@@ -326,6 +469,40 @@ mod tests {
         assert_eq!(s.records["CISA KEV:CVE-1"].updated, "2026-11-03T08:01:00Z");
         assert_eq!(s.pending_issues().len(), 1);
         assert_eq!(s.issues(), vec![iref(1)]);
+    }
+
+    #[test]
+    fn snapshot_refresh_and_comment() {
+        let mut s = Store::default();
+        s.record_decision(&item("CVE-1"), matched("c"), at(3, 8, 0));
+        s.record_decision(&item("CVE-2"), matched("c"), at(3, 8, 0));
+        s.set_issue("CISA KEV:CVE-2", iref(2), at(3, 8, 0));
+        let r = &s.records["CISA KEV:CVE-1"];
+        assert_eq!((r.title(), r.url()), ("CVE-1: flaw", "https://www.cve.org/CVERecord?id=CVE-1"));
+
+        // Both items change. Without an issue the snapshot just follows; with one, it waits for the comment.
+        let mut now = vec![item("CVE-1"), item("CVE-2"), item("CVE-9")];
+        for it in &mut now {
+            it.title = format!("{} (updated)", it.title);
+        }
+        assert_eq!(s.refresh_pending(&now, at(3, 9, 0)), 1);
+        assert_eq!(s.refresh_pending(&now, at(3, 9, 30)), 0, "no change, no touch");
+        let r = &s.records["CISA KEV:CVE-1"];
+        assert_eq!((r.title(), r.updated.as_str()), ("CVE-1: flaw (updated)", "2026-11-03T09:00:00Z"));
+        assert_eq!(r.item_fingerprint, fingerprint(&now[0]));
+        assert_eq!(s.pending_issues()[0].1, &now[0], "the issue is created from the latest version");
+        assert!(!s.records.contains_key("CISA KEV:CVE-9"), "refresh never adds records");
+
+        let changed = s.changed_items(&now);
+        assert_eq!(changed, vec![(&now[1], iref(2))]);
+        assert_eq!(s.records["CISA KEV:CVE-2"].title(), "CVE-2: flaw");
+        s.mark_commented(&now[1], at(3, 10, 0));
+        assert_eq!(s.records["CISA KEV:CVE-2"].title(), "CVE-2: flaw (updated)");
+        assert!(s.changed_items(&now).is_empty());
+
+        // The item leaves the window: the snapshot stays and is still what pending_issues() yields.
+        assert_eq!(s.refresh_pending(&[], at(4, 9, 0)), 0);
+        assert_eq!(s.pending_issues()[0].1.title, "CVE-1: flaw (updated)");
     }
 
     #[test]
@@ -397,6 +574,8 @@ mod tests {
         assert_eq!(j["CISA KEV:CVE-1"]["decision"]["component"], "tokio");
         assert_eq!(j["CISA KEV:CVE-1"]["issue"]["identifier"], "CTP-1");
         assert!(j["CISA KEV:CVE-1"]["issue_status"].is_null());
+        assert_eq!(j["CISA KEV:CVE-1"]["item"]["title"], "CVE-1: flaw");
+        assert_eq!(j["CISA KEV:CVE-1"]["item"]["cves"], json!(["CVE-1"]));
         assert_eq!(j["CISA KEV:CVE-2"]["decision"], json!({"decision": "not-relevant-by-rule", "triager": "matcher 1/3"}));
         assert_eq!(Store::load().unwrap(), s);
 
@@ -415,23 +594,13 @@ mod tests {
         for it in &items {
             s.record_decision(it, matched("tokio"), at(3, 8, 0));
         }
-        let run = |s: &mut Store, tr: &mut FakeTracker, items: &[Item], now| {
-            let pending: Vec<(String, Match)> = s.pending_issues().into_iter().map(|(k, m)| (k.to_string(), m.clone())).collect();
-            for (k, m) in pending {
-                let Some(it) = items.iter().find(|i| i.key() == k) else { continue };
-                let r = tr.create_issue(it, &m).unwrap();
-                assert!(s.set_issue(&k, r, now));
-            }
-            for (it, r) in s.changed_items(items) {
-                tr.comment(&r, &update_comment(it)).unwrap();
-                s.mark_commented(it, now);
-            }
-            let st = tr.fetch_states(&s.issues()).unwrap();
-            s.apply_statuses(&st, now);
+        let mut run = |s: &mut Store, items: &[Item], now| {
+            let r = sync(s, &mut tr, items, now);
+            assert!(r.errors.is_empty(), "{:?}", r.errors);
         };
 
-        run(&mut s, &mut tr, &items, at(3, 8, 0));
-        run(&mut s, &mut tr, &items, at(3, 9, 0)); // same items again: nothing new
+        run(&mut s, &items, at(3, 8, 0));
+        run(&mut s, &items, at(3, 9, 0)); // same items again: nothing new
         let f = FakeTracker::load().unwrap();
         assert_eq!(f.issues.len(), 2);
         assert!(f.issues.iter().all(|i| i.comments.is_empty()));
@@ -440,8 +609,8 @@ mod tests {
         let mut changed = items.clone();
         changed[0].updated = "2026-11-03T10:00:00Z".into();
         changed[0].score = 9.8;
-        run(&mut s, &mut tr, &changed, at(3, 10, 0));
-        run(&mut s, &mut tr, &changed, at(3, 11, 0));
+        run(&mut s, &changed, at(3, 10, 0));
+        run(&mut s, &changed, at(3, 11, 0));
         let f = FakeTracker::load().unwrap();
         assert_eq!(f.issues.len(), 2, "a change is a comment, not a new issue");
         assert_eq!(f.issues[0].comments.len(), 1);
@@ -455,11 +624,12 @@ mod tests {
         j["issues"][1]["state"] = json!("declined");
         j["issues"][1]["reason"] = json!("not shipped");
         std::fs::write(&p, j.to_string()).unwrap();
-        run(&mut s, &mut tr, &changed, at(4, 9, 0));
+        run(&mut s, &changed, at(4, 9, 0));
         assert!(s.untriaged(at(4, 9, 0)).is_empty());
         let open = s.open_tickets();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].1.issue.as_ref().unwrap().identifier, "FAKE-1");
         assert_eq!(s.records["CISA KEV:CVE-2"].issue_status.as_ref().unwrap().reason, "not shipped");
+        assert_eq!(Store::load().unwrap(), s, "sync saved the store");
     }
 }

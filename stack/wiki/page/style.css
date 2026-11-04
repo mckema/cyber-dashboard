@@ -3,7 +3,7 @@
 /* Cyber Threat Exploit Watch: page styles (the page's scriptCss; Wiki.js strips <style> from content).
    Base: the scriptCss of the original page (exported 2026-11-03): its design tokens, fonts,
    #ew wrapper and Wiki.js overrides. Rules marked "added" style the components the original
-   did not have (feed health, source pills, advisory rating, five tiles).
+   did not have (feed health, source pills, advisory rating, five tiles, triage tables).
    Every selector is scoped under #ew, which also outranks Wiki.js's ".v-application .contents ..." rules.
    Theme: the tokens follow the Wiki.js theme (.theme--dark on .v-application), not the OS setting. */
 
@@ -65,7 +65,7 @@
 #ew .shead h2{font-size:23px;font-weight:600;letter-spacing:-.01em}
 #ew .count{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 #ew .snote{color:var(--ink-2);font-size:14.5px;max-width:72ch;margin:0 0 20px}
-#ew .snote.cap{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);margin:0 0 14px;padding:0}
+#ew .snote.cap{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);margin:0 0 14px;padding:0;max-width:none}
 #ew .callout{border-left:3px solid var(--exploited);background:var(--surface);padding:16px 20px;border-radius:0 8px 8px 0;margin:0 0 22px;font-size:14.5px;color:var(--ink-2);box-shadow:var(--shadow)}
 #ew .callout b{color:var(--ink)}
 #ew .callout.note{border-left-color:var(--accent)} /* added */
@@ -85,8 +85,8 @@
 #ew th.num{text-align:right} /* added */
 #ew td.num{text-align:right;font-family:"IBM Plex Mono",monospace;font-size:12px;font-variant-numeric:tabular-nums}
 #ew td.id{white-space:nowrap}
-#ew td.id a,#ew td.cves a{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink);text-decoration:none;border-bottom:1px solid var(--rule);font-weight:500}
-#ew td.id a:hover,#ew td.cves a:hover{color:var(--accent);border-color:var(--accent)}
+#ew td.id a,#ew td.cves a,#ew td.item a{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink);text-decoration:none;border-bottom:1px solid var(--rule);font-weight:500}
+#ew td.id a:hover,#ew td.cves a:hover,#ew td.item a:hover{color:var(--accent);border-color:var(--accent)}
 #ew td.id .sv,#ew td .score+.sv{margin-top:6px}
 #ew .sub{display:block;font-size:11px;color:var(--muted);margin-top:4px;font-family:"IBM Plex Mono",monospace}
 #ew td.vend .sub{margin-top:0}
@@ -111,6 +111,15 @@
 #ew .vecbits{font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--muted);display:block;margin-top:4px}
 #ew .vecbits.hot{color:var(--exploited);font-weight:600} /* added: AV:N with PR:N */
 #ew .empty{padding:26px 16px;color:var(--muted);font-size:14px;text-align:center}
+
+/* added: triage tables (FR-A2/A3): item id with its title underneath, issue not created yet,
+   overdue rows (a red bar on the first cell; the first-seen cell uses .due.past) */
+#ew td.item{min-width:30ch;max-width:52ch}
+#ew td.item .sub{font-family:inherit;font-size:12.5px;color:var(--ink-2);line-height:1.45;margin-top:5px}
+#ew td.id .mono,#ew td.item .mono{font-size:12.5px;font-weight:500}
+#ew .pend{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:10.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;padding:2px 7px;border:1px solid var(--rule);border-radius:4px;color:var(--muted)}
+#ew tbody tr.overdue td:first-child{box-shadow:inset 3px 0 0 var(--exploited)}
+#ew .snote.cap b{color:var(--ink-2);font-weight:600}
 
 /* added: feed label, health status, CVE score source and SSVC, NCSC-NL rating */
 #ew .feeds{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}

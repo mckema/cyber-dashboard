@@ -1,9 +1,9 @@
 //! One rebuild of the Cyber Threat Exploit Watch page.
 //!
-//! Pulls seven public feeds (see feeds/mod.rs), rebuilds the five table bodies
-//! and the counters on the page, and writes the result back through the
-//! Wiki.js GraphQL API. Only the anchored regions are replaced; prose, callouts
-//! and source cards stay hand-editable.
+//! Pulls seven public feeds (see feeds/mod.rs), runs the triage step (see
+//! triage/step.rs), rebuilds the table bodies and the counters on the page, and
+//! writes the result back through the Wiki.js GraphQL API. Only the anchored
+//! regions are replaced; prose, callouts and source cards stay hand-editable.
 //!
 //! Environment:
 //!   WIKI_BASE         https://wiki2.internal.ediphy.io   (compose: http://wiki:3000)
@@ -15,6 +15,9 @@
 //!   HEARTBEAT_HOURS   24                       rewrite even without data changes after this long
 //!   GITHUB_TOKEN      optional, raises the GitHub rate limit
 //!   NVD_API_KEY       optional, raises the NVD rate limit
+//!   COMPONENTS_FILE   stack/job/components.sample.toml   component list for the matcher
+//!   LINEAR_MODE       off                      off | fake (state/fake-linear.json) | live
+//!   LINEAR_API_KEY, LINEAR_TEAM_ID             live mode only
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -30,7 +33,7 @@ use sha2::{Digest, Sha256};
 use crate::feeds::common::{Fatal, Item, iso_utc, parse_iso};
 use crate::feeds::{self, Feed, state};
 use crate::render::{self, HealthRow, Regions, thousands};
-use crate::wiki;
+use crate::{triage, wiki};
 
 const WINDOW_DAYS: i64 = 7;
 
@@ -357,8 +360,14 @@ fn run(args: &Args) -> Result<(), Fatal> {
     let adv: Vec<Item> = g("certeu").into_iter().chain(g("ncscnl")).collect();
     let catalog = g("kev").first().map(|i| i.x("catalog_version").to_string()).unwrap_or_default();
 
+    // FR-A2/A3: every item the page lists goes through the matcher. NVD only adds
+    // scores, so it is left out; KEV and EUVD are triaged as published, unmerged.
+    let to_triage: Vec<Item> = [g("kev"), g("euvd"), cves.clone(), g("github"), adv.clone()].concat();
+    let writing = !args.dry_run && args.out.is_none();
+    let triage = triage::step::step(&to_triage, &cves, now, writing);
+
     let regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health,
-                                        start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
+                                        &triage.view, start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
     let fp = fingerprint(&regions, &health);
 
     let mode = if args.dry_run { "dry-run" } else if args.out.is_some() { "out" } else { "write" };
@@ -430,6 +439,7 @@ fn run(args: &Args) -> Result<(), Fatal> {
         health.iter().map(|h| (h.source.clone(), json!({"status": h.status, "items": h.items}))).collect()
     };
     record.insert("feeds".into(), Value::Object(feeds_rec));
+    record.insert("triage".into(), triage.record);
     record.insert("seconds".into(), json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0));
     state::append_run(&Value::Object(record));
     Ok(())

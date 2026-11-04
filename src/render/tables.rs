@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::HealthRow;
+use super::{HealthRow, TicketRow, TriageRow};
 use super::fmt::{
     cve_link, empty, esc, f1, fdate, feed_pill, ftime, fwhen, href, link, more, or_mdash, plural, sev_pill, thousands,
     when_key,
@@ -18,6 +18,16 @@ const DESC_MAX: usize = 300;
 pub(super) fn sev(it: &Item) -> String {
     let s = it.severity.to_uppercase();
     if s.is_empty() { severity_for(it.score).to_string() } else { s }
+}
+
+/// Text cut to DESC_MAX characters, with an ellipsis when cut (not escaped).
+fn clip(s: &str) -> String {
+    if s.chars().count() > DESC_MAX {
+        let head: String = s.chars().take(DESC_MAX).collect();
+        format!("{}…", head.trim_end())
+    } else {
+        s.to_string()
+    }
 }
 
 /// Descending order of two scores.
@@ -369,12 +379,7 @@ pub fn build_cve_rows(items: &[Item], cap: usize) -> (String, usize, usize) {
         if vend.is_empty() {
             vend = r#"<span class="sub">vendor not stated</span>"#.into();
         }
-        let desc = if it.title.chars().count() > DESC_MAX {
-            let head: String = it.title.chars().take(DESC_MAX).collect();
-            format!("{}…", head.trim_end())
-        } else {
-            it.title.clone()
-        };
+        let desc = clip(&it.title);
         let ssvc_html = match it.x("ssvc_exploitation").to_lowercase().as_str() {
             "active" => r#"<span class="ssvc ssvc-active">SSVC: exploited</span>"#,
             "poc" => r#"<span class="ssvc ssvc-poc">SSVC: PoC public</span>"#,
@@ -417,6 +422,110 @@ pub fn build_cve_rows(items: &[Item], cap: usize) -> (String, usize, usize) {
         out.push_str("</td></tr>");
     }
     (out, rows.len(), total)
+}
+
+// ---------------------------------------------------------------- triage (FR-A2/A3)
+
+/// Item cell of the triage tables: the id linked to the publisher (a CVE id falls back
+/// to cve.org; any other id without an http(s) URL is plain text), the title underneath.
+fn item_cell(id: &str, url: &str, title: &str) -> String {
+    let fallback = if id.starts_with("CVE-") { cve_link(id) } else { String::new() };
+    let to = href(url, &fallback);
+    let mut s = if to == "#" {
+        format!(r#"<td class="item"><span class="mono">{}</span>"#, esc(id))
+    } else {
+        format!(r#"<td class="item"><a href="{to}" target="_blank" rel="noopener">{}</a>"#, esc(id))
+    };
+    if !title.is_empty() {
+        s.push_str(&format!(r#"<span class="sub">{}</span>"#, esc(&clip(title))));
+    }
+    s.push_str("</td>");
+    s
+}
+
+/// Issue cell: the identifier linked to the issue (plain text without an http(s) URL),
+/// or "pending" before the issue exists.
+fn issue_cell(identifier: &str, url: &str) -> String {
+    if identifier.is_empty() {
+        r#"<td class="id"><span class="pend">pending</span></td>"#.into()
+    } else if href(url, "") == "#" {
+        format!(r#"<td class="id"><span class="mono">{}</span></td>"#, esc(identifier))
+    } else {
+        format!(r#"<td class="id">{}</td>"#, link(url, identifier, ""))
+    }
+}
+
+/// Matched items not yet accepted or declined, oldest first. 4 columns.
+/// Overdue rows (waited more than one business day) carry tr.overdue and a red first-seen cell.
+pub fn build_untriaged_rows(rows: &[TriageRow], mode_note: Option<&str>) -> String {
+    if rows.is_empty() {
+        return empty(4, mode_note.unwrap_or("No matched item is waiting for triage."));
+    }
+    let mut v: Vec<&TriageRow> = rows.iter().collect();
+    v.sort_by_cached_key(|r| (when_key(&r.first_seen), r.item_id.clone()));
+    let mut out = String::new();
+    for r in v {
+        let comp = if r.component.is_empty() { "&mdash;".into() } else { format!(r#"<span class="tgt">{}</span>"#, esc(&r.component)) };
+        let rule = if r.rule.is_empty() { String::new() } else { format!(r#"<span class="sub">rule: {}</span>"#, esc(&r.rule)) };
+        out.push_str(&format!(
+            concat!(
+                r#"<tr{}>{}"#,
+                r#"<td>{}{}</td>"#,
+                r#"<td class="due{}">{}{}</td>"#,
+                r#"{}</tr>"#,
+            ),
+            if r.overdue { r#" class="overdue""# } else { "" },
+            item_cell(&r.item_id, &r.item_url, &r.title),
+            comp,
+            rule,
+            if r.overdue { " past" } else { "" },
+            fwhen(&r.first_seen, false),
+            if r.overdue { r#"<span class="sub">overdue</span>"# } else { "" },
+            issue_cell(&r.issue_identifier, &r.issue_url),
+        ));
+    }
+    out
+}
+
+/// Tickets whose due date is before today ("YYYY-MM-DD", UTC).
+pub fn tickets_past_due(rows: &[TicketRow], today: &str) -> usize {
+    rows.iter().filter(|r| !r.due.is_empty() && r.due.as_str() < today).count()
+}
+
+/// Accepted issues that are not closed: earliest due date first, no due date last. 6 columns.
+pub fn build_ticket_rows(rows: &[TicketRow], today: &str, mode_note: Option<&str>) -> String {
+    if rows.is_empty() {
+        return empty(6, mode_note.unwrap_or("No open tickets."));
+    }
+    let mut v: Vec<&TicketRow> = rows.iter().collect();
+    v.sort_by(|a, b| {
+        a.due.is_empty()
+            .cmp(&b.due.is_empty())
+            .then_with(|| a.due.cmp(&b.due))
+            .then_with(|| a.issue_identifier.cmp(&b.issue_identifier))
+    });
+    let mut out = String::new();
+    for r in v {
+        let past = !r.due.is_empty() && r.due.as_str() < today;
+        out.push_str(&format!(
+            concat!(
+                r#"<tr>{}{}"#,
+                r#"<td>{}</td>"#,
+                r#"<td>{}</td>"#,
+                r#"<td class="due{}">{}{}</td>"#,
+                r#"<td>{}</td></tr>"#,
+            ),
+            issue_cell(&r.issue_identifier, &r.issue_url),
+            item_cell(&r.item_id, "", &r.title),
+            or_mdash(if r.component.is_empty() { String::new() } else { format!(r#"<span class="tgt">{}</span>"#, esc(&r.component)) }),
+            or_mdash(esc(&r.assignee)),
+            if past { " past" } else { "" },
+            fdate(&r.due, false),
+            if past { r#"<span class="sub">overdue</span>"# } else { "" },
+            or_mdash(esc(&r.state_name)),
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -547,5 +656,80 @@ mod tests {
         assert!(build_adv_rows(&[]).contains(r#"colspan="5" class="empty""#));
         assert!(build_dep_rows(&[]).contains(r#"colspan="6" class="empty""#));
         assert!(build_cve_rows(&[], 300).0.contains(r#"colspan="4" class="empty""#));
+        assert!(build_untriaged_rows(&[], None).contains(r#"colspan="4" class="empty""#));
+        assert!(build_ticket_rows(&[], "2026-11-03", None).contains(r#"colspan="6" class="empty""#));
+    }
+
+    // ------------------------------------------------ triage
+
+    fn trow(id: &str, first_seen: &str, issue: &str, overdue: bool) -> TriageRow {
+        TriageRow {
+            item_id: id.into(), item_url: String::new(), title: "t".into(), component: "tokio".into(),
+            rule: "package".into(), first_seen: first_seen.into(), issue_identifier: issue.into(),
+            issue_url: if issue.is_empty() { String::new() } else { format!("https://linear.invalid/fake/issue/{issue}") },
+            overdue,
+        }
+    }
+
+    fn ticket(id: &str, due: &str) -> TicketRow {
+        TicketRow {
+            issue_identifier: id.into(), issue_url: format!("https://linear.invalid/fake/issue/{id}"),
+            item_id: "GHSA-xxxx-yyyy-zzzz".into(), title: "t".into(), component: "hyper".into(),
+            assignee: String::new(), due: due.into(), state_name: "Todo".into(),
+        }
+    }
+
+    #[test]
+    fn escape_triage() {
+        let t = super::super::test_support::evil_triage();
+        let out = build_untriaged_rows(&t.untriaged, None);
+        assert_clean(&out);
+        assert!(!out.contains("<a "), "javascript: URLs must not become links: {out}");
+        assert_clean(&build_ticket_rows(&t.tickets, "2026-11-03", None));
+        assert_clean(&build_untriaged_rows(&[], Some(EVIL)));
+        assert_clean(&build_ticket_rows(&[], "2026-11-03", Some(EVIL)));
+    }
+
+    #[test]
+    fn untriaged_overdue_pending_and_order() {
+        let rows = [
+            trow("CVE-2026-3", "2026-11-03T02:31:19Z", "", false),
+            trow("GHSA-1", "2026-10-30T09:12:00Z", "FAKE-3", true),
+        ];
+        let out = build_untriaged_rows(&rows, None);
+        assert_eq!(out.matches("<tr").count(), 2);
+        // Oldest first: the overdue row leads, with tr.overdue and a red first-seen cell.
+        assert!(out.starts_with(r#"<tr class="overdue">"#), "{out}");
+        assert!(out.contains(r#"<td class="due past">30 Oct<span class="sub">09:12 UTC</span><span class="sub">overdue</span></td>"#));
+        assert_eq!(out.matches("overdue").count(), 2);
+        // No issue yet -> pending; a CVE id without a URL links to cve.org; a GHSA id without one is plain text.
+        assert!(out.contains(r#"<span class="pend">pending</span>"#));
+        assert!(out.contains("https://www.cve.org/CVERecord?id=CVE-2026-3"));
+        assert!(out.contains(r#"<span class="mono">GHSA-1</span>"#));
+        assert!(out.contains(r#"<span class="sub">rule: package</span>"#));
+        assert!(out.contains(r#"href="https://linear.invalid/fake/issue/FAKE-3""#));
+        // A note never replaces rows.
+        assert_eq!(build_untriaged_rows(&rows, Some("off")), out);
+    }
+
+    #[test]
+    fn tickets_due_and_order() {
+        let rows = [ticket("FAKE-9", ""), ticket("FAKE-2", "2026-11-14"), ticket("FAKE-1", "2026-10-31"), ticket("FAKE-4", "2026-11-03")];
+        let out = build_ticket_rows(&rows, "2026-11-03", None);
+        let order: Vec<usize> = ["FAKE-1", "FAKE-4", "FAKE-2", "FAKE-9"].iter().map(|i| out.find(i).unwrap()).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "earliest due first, no due date last: {out}");
+        assert_eq!(out.matches(r#"class="due past""#).count(), 1); // due today is not past
+        assert!(out.contains(r#"<td class="due past">31 Oct<span class="sub">overdue</span></td>"#));
+        assert_eq!(tickets_past_due(&rows, "2026-11-03"), 1);
+        assert_eq!(tickets_past_due(&rows, "2026-11-15"), 3);
+        assert!(out.contains("<td>&mdash;</td>")); // no assignee
+    }
+
+    #[test]
+    fn triage_mode_note_replaces_empty_message() {
+        let out = build_untriaged_rows(&[], Some("Linear sync is off."));
+        assert_eq!(out, r#"<tr><td colspan="4" class="empty">Linear sync is off.</td></tr>"#);
+        assert!(build_ticket_rows(&[], "", Some("Linear sync is off.")).contains(">Linear sync is off.<"));
+        assert!(build_ticket_rows(&[], "", None).contains(">No open tickets.<"));
     }
 }

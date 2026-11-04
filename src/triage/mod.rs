@@ -7,11 +7,18 @@
 //!   types       Match / Decision, shared by the matcher and the Linear side
 //!   components  the component list (TOML) and its validation
 //!   matcher     the rules (pure functions)
-//!   store       state/triage.json: one record per new item key, plus the page tables
-//!   tracker     where tickets live: Linear (live), a JSON file (fake), or nothing (off)
+//!   store       state/triage.json: one record (with an item snapshot) per new item key,
+//!               the page tables, and the Amsterdam business-day clock (overdue = red)
+//!   tracker     where tickets live: nothing (off, default), a JSON file (fake), or Linear (live)
+//!   sync        one tracker round per run: create, comment, read states back, save
+//!   step        the triage part of one run, called by run.rs; builds the page tables
+//!   report      `exploit-watch triage --report`: match counts over state/items/, offline
 
 pub mod components;
 pub mod matcher;
+pub mod report;
+pub mod step;
 pub mod store;
+pub mod sync;
 pub mod tracker;
 pub mod types;
