@@ -14,9 +14,14 @@
 //!   4. read every issue's state back and store it
 //!   5. save the store
 //!
-//! Tracker errors are not fatal for the run: the first one stops the tracker
-//! calls for this run, is recorded in the report, and what succeeded before it
-//! is kept (and saved). The next run picks up where this one stopped.
+//! Tracker errors are not fatal for the run. Each one is recorded in the report
+//! and what succeeded before it is kept (and saved). An error of one item or
+//! issue (`INPUT_ERROR`, an unexpected reply, an id still taken after the retry)
+//! skips that item and steps 2-3 go on with the next. An error every further
+//! call would hit as well (no answer, rate limit, HTTP error, authentication or
+//! permission, settings; see `repeats`) ends steps 2-3 for this run. Step 4 is
+//! tried once in every case, so the issue states stay current while a create or
+//! comment keeps failing. The next run picks up the items left over.
 
 use chrono::{DateTime, Utc};
 
@@ -25,7 +30,7 @@ use super::tracker::{Tracker, TrackerError, new_issue_id, update_comment};
 use super::types::Match;
 use crate::feeds::common::Item;
 
-/// What one sync() did, for the health note.
+/// What one sync() did, for stdout, runs.jsonl and the "Linear" row of the health table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
     /// Issues created (including the recovered ones).
@@ -36,22 +41,26 @@ pub struct SyncReport {
     pub commented: usize,
     /// Records whose issue state (or ref) changed.
     pub updated: usize,
-    /// One line per error; the tracker is not called again after the first.
+    /// One line per error, in call order (module doc: which errors end the round).
     pub errors: Vec<String>,
 }
 
 impl SyncReport {
-    /// "tracker: 2 created, 1 commented, 3 updated" plus "; error: …" when one occurred;
-    /// "2 created (1 already existed)" when issues were recovered.
+    /// "tracker: 2 created, 1 commented, 3 updated" plus "; error: …" per error
+    /// (stdout); "2 created (1 already existed)" when issues were recovered.
     pub fn note(&self) -> String {
-        let existed = if self.recovered > 0 { format!(" ({} already existed)", self.recovered) } else { String::new() };
-        let mut s = format!("tracker: {} created{existed}, {} commented, {} updated", self.created, self.commented,
-                            self.updated);
+        let mut s = format!("tracker: {}", self.counts());
         for e in &self.errors {
             s.push_str("; error: ");
             s.push_str(e);
         }
         s
+    }
+
+    /// "2 created (1 already existed), 1 commented, 3 updated"; the note of the Linear health row.
+    pub fn counts(&self) -> String {
+        let existed = if self.recovered > 0 { format!(" ({} already existed)", self.recovered) } else { String::new() };
+        format!("{} created{existed}, {} commented, {} updated", self.created, self.commented, self.updated)
     }
 }
 
@@ -59,17 +68,15 @@ impl SyncReport {
 pub fn sync(store: &mut Store, tracker: &mut dyn Tracker, items: &[Item], now: DateTime<Utc>) -> SyncReport {
     let mut rep = SyncReport::default();
     let recovered_before = tracker.recovered();
-    if let Err(e) = round(store, tracker, items, now, &mut rep) {
-        rep.errors.push(e);
-    }
+    round(store, tracker, items, now, &mut rep);
     rep.recovered = tracker.recovered().saturating_sub(recovered_before);
     store.save();
     rep
 }
 
-/// Steps 1-4. Err (one line) on the first tracker error.
-fn round(store: &mut Store, tracker: &mut dyn Tracker, items: &[Item], now: DateTime<Utc>, rep: &mut SyncReport)
-         -> Result<(), String> {
+/// Steps 1-4. Every tracker error goes to `rep.errors`; one that `repeats` ends
+/// steps 2-3, and step 4 is tried in any case.
+fn round(store: &mut Store, tracker: &mut dyn Tracker, items: &[Item], now: DateTime<Utc>, rep: &mut SyncReport) {
     store.refresh_pending(items, now);
 
     if store.assign_create_ids(new_issue_id) > 0 {
@@ -80,8 +87,9 @@ fn round(store: &mut Store, tracker: &mut dyn Tracker, items: &[Item], now: Date
         .into_iter()
         .map(|(k, it, m)| (k.to_string(), it.clone(), m.clone(), store.create_id(k).unwrap_or_default().to_string()))
         .collect();
+    let mut halted = false;
     for (key, item, m, id) in pending {
-        let issue = match tracker.create_issue(&item, &m, &id) {
+        let created = match tracker.create_issue(&item, &m, &id) {
             Err(TrackerError::IdTaken(_)) => {
                 // The id's issue was deleted and Linear keeps the id: file the item under a new one.
                 let fresh = new_issue_id();
@@ -90,29 +98,77 @@ fn round(store: &mut Store, tracker: &mut dyn Tracker, items: &[Item], now: Date
                 tracker.create_issue(&item, &m, &fresh)
             }
             r => r,
-        }
-        .map_err(|e| format!("create issue for {key}: {e}"))?;
+        };
+        let issue = match created {
+            Ok(issue) => issue,
+            Err(e) => {
+                rep.errors.push(format!("create issue for {key}: {e}"));
+                if repeats(&e) {
+                    halted = true;
+                    break;
+                }
+                continue;
+            }
+        };
         let identifier = issue.identifier.clone();
         if !store.set_issue(&key, issue, now) {
             // Cannot happen (pending records have no issue); never lose the created one silently.
-            return Err(format!("created {identifier} for {key} but the store refused it"));
+            rep.errors.push(format!("created {identifier} for {key} but the store refused it"));
+            continue;
         }
         store.save();
         rep.created += 1;
     }
 
-    for (item, issue) in store.changed_items(items) {
-        tracker.comment(&issue, &update_comment(item)).map_err(|e| format!("comment on {}: {e}", issue.identifier))?;
-        store.mark_commented(item, now);
-        rep.commented += 1;
+    if !halted {
+        for (item, issue) in store.changed_items(items) {
+            match tracker.comment(&issue, &update_comment(item)) {
+                Ok(()) => {
+                    store.mark_commented(item, now);
+                    rep.commented += 1;
+                }
+                Err(e) => {
+                    // The fingerprint stays, so the comment is tried again next run.
+                    rep.errors.push(format!("comment on {}: {e}", issue.identifier));
+                    if repeats(&e) {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     let issues = store.issues();
     if !issues.is_empty() {
-        let states = tracker.fetch_states(&issues).map_err(|e| format!("read issue states: {e}"))?;
-        rep.updated = store.apply_statuses(&states, now);
+        match tracker.fetch_states(&issues) {
+            Ok(states) => rep.updated = store.apply_statuses(&states, now),
+            Err(e) => rep.errors.push(format!("read issue states: {e}")),
+        }
     }
-    Ok(())
+}
+
+/// True for an error every further call of this run would hit as well: no
+/// answer, rate limit, HTTP error, `AUTHENTICATION*` or `FORBIDDEN`, settings.
+/// Steps 2-3 stop there; with an HTTP timeout of 90 s (feeds/common.rs), trying
+/// each remaining item could hold the run for long. False for an error of the
+/// item or issue at hand (`INPUT_ERROR`, an unexpected reply, an id still taken
+/// after the retry): it is recorded and the next item is tried. A GraphQL error
+/// with none of these codes counts as repeating, and so does Linear's
+/// `INPUT_ERROR` "Entity not found: Team".
+fn repeats(e: &TrackerError) -> bool {
+    match e {
+        TrackerError::Network(_) | TrackerError::RateLimited { .. } | TrackerError::Http { .. }
+        | TrackerError::Config(_) => true,
+        TrackerError::GraphQl { message, codes } => {
+            codes.iter().any(|c| c.starts_with("AUTHENTICATION") || c == "FORBIDDEN")
+                || !codes.iter().any(|c| c == "INPUT_ERROR")
+                // A wrong LINEAR_TEAM_ID comes as INPUT_ERROR too (tracker.rs, T13).
+                || message.contains("Entity not found: Team")
+        }
+        TrackerError::Reply(_) | TrackerError::IdTaken(_) => false,
+        #[cfg(test)]
+        TrackerError::Fake(_) => true,
+    }
 }
 
 #[cfg(test)]
@@ -152,20 +208,29 @@ mod tests {
         s
     }
 
-    /// Tracker that fails on its `fail_at`-th call (0-based) and logs every call.
+    /// Tracker that fails on its `fail_at`-th call (0-based) with `err()` and logs every call.
     struct Flaky {
         fail_at: usize,
+        err: fn() -> TrackerError,
         calls: Vec<String>,
     }
 
+    fn network() -> TrackerError {
+        TrackerError::Network("error sending request: connection refused".into())
+    }
+
+    fn input_error() -> TrackerError {
+        TrackerError::GraphQl { message: "Argument Validation Error".into(), codes: vec!["INPUT_ERROR".into()] }
+    }
+
     impl Flaky {
+        fn new(fail_at: usize, err: fn() -> TrackerError) -> Self {
+            Flaky { fail_at, err, calls: vec![] }
+        }
+
         fn call(&mut self, what: String) -> Result<(), TrackerError> {
             self.calls.push(what);
-            if self.calls.len() - 1 == self.fail_at {
-                Err(TrackerError::Network("error sending request: connection refused".into()))
-            } else {
-                Ok(())
-            }
+            if self.calls.len() - 1 == self.fail_at { Err((self.err)()) } else { Ok(()) }
         }
     }
 
@@ -232,21 +297,23 @@ mod tests {
         assert_eq!(f.issues[0].title, "[CVE-2026-0464] NCSC-2026-0464: flaw");
     }
 
+    /// A repeating error ends creates and comments but not the read-back; what
+    /// succeeded is kept and saved, and later runs pick up the rest.
     #[test]
-    fn first_tracker_error_stops_the_round_and_keeps_progress() {
+    fn repeating_error_stops_creates_keeps_progress_and_reads_back() {
         let _t = state::testing::temp_state("triage-sync-fail");
         let ids = ["NCSC-2026-0464", "NCSC-2026-0465", "NCSC-2026-0466"];
         let items: Vec<Item> = ids.iter().map(|i| item(i)).collect();
         let mut s = store_with(&ids);
 
-        // Second create fails: no further calls, the first issue is kept and saved.
-        let mut tr = Flaky { fail_at: 1, calls: vec![] };
+        // Second create fails: no third create, the first issue is kept, saved and read back.
+        let mut tr = Flaky::new(1, network);
         let r = sync(&mut s, &mut tr, &items, at(3, 12));
-        assert_eq!(tr.calls, ["create NCSC-2026-0464", "create NCSC-2026-0465"]);
-        assert_eq!((r.created, r.commented, r.updated), (1, 0, 0));
+        assert_eq!(tr.calls, ["create NCSC-2026-0464", "create NCSC-2026-0465", "fetch 1"]);
+        assert_eq!((r.created, r.commented, r.updated), (1, 0, 1));
         assert_eq!(r.errors, ["create issue for NCSC-NL:NCSC-2026-0465: \
                                Linear: network error: error sending request: connection refused"]);
-        assert_eq!(r.note(), "tracker: 1 created, 0 commented, 0 updated; error: create issue for \
+        assert_eq!(r.note(), "tracker: 1 created, 0 commented, 1 updated; error: create issue for \
                               NCSC-NL:NCSC-2026-0465: Linear: network error: error sending request: connection refused");
         assert_eq!(Store::load().unwrap(), s);
         assert_eq!(s.pending_issues().len(), 2);
@@ -255,22 +322,89 @@ mod tests {
         // comment, then the state read fails.
         let mut changed = items.clone();
         changed[0].score = 7.5;
-        let mut tr = Flaky { fail_at: 3, calls: vec![] };
+        let mut tr = Flaky::new(3, network);
         let r = sync(&mut s, &mut tr, &changed, at(3, 13));
         assert_eq!(tr.calls, ["create NCSC-2026-0465", "create NCSC-2026-0466", "comment CTP-0464", "fetch 3"]);
         assert_eq!((r.created, r.commented, r.updated), (2, 1, 0));
+        assert_eq!(r.errors.len(), 1);
         assert!(r.errors[0].starts_with("read issue states: Linear: network error"), "{:?}", r.errors);
         assert!(s.pending_issues().is_empty());
         assert_eq!(Store::load().unwrap(), s);
 
-        // A comment failure leaves the fingerprint alone, so the comment is retried next run.
+        // A comment failure leaves the fingerprint alone, so the comment is retried next
+        // run; the states are still read (the two issues of the failed read get theirs).
         changed[0].score = 8.0;
-        let mut tr = Flaky { fail_at: 0, calls: vec![] };
+        let mut tr = Flaky::new(0, network);
         let r = sync(&mut s, &mut tr, &changed, at(3, 14));
-        assert_eq!(tr.calls, ["comment CTP-0464"]);
-        assert_eq!(r.commented, 0);
-        let r = sync(&mut s, &mut Flaky { fail_at: 99, calls: vec![] }, &changed, at(3, 15));
-        assert_eq!((r.commented, r.updated, r.errors.len()), (1, 3, 0));
+        assert_eq!(tr.calls, ["comment CTP-0464", "fetch 3"]);
+        assert_eq!((r.commented, r.updated, r.errors.len()), (0, 2, 1));
+        assert!(r.errors[0].starts_with("comment on CTP-0464: Linear: network error"), "{:?}", r.errors);
+        let r = sync(&mut s, &mut Flaky::new(99, network), &changed, at(3, 15));
+        assert_eq!((r.commented, r.updated, r.errors.len()), (1, 0, 0));
+    }
+
+    /// A network error on a create: no further create or comment, one state read.
+    #[test]
+    fn network_error_stops_creating_but_still_reads_back() {
+        let _t = state::testing::temp_state("triage-sync-network");
+        let ids = ["NCSC-2026-0464", "NCSC-2026-0465", "NCSC-2026-0466"];
+        let mut s = store_with(&ids);
+        let filed = IssueRef { id: "id-0464".into(), identifier: "CTP-0464".into(),
+                               url: "https://linear.app/x/issue/CTP-0464".into() };
+        assert!(s.set_issue("NCSC-NL:NCSC-2026-0464", filed, at(3, 9)));
+        let mut changed: Vec<Item> = ids.iter().map(|i| item(i)).collect();
+        changed[0].score = 7.5; // would get a comment
+
+        let mut tr = Flaky::new(0, network);
+        let r = sync(&mut s, &mut tr, &changed, at(3, 12));
+        assert_eq!(tr.calls, ["create NCSC-2026-0465", "fetch 1"]);
+        assert_eq!((r.created, r.commented, r.updated, r.errors.len()), (0, 0, 1, 1));
+        assert_eq!(s.records["NCSC-NL:NCSC-2026-0464"].issue_status.as_ref().unwrap().state_name, "Triage");
+        assert_eq!(s.pending_issues().len(), 2);
+        assert_eq!(Store::load().unwrap(), s);
+    }
+
+    /// An error of one item (INPUT_ERROR, an odd reply) skips that item only.
+    #[test]
+    fn item_error_skips_that_item_and_goes_on() {
+        let _t = state::testing::temp_state("triage-sync-item");
+        let ids = ["NCSC-2026-0464", "NCSC-2026-0465", "NCSC-2026-0466"];
+        let items: Vec<Item> = ids.iter().map(|i| item(i)).collect();
+        let mut s = store_with(&ids);
+
+        let mut tr = Flaky::new(1, input_error);
+        let r = sync(&mut s, &mut tr, &items, at(3, 12));
+        assert_eq!(tr.calls, ["create NCSC-2026-0464", "create NCSC-2026-0465", "create NCSC-2026-0466", "fetch 2"]);
+        assert_eq!((r.created, r.commented, r.updated), (2, 0, 2));
+        assert_eq!(r.errors, ["create issue for NCSC-NL:NCSC-2026-0465: Linear: GraphQL errors: Argument Validation Error"]);
+        assert_eq!(s.pending_issues().len(), 1);
+        assert_eq!(Store::load().unwrap(), s);
+
+        // Comments: the failing one is skipped, the next is sent, the states are read.
+        let mut changed = items.clone();
+        changed[0].score = 7.5;
+        changed[2].score = 7.5;
+        let mut tr = Flaky::new(1, || TrackerError::Reply("commentCreate on CTP-0464: success is not true".into()));
+        let r = sync(&mut s, &mut tr, &changed, at(3, 13));
+        assert_eq!(tr.calls, ["create NCSC-2026-0465", "comment CTP-0464", "comment CTP-0466", "fetch 3"]);
+        assert_eq!((r.created, r.commented, r.updated), (1, 1, 1));
+        assert_eq!(r.errors, ["comment on CTP-0464: Linear: unexpected reply to commentCreate on CTP-0464: success is not true"]);
+        assert_eq!(s.changed_items(&changed).len(), 1, "CTP-0464 is commented on next run");
+    }
+
+    #[test]
+    fn which_errors_repeat() {
+        let gql = |m: &str, c: &[&str]| TrackerError::GraphQl { message: m.into(), codes: c.iter().map(|s| s.to_string()).collect() };
+        for e in [network(), TrackerError::Http { status: 502, body: "".into() },
+                  TrackerError::RateLimited { message: "".into(), limits: "".into() }, TrackerError::Config("".into()),
+                  gql("x", &["AUTHENTICATION_ERROR"]), gql("x", &["FORBIDDEN"]), gql("x", &["INPUT_ERROR", "FORBIDDEN"]),
+                  gql("x", &["INTERNAL_SERVER_ERROR"]), gql("x", &[]),
+                  gql("teams: Entity not found: Team (wrong LINEAR_TEAM_ID…)", &["INPUT_ERROR"])] {
+            assert!(repeats(&e), "{e:?}");
+        }
+        for e in [input_error(), TrackerError::Reply("".into()), TrackerError::IdTaken("".into())] {
+            assert!(!repeats(&e), "{e:?}");
+        }
     }
 
     // ------------------------------------------------ lost answers, over a Linear-like transport
@@ -282,6 +416,8 @@ mod tests {
         issues: Vec<String>,
         deleted: Vec<String>,
         lose_creates: usize,
+        /// Creates whose title contains one of these are refused with INPUT_ERROR.
+        refuse: Vec<String>,
         ops: Vec<String>,
     }
 
@@ -312,6 +448,12 @@ mod tests {
                 "TriageState" => ok(json!({"data": {"workflowStates": {"nodes": [{"id": "st", "name": "Triage", "type": "triage"}]}}})),
                 "IssueCreate" => {
                     let id = body["variables"]["input"]["id"].as_str().unwrap_or("").to_string();
+                    let title = body["variables"]["input"]["title"].as_str().unwrap_or("");
+                    if s.refuse.iter().any(|r| title.contains(r.as_str())) {
+                        return ok(json!({"errors": [{"message": "Argument Validation Error", "path": ["issueCreate"],
+                                                     "extensions": {"code": "INPUT_ERROR", "userError": true}}],
+                                         "data": null}));
+                    }
                     if s.issues.contains(&id) || s.deleted.contains(&id) {
                         return ok(json!({"errors": [{"message": "conflict on insert of Issue", "path": ["issueCreate"],
                                                      "extensions": {"type": "invalid input", "code": "INPUT_ERROR",
@@ -349,7 +491,7 @@ mod tests {
     }
 
     /// The create succeeds on the server but its answer is lost: the run reports the
-    /// error and keeps the id on disk; the next run sends the same id, gets the
+    /// error, stops creating and keeps the id on disk; the next run sends the same id, gets the
     /// conflict, reads the issue back and records it. One issue per item.
     #[test]
     fn lost_create_answer_is_recovered_next_run() {
@@ -363,6 +505,8 @@ mod tests {
         assert_eq!((r.created, r.recovered), (0, 0));
         assert_eq!(r.errors, ["create issue for NCSC-NL:NCSC-2026-0464: \
                                Linear: network error: issueCreate: error sending request: operation timed out"]);
+        // A network error repeats: the second item is not tried; no issue is known yet, so nothing to read back.
+        assert_eq!(server.lock().unwrap().ops, ["TriageState", "IssueCreate"]);
         assert_eq!(server.lock().unwrap().issues.len(), 1, "Linear has the issue, the job does not know it");
         let sent = s.create_id("NCSC-NL:NCSC-2026-0464").unwrap().to_string();
         assert_eq!(server.lock().unwrap().issues[0], sent);
@@ -381,6 +525,24 @@ mod tests {
         assert_eq!((first.id.as_str(), first.identifier.as_str()), (sent.as_str(), "TRI-1"));
         assert_eq!(s.records["NCSC-NL:NCSC-2026-0465"].issue.as_ref().unwrap().identifier, "TRI-2");
         assert_eq!(s.untriaged(at(3, 18)).len(), 2);
+    }
+
+    /// Over the Linear client: a create refused with INPUT_ERROR is recorded, the
+    /// next item is still filed and both issues' states are read back.
+    #[test]
+    fn refused_create_does_not_stop_the_round() {
+        let _t = state::testing::temp_state("triage-sync-refused");
+        let ids = ["NCSC-2026-0464", "NCSC-2026-0465", "NCSC-2026-0466"];
+        let items: Vec<Item> = ids.iter().map(|i| item(i)).collect();
+        let mut s = store_with(&ids);
+        let server = Arc::new(Mutex::new(Server { refuse: vec!["NCSC-2026-0464".into()], ..Default::default() }));
+        let r = sync(&mut s, &mut fake_linear(&server), &items, at(3, 12));
+        assert_eq!((r.created, r.updated), (2, 2));
+        assert_eq!(r.errors, ["create issue for NCSC-NL:NCSC-2026-0464: \
+                               Linear: GraphQL errors: issueCreate: Argument Validation Error"]);
+        assert_eq!(server.lock().unwrap().ops, ["TriageState", "IssueCreate", "IssueCreate", "IssueCreate", "IssueStates"]);
+        assert!(s.records["NCSC-NL:NCSC-2026-0464"].issue.is_none());
+        assert_eq!(s.untriaged(at(3, 12)).len(), 3, "the refused item stays on the page as pending");
     }
 
     /// The id's issue was deleted and Linear keeps the id: the record gets a new

@@ -4,9 +4,12 @@
 //! Nothing here can fail the run. A component list that does not load, or a
 //! tracker that errors, leaves the feed tables as they are and is reported in
 //! the run record and on stdout; the triage tables then say why they are empty.
+//! The tracker's state also goes on the page as the "Linear" row of the health
+//! table (Outcome::tracker): ok, error with the first error, or off.
 //!
 //! Only a writing run (not --dry-run or --out) saves state/triage.json or calls
-//! the tracker, so a preview never files an issue.
+//! the tracker, so a preview never files an issue (and, in live mode, shows no
+//! Linear row).
 //!
 //! Triage that Linear lets through incomplete is a warning, never enforced: an
 //! issue declined without a reason stays in the untriaged table with a note, and
@@ -19,16 +22,42 @@ use serde_json::{Value, json};
 use super::components;
 use super::matcher;
 use super::store::{Gaps, Store};
-use super::sync::sync;
+use super::sync::{SyncReport, sync};
 use super::tracker;
 use super::types::Decision;
-use crate::feeds::common::Item;
-use crate::render::{TicketRow, TriageRow, TriageView};
+use crate::feeds::common::{Item, iso_utc};
+use crate::render::{HealthRow, TicketRow, TriageRow, TriageView};
 
-/// What the step hands back to run.rs: the page view and a runs.jsonl entry.
+/// What the step hands back to run.rs: the page view, the "Linear" row of the
+/// health table (None when the tracker was not called or triage did not run)
+/// and a runs.jsonl entry.
 pub struct Outcome {
     pub view: TriageView,
+    pub tracker: Option<HealthRow>,
     pub record: Value,
+}
+
+/// Name of the tracker row in the health table.
+const TRACKER_SOURCE: &str = "Linear";
+
+fn tracker_row(status: &str, items: usize, last_success: String, note: String) -> HealthRow {
+    HealthRow { source: TRACKER_SOURCE.into(), status: status.into(), items, last_success, note, ..Default::default() }
+}
+
+/// The Linear row after a sync: "ok" with the counts, or "error" with the first
+/// error (render clips it) and how many more there were. items: issues the store
+/// holds; last success: now, when the sync had no error.
+fn synced_row(rep: &SyncReport, issues: usize, now: DateTime<Utc>) -> HealthRow {
+    match rep.errors.split_first() {
+        None => tracker_row("ok", issues, iso_utc(now), rep.counts()),
+        Some((first, rest)) => {
+            let more = match rest.len() {
+                0 => String::new(),
+                n => format!(" (+{n} more)"),
+            };
+            tracker_row("error", issues, String::new(), format!("{first}{more}"))
+        }
+    }
 }
 
 /// `items` are this run's items from every feed that can be triaged (NVD, which
@@ -42,6 +71,7 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
             println!("  triage: {msg}");
             return Outcome {
                 view: TriageView { mode_note: Some(format!("Triage did not run: {msg}.")), ..Default::default() },
+                tracker: None,
                 record: json!({"error": msg}),
             };
         }
@@ -52,6 +82,7 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
             println!("  triage: {}", e.0);
             return Outcome {
                 view: TriageView { mode_note: Some(format!("Triage did not run: {}.", e.0)), ..Default::default() },
+                tracker: None,
                 record: json!({"error": e.0}),
             };
         }
@@ -73,6 +104,12 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
                      Some("Linear sync is off (LINEAR_MODE=off): matched items are recorded but no issue is filed.".to_string())),
         Ok(Some(_)) => (std::env::var("LINEAR_MODE").unwrap_or_default().trim().to_ascii_lowercase(), None),
         Err(e) => ("error".to_string(), Some(format!("Linear sync is not configured: {e}."))),
+    };
+    // Off and not configured are known without a call; a live tracker's row comes from its sync.
+    let mut tracker_health = match &tracker {
+        Ok(None) => Some(tracker_row("off", 0, String::new(), "LINEAR_MODE=off: no issue is filed.".into())),
+        Ok(Some(_)) => None,
+        Err(e) => Some(tracker_row("error", 0, String::new(), format!("not configured: {e}"))),
     };
 
     let mut record = json!({
@@ -97,6 +134,7 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
                 if !rep.errors.is_empty() {
                     record["errors"] = json!(rep.errors);
                 }
+                tracker_health = Some(synced_row(&rep, store.issues().len(), now));
             }
             _ => {
                 store.refresh_pending(items, now);
@@ -120,7 +158,7 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
         println!("  triage: {}", gaps_note(gaps));
     }
 
-    Outcome { view: view(&store, items, now, mode_note), record }
+    Outcome { view: view(&store, items, now, mode_note), tracker: tracker_health, record }
 }
 
 /// Untriaged-table note on an issue declined without a reason.
@@ -227,6 +265,22 @@ mod tests {
         let rows: Vec<(&str, &str)> = v.tickets.iter().map(|t| (t.assignee.as_str(), t.due.as_str())).collect();
         assert_eq!(rows, [("Henry", "2026-11-10"), ("", "")]);
         assert_eq!(s.gaps(), Gaps { missing_owner: 1, missing_due: 1, missing_reason: 0 });
+    }
+
+    #[test]
+    fn linear_row_from_the_sync() {
+        let ok = SyncReport { created: 2, recovered: 1, commented: 1, updated: 3, errors: vec![] };
+        let r = synced_row(&ok, 5, at(4, 9));
+        assert_eq!((r.source.as_str(), r.status.as_str(), r.items), ("Linear", "ok", 5));
+        assert_eq!((r.last_success.as_str(), r.note.as_str()),
+                   ("2026-11-04T09:00:00Z", "2 created (1 already existed), 1 commented, 3 updated"));
+        let bad = SyncReport { created: 1, errors: vec!["create issue for A: x".into(), "read issue states: y".into()],
+                               ..Default::default() };
+        let r = synced_row(&bad, 1, at(4, 9));
+        assert_eq!((r.status.as_str(), r.last_success.as_str(), r.note.as_str()),
+                   ("error", "", "create issue for A: x (+1 more)"));
+        let one = SyncReport { errors: vec!["read issue states: y".into()], ..Default::default() };
+        assert_eq!(synced_row(&one, 0, at(4, 9)).note, "read issue states: y");
     }
 
     #[test]

@@ -50,38 +50,46 @@ fn health_class(status: &str) -> Option<(&'static str, &'static str)> {
         "cached" => Some(("cached", "Cached")),
         "stale" => Some(("stale", "Stale")),
         "error" => Some(("error", "Error")),
+        // The tracker row only (LINEAR_MODE=off): looks like "Cached", a muted outline.
+        "off" => Some(("cached", "Off")),
         _ => None,
     }
 }
 
-/// 6 columns: source, status, items, newest, last success, note.
-pub fn build_health_rows(health: &[HealthRow]) -> String {
-    if health.is_empty() {
-        return empty(6, "No feed has reported yet.");
-    }
-    let mut out = String::new();
+/// 6 columns: source, status, items, newest, last success, note. `tracker` is
+/// the "Linear" row, shown after the feeds with its note clipped to DESC_MAX
+/// characters; it is not a feed, so health_summary never counts it.
+pub fn build_health_rows(health: &[HealthRow], tracker: Option<&HealthRow>) -> String {
+    let mut out = if health.is_empty() { empty(6, "No feed has reported yet.") } else { String::new() };
     for h in health {
-        let (cls, label) = health_class(&h.status)
-            .unwrap_or(("stale", if h.status.is_empty() { "Unknown" } else { h.status.as_str() }));
-        out.push_str(&format!(
-            concat!(
-                r#"<tr><td>{}</td>"#,
-                r#"<td><span class="hs hs-{}">{}</span></td>"#,
-                r#"<td class="num">{}</td>"#,
-                r#"<td class="due">{}</td>"#,
-                r#"<td class="due">{}</td>"#,
-                r#"<td class="desc">{}</td></tr>"#,
-            ),
-            feed_pill(&h.source),
-            cls,
-            esc(label),
-            thousands(h.items),
-            fwhen(&h.newest, true),
-            fwhen(&h.last_success, true),
-            esc(&h.note),
-        ));
+        out.push_str(&health_row(h, &h.note));
+    }
+    if let Some(t) = tracker {
+        out.push_str(&health_row(t, &clip(&t.note)));
     }
     out
+}
+
+fn health_row(h: &HealthRow, note: &str) -> String {
+    let (cls, label) = health_class(&h.status)
+        .unwrap_or(("stale", if h.status.is_empty() { "Unknown" } else { h.status.as_str() }));
+    format!(
+        concat!(
+            r#"<tr><td>{}</td>"#,
+            r#"<td><span class="hs hs-{}">{}</span></td>"#,
+            r#"<td class="num">{}</td>"#,
+            r#"<td class="due">{}</td>"#,
+            r#"<td class="due">{}</td>"#,
+            r#"<td class="desc">{}</td></tr>"#,
+        ),
+        feed_pill(&h.source),
+        cls,
+        esc(label),
+        thousands(h.items),
+        fwhen(&h.newest, true),
+        fwhen(&h.last_success, true),
+        esc(note),
+    )
 }
 
 /// Plain text for n-health, e.g. '7 feeds &middot; 5 ok &middot; 1 cached &middot; 1 error'.
@@ -568,9 +576,35 @@ mod tests {
         let out = build_health_rows(&[HealthRow {
             source: EVIL.into(), status: EVIL.into(), items: 1, newest: EVIL.into(),
             last_success: String::new(), note: EVIL.into(),
-        }]);
+        }], None);
         assert_clean(&out);
         assert!(out.contains("hs-stale")); // unknown status renders as stale, label escaped
+    }
+
+    /// The tracker row follows the feeds: ok / error with its escaped, clipped first
+    /// error / off; it never changes the feed count.
+    #[test]
+    fn tracker_row() {
+        let feed = HealthRow { source: "CISA KEV".into(), status: "ok".into(), ..Default::default() };
+        let row = |status: &str, note: &str| HealthRow {
+            source: "Linear".into(), status: status.into(), items: 2, note: note.into(), ..Default::default()
+        };
+        let long = format!("create issue for NCSC-NL:X: {EVIL} {}", "x".repeat(400));
+        let out = build_health_rows(std::slice::from_ref(&feed), Some(&row("error", &long)));
+        assert_eq!(out.matches("<tr>").count(), 2);
+        assert!(out.ends_with("</td></tr>"));
+        let last = &out[out.rfind("<tr>").unwrap()..];
+        assert!(last.starts_with(r#"<tr><td><span class="feed">Linear</span></td><td><span class="hs hs-error">Error</span>"#),
+                "{last}");
+        assert_clean(last);
+        assert!(last.contains("xxx…</td></tr>"), "clipped: {last}");
+        assert!(!last.contains(&"x".repeat(400)));
+
+        assert!(build_health_rows(&[], Some(&row("ok", "1 created"))).contains(r#"<span class="hs hs-ok">OK</span>"#));
+        let off = build_health_rows(&[feed.clone()], Some(&row("off", "LINEAR_MODE=off")));
+        assert!(off.contains(r#"<span class="hs hs-cached">Off</span>"#), "{off}");
+        assert_eq!(build_health_rows(&[feed.clone()], None).matches("<tr>").count(), 1);
+        assert_eq!(health_summary(&[feed]), "1 feed &middot; 1 ok");
     }
 
     #[test]
@@ -677,7 +711,7 @@ mod tests {
 
     #[test]
     fn empty_rows() {
-        assert!(build_health_rows(&[]).contains(r#"colspan="6" class="empty""#));
+        assert!(build_health_rows(&[], None).contains(r#"colspan="6" class="empty""#));
         assert!(build_kev_rows(&[], "2026-11-03").contains(r#"colspan="5" class="empty""#));
         assert!(build_adv_rows(&[]).contains(r#"colspan="5" class="empty""#));
         assert!(build_dep_rows(&[]).contains(r#"colspan="6" class="empty""#));

@@ -292,9 +292,10 @@ fn without_volatile(html: &str) -> Result<String, Fatal> {
     render::apply_regions(html, &r)
 }
 
-/// sha256 hex of the regions that carry data, plus each feed's status. Stored in
-/// state/wiki.json; an equal fingerprint means there is nothing new to write.
-fn fingerprint(regions: &Regions, health: &[HealthRow]) -> String {
+/// sha256 hex of the regions that carry data, plus each feed's status and the Linear
+/// row's status. Stored in state/wiki.json; an equal fingerprint means there is nothing
+/// new to write.
+fn fingerprint(regions: &Regions, health: &[HealthRow], tracker: Option<&HealthRow>) -> String {
     let pick = |v: &[(String, String)]| -> Map<String, Value> {
         v.iter().filter(|(k, _)| !VOLATILE.contains(&k.as_str())).map(|(k, x)| (k.clone(), json!(x))).collect()
     };
@@ -303,6 +304,8 @@ fn fingerprint(regions: &Regions, health: &[HealthRow]) -> String {
         "text": pick(&regions.text),
         // Health statuses count (a feed going stale is news); their timestamps don't.
         "health": health.iter().map(|h| json!([h.source, h.status])).collect::<Vec<_>>(),
+        // Linear going from ok to error (or back) is news; its counts and message are not.
+        "tracker": tracker.map(|t| t.status.clone()),
     });
     // serde_json::Map is a BTreeMap (no preserve_order feature), so object keys are serialised sorted.
     let s = serde_json::to_string(&stable).expect("JSON value");
@@ -369,9 +372,9 @@ fn run(args: &Args) -> Result<(), Fatal> {
     let writing = !args.dry_run && args.out.is_none();
     let triage = triage::step::step(&to_triage, &cves, now, writing);
 
-    let regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health,
+    let regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health, triage.tracker.as_ref(),
                                         &triage.view, start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
-    let fp = fingerprint(&regions, &health);
+    let fp = fingerprint(&regions, &health, triage.tracker.as_ref());
 
     let mut record = Map::new();
     record.insert("run_at".into(), json!(iso_utc(now)));
@@ -526,11 +529,16 @@ mod tests {
             stamp: win.into(),
         };
         let health = |status: &str| vec![HealthRow { source: "CISA KEV".into(), status: status.into(), ..Default::default() }];
-        let a = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"));
+        let linear = |status: &str, note: &str| HealthRow { source: "Linear".into(), status: status.into(), note: note.into(), ..Default::default() };
+        let a = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None);
         assert_eq!(a.len(), 64);
-        assert_eq!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:33"), &health("ok")));
-        assert_ne!(a, fingerprint(&regions("<tr>CVE-2</tr>", "06:03"), &health("ok")));
-        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("stale")));
+        assert_eq!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:33"), &health("ok"), None));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-2</tr>", "06:03"), &health("ok"), None));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("stale"), None));
+        // The Linear row's status counts; its note (counts, error text) does not.
+        let ok = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "1 created")));
+        assert_eq!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "2 updated"))));
+        assert_ne!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("error", "HTTP 500"))));
         // Keys are serialised in sorted order, whatever order the map was built in.
         assert_eq!(serde_json::to_string(&json!({"b": 1, "a": {"z": 0, "y": 0}})).unwrap(), r#"{"a":{"y":0,"z":0},"b":1}"#);
     }

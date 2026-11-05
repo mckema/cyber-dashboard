@@ -63,8 +63,9 @@ pub const STAMP_ID: &str = "rstat";
 pub const SKELETON_PATH: &str = "stack/wiki/page/skeleton.html";
 pub const STYLE_PATH: &str = "stack/wiki/page/style.css";
 
-/// One row of the feed health table, built by run.rs.
-/// status: "ok" | "not-modified" | "cached" | "stale" | "error" (anything else renders as stale)
+/// One row of the feed health table, built by run.rs (the "Linear" row: by triage/step.rs).
+/// status: "ok" | "not-modified" | "cached" | "stale" | "error", or "off" for the Linear row
+/// (anything else renders as stale)
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HealthRow {
@@ -162,10 +163,13 @@ pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) 
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
 /// The triage view comes from the caller (TriageView::default() shows empty tables).
+/// `tracker` is the "Linear" row of the health table (None: no row). It is kept out
+/// of `health`, which also feeds the health count, the stamp and the run record.
 #[allow(clippy::too_many_arguments)]
 pub fn build_regions(
-    kev: &[Item], adv: &[Item], dep: &[Item], cve: &[Item], health: &[HealthRow], triage: &TriageView,
-    start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>, kev_catalog: &str, cap: usize,
+    kev: &[Item], adv: &[Item], dep: &[Item], cve: &[Item], health: &[HealthRow], tracker: Option<&HealthRow>,
+    triage: &TriageView, start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>, kev_catalog: &str,
+    cap: usize,
 ) -> Regions {
     let today = end.format("%Y-%m-%d").to_string();
     let (cve_html, shown, total) = build_cve_rows(cve, cap);
@@ -178,7 +182,7 @@ pub fn build_regions(
     let tickets_late = tickets_past_due(&triage.tickets, &today);
 
     let tbody = [
-        build_health_rows(health),
+        build_health_rows(health, tracker),
         build_kev_rows(kev, &today),
         build_adv_rows(adv),
         build_dep_rows(dep),
@@ -479,7 +483,7 @@ mod tests {
             assert_eq!(first_row_cells(rows), thead_cols(tid), "{tid}");
         }
         let empties = [
-            ("t-health", build_health_rows(&[])), ("t-kev", build_kev_rows(&[], "")),
+            ("t-health", build_health_rows(&[], None)), ("t-kev", build_kev_rows(&[], "")),
             ("t-adv", build_adv_rows(&[])), ("t-dep", build_dep_rows(&[])),
             ("t-nvd", build_cve_rows(&[], 300).0),
             ("t-untriaged", build_untriaged_rows(&[], None)), ("t-tickets", build_ticket_rows(&[], "", None)),
@@ -504,7 +508,7 @@ mod tests {
     #[test]
     fn triage_view_default_and_mode_note() {
         let t = crate::feeds::common::parse_iso("2026-11-03T02:45:00Z").unwrap();
-        let r = |v: &TriageView| build_regions(&[], &[], &[], &[], &[], v, t, t, t, "", 300);
+        let r = |v: &TriageView| build_regions(&[], &[], &[], &[], &[], None, v, t, t, t, "", 300);
         let off = r(&TriageView::default());
         assert!(off.get("t-untriaged").contains("No matched item is waiting for triage."));
         assert!(off.get("t-tickets").contains("No open tickets."));
@@ -518,6 +522,27 @@ mod tests {
         for id in ["t-untriaged", "t-tickets"] {
             super::test_support::assert_clean(evil.get(id));
         }
+    }
+
+    /// The Linear row goes into the health table only: the health count and the
+    /// stamp stay per feed, and its error text is escaped.
+    #[test]
+    fn tracker_row_in_health_table_only() {
+        use super::test_support::{EVIL, assert_clean};
+        let t = crate::feeds::common::parse_iso("2026-11-03T02:45:00Z").unwrap();
+        let feeds = [HealthRow { source: "CISA KEV".into(), status: "ok".into(), ..Default::default() }];
+        let linear = HealthRow { source: "Linear".into(), status: "error".into(),
+                                 note: format!("create issue for NCSC-NL:{EVIL}"), ..Default::default() };
+        let tv = TriageView::default();
+        let with = build_regions(&[], &[], &[], &[], &feeds, Some(&linear), &tv, t, t, t, "", 300);
+        let without = build_regions(&[], &[], &[], &[], &feeds, None, &tv, t, t, t, "", 300);
+        let rows = with.get("t-health");
+        assert!(rows.contains(r#"<span class="feed">Linear</span></td><td><span class="hs hs-error">Error</span>"#));
+        assert_clean(rows);
+        assert_eq!(with.get("n-health"), "1 feed &middot; 1 ok");
+        assert_eq!(with.get("n-health"), without.get("n-health"));
+        assert_eq!(with.stamp, without.stamp);
+        assert_eq!(first_row_cells(&rows[rows.rfind("<tr>").unwrap()..]), thead_cols("t-health"));
     }
 
     #[test]
