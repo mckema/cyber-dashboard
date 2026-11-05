@@ -198,7 +198,7 @@ mod tests {
             let iref = IssueRef { id: format!("uuid-{i}"), identifier: format!("TRI-{i}"), url: format!("https://linear.app/x/issue/TRI-{i}") };
             s.set_issue(&it.key(), iref.clone(), at(2, 8));
             let st = IssueStatus { state: *state, state_name: "Todo".into(), assignee: (*assignee).into(), due: (*due).into(),
-                                   reason: (*reason).into(), actor: String::new(), changed: String::new() };
+                                   reason: (*reason).into(), ..Default::default() };
             s.apply_statuses(&[(iref, st)], at(2, 9));
         }
         s
@@ -210,12 +210,14 @@ mod tests {
             (IssueState::Triage, "", "", ""),
             (IssueState::Declined, "", "", "  "),
             (IssueState::Declined, "", "", "not shipped"),
+            (IssueState::Canceled, "", "", ""), // canceled after Accept: closed, no reason asked
         ]);
         let v = view(&s, &[], at(4, 9), None);
         let rows: Vec<(&str, &str, bool, &str)> =
             v.untriaged.iter().map(|r| (r.item_id.as_str(), r.issue_identifier.as_str(), r.overdue, r.note.as_str())).collect();
         assert_eq!(rows, [("CVE-2026-0", "TRI-0", true, ""), ("CVE-2026-1", "TRI-1", true, NO_REASON_NOTE)]);
         assert!(v.tickets.is_empty());
+        assert_eq!(s.gaps().missing_reason, 1);
     }
 
     #[test]

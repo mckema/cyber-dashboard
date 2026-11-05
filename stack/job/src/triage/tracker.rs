@@ -46,11 +46,25 @@
 //!     type "duplicate", not "canceled". Snooze leaves the issue in Triage
 //!     (snoozedUntilAt set, triagedAt null, no history entry): still untriaged.
 //!   - A decline reason is a separate comment, at the same time as the state
-//!     change or some seconds later.
+//!     change or some seconds later. Only comments written from triagedAt -
+//!     TRIAGE_MATCH_MS on count: a comment written while the issue was still in
+//!     Triage is no reason.
 //!   - history and comments come back newest first; first: N keeps the N
 //!     newest. The code does not rely on the order (it compares createdAt).
 //!   - An OAuth app shows as a user in actor / creator ("Exploit Watch");
 //!     botActor stayed null.
+//!
+//! Timestamps and cancel after Accept (real Linear, 2026-11-05, fixture
+//! linear_issues_states_timestamps.json): createdAt, startedAt, completedAt and
+//! canceledAt are read into IssueStatus. Decline sets canceledAt 3-4 ms from
+//! triagedAt (TRI-14, TRI-15, TRI-2, TRI-3); Mark as duplicate sets it too. An
+//! issue accepted on 11-04 and canceled on 11-05 (TRI-1) has canceledAt ~20 h
+//! after triagedAt and two history entries, triage->backlog then
+//! backlog->canceled. So state type canceled is Canceled (accepted, then
+//! canceled) when canceledAt - triagedAt > TRIAGE_MATCH_MS, else Declined;
+//! without canceledAt, the entry that left Triage decides (triage_exit). Accept
+//! then In Progress then Done within seconds (TRI-10) gives one coalesced entry
+//! triage->completed, with startedAt and completedAt set.
 //!
 //! Credential: LINEAR_API_KEY holds either a personal API key or an OAuth access
 //! token (e.g. from an OAuth app's client_credentials grant, actor=app). The
@@ -126,21 +140,26 @@ pub struct IssueRef {
 }
 
 /// Where an issue is in the triage flow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IssueState {
     /// Still in the Triage inbox: nobody has looked yet.
+    #[default]
     Triage,
     /// Accepted: relevant, now an open ticket (Linear: backlog / unstarted / started).
     Accepted,
     /// Ticket closed as done (Linear: completed).
     Done,
-    /// Not relevant (Linear: canceled, or duplicate = Mark as duplicate).
+    /// Not relevant (Linear: canceled straight from Triage, or duplicate = Mark as duplicate).
     Declined,
+    /// Accepted, later canceled (Linear: canceled well after triagedAt). Closed; the
+    /// triage itself was an Accept, so no decline reason is asked for.
+    Canceled,
 }
 
 impl IssueState {
     /// Linear WorkflowState.type -> IssueState. None for a type this code does not know.
+    /// "canceled" maps to Declined here; parse_issue_node tells Canceled from it.
     pub fn from_linear(t: &str) -> Option<Self> {
         match t {
             "triage" => Some(Self::Triage),
@@ -152,12 +171,12 @@ impl IssueState {
     }
 
     pub fn is_closed(self) -> bool {
-        matches!(self, Self::Done | Self::Declined)
+        matches!(self, Self::Done | Self::Declined | Self::Canceled)
     }
 }
 
 /// What the tracker says about an issue. Strings are "" when unknown or unset.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueStatus {
     pub state: IssueState,
     #[serde(default)]
@@ -167,7 +186,8 @@ pub struct IssueStatus {
     #[serde(default)]
     pub due: String,        // YYYY-MM-DD
     /// Decline reason; only filled when state is Declined: the latest comment the job did
-    /// not write, else DUPLICATE_REASON for a duplicate.
+    /// not write, written after the issue left Triage (triagedAt - TRIAGE_MATCH_MS on),
+    /// else DUPLICATE_REASON for a duplicate.
     #[serde(default)]
     pub reason: String,
     /// Who triaged the issue, i.e. moved it out of Triage (Accept, Decline, a status
@@ -177,6 +197,19 @@ pub struct IssueStatus {
     /// When the issue left Triage (UTC ISO; Linear triagedAt). "" while in Triage.
     #[serde(default)]
     pub changed: String,
+    /// When the decline reason comment was written (UTC ISO). "" when there is none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason_at: String,
+    /// Linear createdAt, startedAt, completedAt, canceledAt (UTC ISO). "" when unset or
+    /// not read yet (records saved before 2026-11-06 do not have them).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub started: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub completed: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub canceled: String,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -416,7 +449,8 @@ pub struct FakeIssue {
     pub comments: Vec<FakeComment>,
 }
 
-/// The four states a test can write in the file ("canceled"/"completed" are accepted too).
+/// The states a test can write in the file ("completed" is accepted for done, "canceled"
+/// for declined, as Linear names them; "accepted-canceled" is accepted, then canceled).
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -427,6 +461,7 @@ pub enum FakeState {
     Done,
     #[serde(alias = "canceled")]
     Declined,
+    AcceptedCanceled,
 }
 
 #[cfg(test)]
@@ -470,7 +505,7 @@ impl Default for FakeFile {
 ///      "description": "...",                      Markdown, as Linear would get it
 ///      "item_key": "CISA KEV:CVE-2026-1234",
 ///      "created": "2026-11-03T08:00:00Z",
-///      "state": "triage",        edit: triage | accepted | done | declined
+///      "state": "triage",        edit: triage | accepted | done | declined | accepted-canceled
 ///      "assignee": "",           edit: owner name, e.g. "Henry"
 ///      "due": "",                edit: YYYY-MM-DD
 ///      "reason": "",             edit: why it was declined
@@ -560,12 +595,13 @@ impl Tracker for FakeTracker {
                     FakeState::Accepted => (IssueState::Accepted, "Accepted"),
                     FakeState::Done => (IssueState::Done, "Done"),
                     FakeState::Declined => (IssueState::Declined, "Declined"),
+                    FakeState::AcceptedCanceled => (IssueState::Canceled, "Canceled"),
                 };
                 let r = IssueRef { id: i.identifier.clone(), identifier: i.identifier.clone(), url: i.url.clone() };
                 (r, IssueStatus {
                     state, state_name: name.into(), assignee: i.assignee.trim().into(), due: i.due.trim().into(),
                     reason: if state == IssueState::Declined { i.reason.trim().into() } else { String::new() },
-                    actor: i.actor.trim().into(), changed: utc(i.changed.trim()),
+                    actor: i.actor.trim().into(), changed: utc(i.changed.trim()), ..Default::default()
                 })
             })
             .collect())
@@ -745,6 +781,10 @@ const Q_ISSUE_STATES: &str = "query IssueStates($ids: [ID!]!, $first: Int!, $nes
       assignee { name }
       dueDate
       triagedAt
+      createdAt
+      startedAt
+      completedAt
+      canceledAt
       history(first: $nested) { nodes { createdAt actor { name } botActor { name } fromState { type } toState { type name } } }
       comments(first: $nested) { nodes { body createdAt user { name } } }
     }
@@ -919,21 +959,53 @@ fn triaged_by(n: &Value) -> (String, String) {
     }
 }
 
+/// toState.type of the newest history entry that left Triage ("" when none is in the
+/// window): "canceled" for a Decline, "backlog" / "unstarted" / "started" for an
+/// Accept or a status change, "completed" when Linear coalesced Accept and Done.
+fn triage_exit(n: &Value) -> String {
+    latest(n.pointer("/history/nodes"), left_triage).map(|h| s(h, "/toState/type")).unwrap_or_default()
+}
+
+/// State type canceled: accepted first, then canceled (true), or declined from Triage.
+/// Decline sets canceledAt within a few ms of triagedAt (real Linear: 3-4 ms), a later
+/// cancel well after it. Without both times, the entry that left Triage decides.
+fn canceled_after_accept(n: &Value) -> bool {
+    match (parse_iso(&s(n, "/triagedAt")), parse_iso(&s(n, "/canceledAt"))) {
+        (Some(t), Some(c)) => (c - t).num_milliseconds() > TRIAGE_MATCH_MS,
+        _ => matches!(triage_exit(n).as_str(), "backlog" | "unstarted" | "started" | "completed"),
+    }
+}
+
+/// (reason, reason_at) of a decline: the latest comment the job did not write, from
+/// `changed` (the triage time) - TRIAGE_MATCH_MS on, so a comment written while the
+/// issue was still in Triage is no reason. All comments count when `changed` is "".
+fn decline_reason(n: &Value, changed: &str) -> (String, String) {
+    let from = parse_iso(changed).map(|t| t - chrono::Duration::milliseconds(TRIAGE_MATCH_MS));
+    latest(n.pointer("/comments/nodes"), |c| {
+        !s(c, "/body").trim_start().starts_with(BOT_PREFIX)
+            && from.is_none_or(|f| parse_iso(&s(c, "/createdAt")).is_some_and(|at| at >= f))
+    })
+    .map(|c| (s(c, "/body").trim().to_string(), utc(&s(c, "/createdAt"))))
+    .filter(|(body, _)| !body.is_empty())
+    .unwrap_or_default()
+}
+
 /// One node of the IssueStates query -> (IssueRef, IssueStatus).
 pub fn parse_issue_node(n: &Value) -> Result<(IssueRef, IssueStatus), TrackerError> {
     let r = issue_ref(n, "issues")?;
     let t = s(n, "/state/type");
-    let state = IssueState::from_linear(&t)
+    let mut state = IssueState::from_linear(&t)
         .ok_or_else(|| TrackerError::Reply(format!("issues: {} has unknown state type {t:?}", r.identifier)))?;
+    if t == "canceled" && canceled_after_accept(n) {
+        state = IssueState::Canceled;
+    }
     // In Triage (also snoozed): not triaged, whatever an earlier triage left behind.
     let (actor, changed) = if state == IssueState::Triage { Default::default() } else { triaged_by(n) };
-    let reason = if state == IssueState::Declined {
-        let comment = latest(n.pointer("/comments/nodes"), |c| !s(c, "/body").trim_start().starts_with(BOT_PREFIX))
-            .map(|c| s(c, "/body").trim().to_string())
-            .unwrap_or_default();
-        if comment.is_empty() && t == "duplicate" { DUPLICATE_REASON.to_string() } else { comment }
+    let (reason, reason_at) = if state == IssueState::Declined {
+        let (comment, at) = decline_reason(n, &changed);
+        if comment.is_empty() && t == "duplicate" { (DUPLICATE_REASON.to_string(), String::new()) } else { (comment, at) }
     } else {
-        String::new()
+        Default::default()
     };
     Ok((r, IssueStatus {
         state,
@@ -943,6 +1015,11 @@ pub fn parse_issue_node(n: &Value) -> Result<(IssueRef, IssueStatus), TrackerErr
         reason,
         actor,
         changed,
+        reason_at,
+        created: utc(&s(n, "/createdAt")),
+        started: utc(&s(n, "/startedAt")),
+        completed: utc(&s(n, "/completedAt")),
+        canceled: utc(&s(n, "/canceledAt")),
     }))
 }
 
@@ -1141,11 +1218,20 @@ mod tests {
         assert_eq!(st[0].0, a);
         assert_eq!(st[0].1, IssueStatus {
             state: IssueState::Accepted, state_name: "Accepted".into(), assignee: "Henry".into(),
-            due: "2026-11-10".into(), reason: String::new(), actor: "James".into(), changed: String::new(),
+            due: "2026-11-10".into(), actor: "James".into(), ..Default::default()
         });
-        assert_eq!(st[1].1.state, IssueState::Declined);
+        assert_eq!(st[1].1.state, IssueState::Declined, "canceled is the decline alias");
         assert_eq!(st[1].1.reason, "we do not ship nginx");
         assert_eq!(st[1].1.changed, "2026-11-04T02:00:00Z");
+
+        // The accepted ticket is canceled later: Canceled, closed, no decline reason.
+        j["issues"][0]["state"] = json!("accepted-canceled");
+        std::fs::write(&p, serde_json::to_vec_pretty(&j).unwrap()).unwrap();
+        let st = f.fetch_states(std::slice::from_ref(&a)).unwrap();
+        assert_eq!((st[0].1.state, st[0].1.state_name.as_str(), st[0].1.reason.as_str()),
+                   (IssueState::Canceled, "Canceled", ""));
+        assert!(st[0].1.state.is_closed());
+        assert_eq!(serde_json::to_value(IssueState::Canceled).unwrap(), "canceled");
     }
 
     #[test]
@@ -1398,14 +1484,13 @@ mod tests {
         assert_eq!(st.len(), 4);
         let by = |i: &str| st.iter().find(|(r, _)| r.identifier == i).unwrap().1.clone();
         assert_eq!(by("CTP-123"), IssueStatus {
-            state: IssueState::Triage, state_name: "Triage".into(), assignee: String::new(), due: String::new(),
-            reason: String::new(), actor: String::new(), changed: String::new(),
+            state: IssueState::Triage, state_name: "Triage".into(), ..Default::default()
         });
         // Triaged by Vu Huy Hoang (triage -> Todo), later moved on by someone else: the triage counts.
         assert_eq!(by("CTP-124"), IssueStatus {
             state: IssueState::Accepted, state_name: "In Progress".into(), assignee: "Tran Trung Hau".into(),
             due: "2026-11-10".into(), reason: String::new(), actor: "Vu Huy Hoang".into(),
-            changed: "2026-11-03T09:00:00Z".into(),
+            changed: "2026-11-03T09:00:00Z".into(), ..Default::default()
         });
         let declined = by("CTP-125");
         assert_eq!(declined.state, IssueState::Declined);
@@ -1518,6 +1603,95 @@ mod tests {
         let bare = json!({"id": "x", "identifier": "CTP-9", "url": "u", "state": {"type": "duplicate", "name": "Duplicate"}});
         let (_, st) = parse_issue_node(&bare).unwrap();
         assert_eq!((st.actor.as_str(), st.changed.as_str(), st.reason.as_str()), ("", "", DUPLICATE_REASON));
+    }
+
+    /// The real reply to the job's query plus the four timestamps (Linear test workspace,
+    /// 2026-11-05): Decline vs. Accept-then-Cancel, a duplicate, a coalesced Accept+Done.
+    #[test]
+    fn linear_timestamps_and_cancel_after_accept() {
+        let (mut l, seen) = linear(vec![reply(200, &fixture("linear_issues_states_timestamps.json"), &[])]);
+        let refs: Vec<IssueRef> = ["TRI-22", "TRI-14", "TRI-13", "TRI-10", "TRI-1"]
+            .iter()
+            .map(|i| IssueRef { id: format!("id-{i}"), identifier: i.to_string(), url: String::new() })
+            .collect();
+        let st = l.fetch_states(&refs).unwrap();
+        let q = seen.lock().unwrap()[0]["query"].as_str().unwrap().to_string();
+        for f in ["createdAt", "startedAt", "completedAt", "canceledAt"] {
+            assert!(q.contains(&format!("      {f}\n")), "{f} missing in {q}");
+        }
+        assert_eq!(st.len(), 5);
+        let by = |i: &str| st.iter().find(|(r, _)| r.identifier == i).unwrap().1.clone();
+        let henry = "Tran Trung Hau";
+
+        assert_eq!(by("TRI-22"), IssueStatus {
+            state: IssueState::Triage, state_name: "Triage".into(), created: "2026-11-05T02:47:56Z".into(),
+            ..Default::default()
+        });
+        // Declined from Triage: canceledAt 3 ms before triagedAt.
+        assert_eq!(by("TRI-14"), IssueStatus {
+            state: IssueState::Declined, state_name: "Canceled".into(), actor: henry.into(),
+            changed: "2026-11-04T10:34:09Z".into(), created: "2026-11-04T10:01:16Z".into(),
+            canceled: "2026-11-04T10:34:09Z".into(), ..Default::default()
+        });
+        let dup = by("TRI-13");
+        assert_eq!((dup.state, dup.reason.as_str(), dup.reason_at.as_str(), dup.canceled.as_str()),
+                   (IssueState::Declined, DUPLICATE_REASON, "", "2026-11-04T10:34:29Z"));
+        // Accept, In Progress, Done within seconds: one entry triage -> completed.
+        assert_eq!(by("TRI-10"), IssueStatus {
+            state: IssueState::Done, state_name: "Done".into(), actor: henry.into(),
+            changed: "2026-11-05T07:05:17Z".into(), created: "2026-11-04T10:01:13Z".into(),
+            started: "2026-11-05T07:05:17Z".into(), completed: "2026-11-05T07:05:21Z".into(), ..Default::default()
+        });
+        // Accepted on 11-04, canceled on 11-05: Canceled, and the Accept is the triage.
+        assert_eq!(by("TRI-1"), IssueStatus {
+            state: IssueState::Canceled, state_name: "Canceled".into(), assignee: henry.into(),
+            due: "2026-11-06".into(), actor: henry.into(), changed: "2026-11-04T10:34:44Z".into(),
+            created: "2026-11-04T10:01:07Z".into(), canceled: "2026-11-05T07:04:43Z".into(), ..Default::default()
+        });
+
+        // Without canceledAt, the entry that left Triage decides.
+        let j: Value = serde_json::from_str(&fixture("linear_issues_states_timestamps.json")).unwrap();
+        let node = |i: &str| {
+            let mut n = j["data"]["issues"]["nodes"].as_array().unwrap().iter()
+                .find(|n| n["identifier"] == i).unwrap().clone();
+            n["canceledAt"] = Value::Null;
+            parse_issue_node(&n).unwrap().1.state
+        };
+        assert_eq!(triage_exit(&j["data"]["issues"]["nodes"][4]), "backlog");
+        assert_eq!((node("TRI-1"), node("TRI-14"), node("TRI-13")),
+                   (IssueState::Canceled, IssueState::Declined, IssueState::Declined));
+    }
+
+    /// FR-A2: the decline reason is a comment written once the issue left Triage. A
+    /// comment from while it was still in Triage does not count, the job's own never do.
+    #[test]
+    fn decline_reason_only_from_comments_after_triage() {
+        let node = |comments: Value| {
+            json!({"id": "x", "identifier": "TRI-30", "url": "u", "state": {"type": "canceled", "name": "Canceled"},
+                   "triagedAt": "2026-11-05T09:00:00.500Z", "canceledAt": "2026-11-05T09:00:00.497Z",
+                   "history": {"nodes": [{"createdAt": "2026-11-05T09:00:00.490Z", "actor": {"name": "Henry"},
+                                          "botActor": null, "fromState": {"type": "triage"},
+                                          "toState": {"type": "canceled", "name": "Canceled"}}]},
+                   "comments": {"nodes": comments}})
+        };
+        let c = |at: &str, body: &str| json!({"createdAt": at, "body": body, "user": {"name": "Henry"}});
+        let read = |n: &Value| {
+            let (_, st) = parse_issue_node(n).unwrap();
+            (st.state, st.reason, st.reason_at)
+        };
+        let want = |reason: &str, at: &str| (IssueState::Declined, reason.to_string(), at.to_string());
+
+        // Written while in Triage, then declined with no new comment: declined without reason.
+        let n = node(json!([c("2026-11-05T08:30:00.000Z", "Probably not relevant."),
+                            c("2026-11-05T09:10:00.000Z", "**exploit-watch**: the feed item changed.")]));
+        assert_eq!(read(&n), want("", ""));
+        // Within TRIAGE_MATCH_MS before triagedAt (typed just before clicking Decline): counts.
+        let n = node(json!([c("2026-11-05T08:30:00.000Z", "Probably not relevant."),
+                            c("2026-11-05T08:59:57.000Z", "  We do not ship forge. ")]));
+        assert_eq!(read(&n), want("We do not ship forge.", "2026-11-05T08:59:57Z"));
+        // A later comment wins.
+        let n = node(json!([c("2026-11-05T09:00:10.000Z", "Not shipped."), c("2026-11-05T10:00:00.000Z", "Vendor build only.")]));
+        assert_eq!(read(&n), want("Vendor build only.", "2026-11-05T10:00:00Z"));
     }
 
     #[test]

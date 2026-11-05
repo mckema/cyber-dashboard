@@ -381,9 +381,9 @@ impl Store {
     }
 
     /// Drop records first seen more than KEEP_DAYS ago that need nothing more:
-    /// not relevant by rule, or the issue is done/declined with a reason. Matched
-    /// records whose issue is missing, untriaged, open or declined without a reason
-    /// stay. Returns how many were dropped.
+    /// not relevant by rule, or the issue is done, canceled after Accept, or declined
+    /// with a reason. Matched records whose issue is missing, untriaged, open or
+    /// declined without a reason stay. Returns how many were dropped.
     pub fn prune(&mut self, now: DateTime<Utc>) -> usize {
         let cutoff = iso_utc(now - Duration::days(KEEP_DAYS));
         let before = self.records.len();
@@ -439,7 +439,7 @@ mod tests {
     fn status(state: IssueState, due: &str) -> IssueStatus {
         let reason = if state == IssueState::Declined { "not shipped" } else { "" };
         IssueStatus { state, state_name: String::new(), assignee: "Henry".into(), due: due.into(), reason: reason.into(),
-                      actor: String::new(), changed: String::new() }
+                      ..Default::default() }
     }
 
     fn with(mut st: IssueStatus, assignee: &str, reason: &str) -> IssueStatus {
@@ -664,10 +664,11 @@ mod tests {
     /// FR-A2 asks for a reason on every decline; Linear does not. A decline without one
     /// stays in the untriaged table (red after one business day from first_seen) until a
     /// reason is read back, and is not pruned meanwhile. A duplicate has its own reason.
+    /// An issue canceled after Accept needs none: never untriaged, never missing_reason.
     #[test]
     fn declined_without_reason_stays_untriaged() {
         let mut s = Store::default();
-        for (i, d) in [(1, 2), (2, 5), (3, 2), (4, 2)] {
+        for (i, d) in [(1, 2), (2, 5), (3, 2), (4, 2), (5, 2)] {
             s.record_decision(&item(&format!("CVE-{i}")), matched("c"), at(d, 8, 0));
             s.set_issue(&format!("CISA KEV:CVE-{i}"), iref(i), at(d, 8, 0));
         }
@@ -677,10 +678,12 @@ mod tests {
             (iref(2), declined(" \n ")), // whitespace is no reason
             (iref(3), declined(crate::triage::tracker::DUPLICATE_REASON)),
             (iref(4), declined("not shipped")),
+            (iref(5), with(status(IssueState::Canceled, ""), "", "")),
         ];
         s.apply_statuses(&st, at(5, 10, 0));
         assert!(s.records["CISA KEV:CVE-1"].declined_without_reason());
         assert!(!s.records["CISA KEV:CVE-3"].declined_without_reason());
+        assert!(!s.records["CISA KEV:CVE-5"].declined_without_reason());
 
         let rows: Vec<(&str, bool, bool)> = s.untriaged(at(5, 10, 0)).iter().map(|u| (u.key, u.overdue, u.no_reason)).collect();
         assert_eq!(rows, [("CISA KEV:CVE-1", true, true), ("CISA KEV:CVE-2", false, true)]);
@@ -688,7 +691,7 @@ mod tests {
         assert_eq!(s.gaps(), Gaps { missing_owner: 0, missing_due: 0, missing_reason: 2 });
 
         // 30 days on: the complete declines go, the incomplete ones stay.
-        assert_eq!(s.prune(at(30, 12, 0) + Duration::days(5)), 2);
+        assert_eq!(s.prune(at(30, 12, 0) + Duration::days(5)), 3);
         let left: Vec<&str> = s.records.keys().map(String::as_str).collect();
         assert_eq!(left, ["CISA KEV:CVE-1", "CISA KEV:CVE-2"]);
 
@@ -728,7 +731,8 @@ mod tests {
         let old = at(1, 0, 0);
         let cases = [("CVE-1", matched("c"), Some(IssueState::Done)), ("CVE-2", matched("c"), Some(IssueState::Declined)),
                      ("CVE-3", not_relevant(), None), ("CVE-4", matched("c"), Some(IssueState::Accepted)),
-                     ("CVE-5", matched("c"), Some(IssueState::Triage)), ("CVE-6", matched("c"), None)];
+                     ("CVE-5", matched("c"), Some(IssueState::Triage)), ("CVE-6", matched("c"), None),
+                     ("CVE-8", matched("c"), Some(IssueState::Canceled))];
         for (i, (id, d, st)) in cases.into_iter().enumerate() {
             s.record_decision(&item(id), d, old);
             if let Some(st) = st {
@@ -739,7 +743,7 @@ mod tests {
         }
         s.record_decision(&item("CVE-7"), not_relevant(), at(20, 0, 0));
         assert_eq!(s.prune(at(30, 0, 0)), 0, "29 days: nothing is old enough");
-        assert_eq!(s.prune(Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 1).unwrap()), 3);
+        assert_eq!(s.prune(Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 1).unwrap()), 4, "canceled after Accept goes like done");
         let left: Vec<&str> = s.records.keys().map(String::as_str).collect();
         assert_eq!(left, ["CISA KEV:CVE-4", "CISA KEV:CVE-5", "CISA KEV:CVE-6", "CISA KEV:CVE-7"]);
     }

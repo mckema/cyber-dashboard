@@ -184,9 +184,7 @@ mod tests {
             self.call(format!("fetch {}", issues.len()))?;
             Ok(issues
                 .iter()
-                .map(|r| (r.clone(), IssueStatus { state: IssueState::Triage, state_name: "Triage".into(), assignee: String::new(),
-                                                   due: String::new(), reason: String::new(), actor: String::new(),
-                                                   changed: String::new() }))
+                .map(|r| (r.clone(), IssueStatus { state: IssueState::Triage, state_name: "Triage".into(), ..Default::default() }))
                 .collect())
         }
     }

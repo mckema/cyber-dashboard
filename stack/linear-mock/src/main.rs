@@ -60,6 +60,11 @@
 //!                              statusCode 400, userError, userPresentableMessage
 //!                              "Entity Issue with id <id> already exists.",
 //!                              without `locations`); nothing is written.
+//!                              IssueCreate whose title contains FAIL_CREATE
+//!                              ("FAIL-CREATE"): a failure switch for tests of the
+//!                              job's error handling; same shape, message "linear-mock:
+//!                              create refused (title contains FAIL-CREATE)", nothing
+//!                              is written (mock-specific, not a Linear answer).
 //!                              IssueById on an unknown id: "Entity not found:
 //!                              Issue" (shape of Linear's "Entity not found: Team"
 //!                              answer; the Issue case is not verified)
@@ -86,20 +91,26 @@
 //!      "description": "...",
 //!      "created": "2026-11-04T08:00:00Z",
 //!      "state": "triage",      edit: triage | accepted | done | declined | duplicate
-//!                                    (completed, canceled, cancelled also read)
+//!                                    | accepted-canceled (accepted, later canceled)
+//!                                    (completed, canceled, cancelled also read;
+//!                                    canceled = declined, a Decline from Triage)
 //!      "assignee": "",         edit: owner name, "" = unassigned
 //!      "due": "",              edit: YYYY-MM-DD, "" = none
 //!      "reason": "",           edit: why it was declined
 //!      "actor": "",            edit: who triaged it, i.e. moved it out of Triage
 //!                                    ("" = "mock user")
 //!      "changed": "",          edit: when it left Triage (UTC ISO), "" = use `created`
+//!      "completed": "",        optional: completedAt of a done issue, "" = `changed`
+//!      "canceled": "",         optional: canceledAt of an accepted-canceled issue,
+//!                                    "" = 1 hour after `changed`; of a declined or
+//!                                    duplicate issue, "" = `changed`
 //!      "comments": [{"at": "2026-11-04T09:00:00Z", "body": "..."}]   job-only
 //!     }
 //!    ]
 //!   }
 //!
 //! The editable fields match the job's test double FakeTracker (which has no
-//! `duplicate` state). Other fields a
+//! `duplicate` state and no `completed` / `canceled` times). Other fields a
 //! person adds to an issue are kept when the mock rewrites the file. `comments`
 //! holds the job's comments only (shown as written by "exploit-watch bot"); a
 //! decline reason goes in `reason`, not in `comments`. A leading UTF-8 BOM is
@@ -110,23 +121,35 @@
 //!
 //!   state      triage -> triage "Triage", accepted -> unstarted "Todo",
 //!              done -> completed "Done", declined -> canceled "Canceled",
-//!              duplicate -> duplicate "Duplicate" (Linear's own state type
-//!              for Mark as duplicate, not canceled)
+//!              accepted-canceled -> canceled "Canceled", duplicate ->
+//!              duplicate "Duplicate" (Linear's own state type for Mark as
+//!              duplicate, not canceled)
 //!   assignee   "" -> null, else {name}; due "" -> dueDate null
 //!   triagedAt  state triage: null; otherwise changed or created (Linear sets
 //!              it on any move out of Triage)
+//!   createdAt  created ("" -> null)
+//!   startedAt  always null (the mock has no started state)
+//!   completedAt  done: completed or triagedAt; otherwise null
+//!   canceledAt declined, duplicate: canceled or triagedAt (real Linear: within
+//!              3-4 ms of triagedAt on a Decline, 2026-11-05); accepted-canceled:
+//!              canceled or 1 hour after triagedAt (real Linear: ~20 h later on
+//!              TRI-1); otherwise null
 //!   history    state triage: no nodes; otherwise the entry that left Triage,
 //!              {createdAt: changed or created, actor {name: actor or
 //!              "mock user"}, botActor null, fromState {type "triage"},
 //!              toState {type, name}}; for duplicate fromState and toState
-//!              are null (Linear records only the relation)
+//!              are null (Linear records only the relation); accepted-canceled
+//!              has two entries, triage -> backlog "Backlog" at triagedAt and
+//!              backlog -> canceled "Canceled" at canceledAt, both by the actor
 //!   comments   the job's comments with user "exploit-watch bot", plus, when
 //!              `reason` is set, a separate comment {body: reason, createdAt:
-//!              changed or created, user {name: actor or "mock user"}}
+//!              changed or created (accepted-canceled: canceledAt), user
+//!              {name: actor or "mock user"}}
 //!
 //! history and comments are newest first, as Linear returns them (times that
 //! do not parse as RFC 3339 sort last). Timestamps are passed through as
-//! written in the file.
+//! written in the file, except the computed default canceledAt of
+//! accepted-canceled (null when triagedAt does not parse).
 //!
 //! Environment:
 //!
@@ -150,8 +173,9 @@
 //! returned), archived issues, any other query or mutation, other workflow
 //! states or teams, comment authors other than the two above, the OAuth flow
 //! itself (token endpoint, expiry, refresh, scopes, app attribution), moves
-//! after the triage (one history entry per issue at most), Snooze
-//! (snoozedUntilAt) and the duplicate relation to the canonical issue.
+//! after the triage other than accepted-canceled (one history entry per issue,
+//! two for accepted-canceled), startedAt, Snooze (snoozedUntilAt) and the
+//! duplicate relation to the canonical issue.
 //! Requests are served one at a time.
 
 use std::fs;
@@ -173,6 +197,10 @@ const URL_BASE: &str = "http://linear-mock.invalid/issue/";
 const PERSONAL_KEY_PREFIX: &str = "lin_api_";
 /// Larger request bodies get 413.
 const MAX_BODY: u64 = 1 << 20;
+/// An IssueCreate whose title contains this is refused with INPUT_ERROR (failure switch).
+const FAIL_CREATE: &str = "FAIL-CREATE";
+/// Default canceledAt of an accepted-canceled issue: this long after triagedAt.
+const CANCEL_AFTER_SECS: i64 = 3600;
 
 // ---------------------------------------------------------------- config
 
@@ -259,6 +287,12 @@ struct Issue {
     actor: String,
     #[serde(default)]
     changed: String,
+    /// completedAt of a done issue; "" = changed (module doc).
+    #[serde(default)]
+    completed: String,
+    /// canceledAt of a declined, duplicate or accepted-canceled issue; "" = derived (module doc).
+    #[serde(default)]
+    canceled: String,
     #[serde(default)]
     comments: Vec<Comment>,
     /// Fields a person added by hand; written back unchanged.
@@ -282,10 +316,14 @@ enum MockState {
     Accepted,
     #[serde(alias = "completed")]
     Done,
+    /// Decline from Triage.
     #[serde(alias = "canceled", alias = "cancelled")]
     Declined,
     /// Mark as duplicate.
     Duplicate,
+    /// Accepted (to Backlog), later canceled.
+    #[serde(rename = "accepted-canceled")]
+    AcceptedCanceled,
 }
 
 impl MockState {
@@ -295,7 +333,7 @@ impl MockState {
             Self::Triage => ("triage", "Triage"),
             Self::Accepted => ("unstarted", "Todo"),
             Self::Done => ("completed", "Done"),
-            Self::Declined => ("canceled", "Canceled"),
+            Self::Declined | Self::AcceptedCanceled => ("canceled", "Canceled"),
             Self::Duplicate => ("duplicate", "Duplicate"),
         }
     }
@@ -628,6 +666,11 @@ fn issue_create(vars: &Value, cfg: &Config, now: &str) -> OpResult {
     if title.trim().is_empty() {
         return Err(GqlError::new("INVALID_INPUT", "issueCreate needs a non-empty title"));
     }
+    if title.contains(FAIL_CREATE) {
+        // Failure switch (module doc): a refused create, shaped like Linear's user errors.
+        return Err(GqlError::user("INPUT_ERROR", format!("linear-mock: create refused (title contains {FAIL_CREATE})"),
+                                  "issueCreate", format!("Issue creation refused: the title contains {FAIL_CREATE}.")));
+    }
     let mut f = load(&cfg.data_dir)?;
     if let Some(id) = &own_id
         && f.issues.iter().any(|i| i.id.eq_ignore_ascii_case(id))
@@ -654,6 +697,8 @@ fn issue_create(vars: &Value, cfg: &Config, now: &str) -> OpResult {
         reason: String::new(),
         actor: String::new(),
         changed: String::new(),
+        completed: String::new(),
+        canceled: String::new(),
         comments: vec![],
         extra: Map::new(),
     };
@@ -713,20 +758,37 @@ fn newest_first(nodes: &mut [Value]) {
     nodes.sort_by(|a, b| at(b).cmp(&at(a)));
 }
 
+/// `t` (RFC 3339) plus `secs`, as UTC "YYYY-MM-DDTHH:MM:SSZ"; None when `t` does not parse.
+fn plus_secs(t: &str, secs: i64) -> Option<String> {
+    let dt = chrono::DateTime::parse_from_rfc3339(t).ok()? + chrono::Duration::seconds(secs);
+    Some(dt.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
 /// One issue in the shape of Linear's IssueStates node (see the module doc for the mapping).
 fn issue_node(i: &Issue) -> Value {
     let (state_type, state_name) = i.state.linear();
     let when = nonempty(&i.changed).unwrap_or(i.created.trim());
     let who = nonempty(&i.actor).unwrap_or(DEFAULT_ACTOR);
-    let (from, to) = match i.state {
-        // Mark as duplicate: Linear's entry holds the relation only, no states.
-        MockState::Duplicate => (Value::Null, Value::Null),
-        _ => (json!({"type": "triage"}), json!({"type": state_type, "name": state_name})),
+    let completed = (i.state == MockState::Done).then(|| nonempty(&i.completed).unwrap_or(when).to_string());
+    let canceled = match i.state {
+        MockState::Declined | MockState::Duplicate => Some(nonempty(&i.canceled).unwrap_or(when).to_string()),
+        MockState::AcceptedCanceled => nonempty(&i.canceled).map(String::from).or_else(|| plus_secs(when, CANCEL_AFTER_SECS)),
+        _ => None,
     };
-    let mut history: Vec<Value> = if i.state == MockState::Triage {
-        vec![]
-    } else {
-        vec![json!({"createdAt": when, "actor": {"name": who}, "botActor": null, "fromState": from, "toState": to})]
+    let entry = |at: &str, from: Value, to: Value| {
+        json!({"createdAt": at, "actor": {"name": who}, "botActor": null, "fromState": from, "toState": to})
+    };
+    let mut history: Vec<Value> = match i.state {
+        MockState::Triage => vec![],
+        // Mark as duplicate: Linear's entry holds the relation only, no states.
+        MockState::Duplicate => vec![entry(when, Value::Null, Value::Null)],
+        // Accept to Backlog, later Cancel: two entries, like TRI-1 on real Linear (2026-11-05).
+        MockState::AcceptedCanceled => vec![
+            entry(when, json!({"type": "triage"}), json!({"type": "backlog", "name": "Backlog"})),
+            entry(canceled.as_deref().unwrap_or(when), json!({"type": "backlog"}),
+                  json!({"type": state_type, "name": state_name})),
+        ],
+        _ => vec![entry(when, json!({"type": "triage"}), json!({"type": state_type, "name": state_name}))],
     };
     let mut comments: Vec<Value> = i
         .comments
@@ -734,7 +796,8 @@ fn issue_node(i: &Issue) -> Value {
         .map(|c| json!({"body": c.body, "createdAt": c.at, "user": {"name": BOT_USER}}))
         .collect();
     if let Some(reason) = nonempty(&i.reason) {
-        comments.push(json!({"body": reason, "createdAt": when, "user": {"name": who}}));
+        let at = if i.state == MockState::AcceptedCanceled { canceled.as_deref().unwrap_or(when) } else { when };
+        comments.push(json!({"body": reason, "createdAt": at, "user": {"name": who}}));
     }
     newest_first(&mut history);
     newest_first(&mut comments);
@@ -746,6 +809,10 @@ fn issue_node(i: &Issue) -> Value {
         "assignee": nonempty(&i.assignee).map(|a| json!({"name": a})),
         "dueDate": nonempty(&i.due),
         "triagedAt": (i.state != MockState::Triage).then_some(when),
+        "createdAt": nonempty(&i.created),
+        "startedAt": null,
+        "completedAt": completed,
+        "canceledAt": canceled,
         "history": {"nodes": history},
         "comments": {"nodes": comments},
     })
@@ -849,7 +916,7 @@ mod tests {
     const TEAM: &str = "team-1";
 
     // The documents exactly as the job sends them (src/triage/tracker.rs, 2026-11-04;
-    // IssueById 2026-11-05).
+    // IssueById 2026-11-05; IssueStates with the four timestamps 2026-11-05).
     const Q_ISSUE_BY_ID: &str = "query IssueById($id: String!) {
   issue(id: $id) { id identifier url }
 }";
@@ -880,6 +947,10 @@ mod tests {
       assignee { name }
       dueDate
       triagedAt
+      createdAt
+      startedAt
+      completedAt
+      canceledAt
       history(first: $nested) { nodes { createdAt actor { name } botActor { name } fromState { type } toState { type name } } }
       comments(first: $nested) { nodes { body createdAt user { name } } }
     }
@@ -1066,7 +1137,7 @@ mod tests {
         assert_eq!(i["created"], NOW);
         assert_eq!(i["state"], "triage");
         assert_eq!(i["comments"], json!([]));
-        for k in ["assignee", "due", "reason", "actor", "changed"] {
+        for k in ["assignee", "due", "reason", "actor", "changed", "completed", "canceled"] {
             assert_eq!(i[k], "", "{k}");
         }
         assert!(fs::read_to_string(d.file()).unwrap().contains("\n  \"issues\""), "pretty JSON");
@@ -1223,6 +1294,8 @@ mod tests {
         assert_eq!(nodes, vec![json!({
             "id": id1, "identifier": "MOCK-1", "url": "http://linear-mock.invalid/issue/MOCK-1",
             "state": {"type": "triage", "name": "Triage"}, "assignee": null, "dueDate": null, "triagedAt": null,
+            "createdAt": NOW, "startedAt": null, "completedAt": null, "canceledAt": null,
+            "createdAt": NOW, "startedAt": null, "completedAt": null, "canceledAt": null,
             "history": {"nodes": []},
             "comments": {"nodes": [{"body": "**exploit-watch**: c", "createdAt": NOW, "user": {"name": "exploit-watch bot"}}]}
         })]);
@@ -1233,20 +1306,21 @@ mod tests {
         assert_eq!(error_code(&gql(&cfg, Q_ISSUE_STATES, json!({"first": 1}))), "GRAPHQL_VALIDATION_FAILED");
     }
 
-    /// A file as a person would leave it after triaging four issues by hand and marking one as duplicate.
+    /// A file as a person would leave it after triaging four issues by hand, marking one as
+    /// duplicate, and accepting one and canceling it later.
     fn hand_edited(d: &TestDir) {
         let issue = |n: u32, state: &str, extra: Value| {
             let mut i = json!({"id": format!("mock-{n}"), "identifier": format!("MOCK-{n}"),
                                "url": format!("{URL_BASE}MOCK-{n}"), "title": "t", "description": "",
                                "created": "2026-11-04T08:00:00Z", "state": state, "assignee": "", "due": "",
-                               "reason": "", "actor": "", "changed": "",
+                               "reason": "", "actor": "", "changed": "", "completed": "", "canceled": "",
                                "comments": [{"at": "2026-11-04T08:30:00Z", "body": "**exploit-watch**: changed"}]});
             for (k, v) in extra.as_object().unwrap() {
                 i[k] = v.clone();
             }
             i
         };
-        let f = json!({"next": 6, "issues": [
+        let f = json!({"next": 7, "issues": [
             issue(1, "triage", json!({})),
             issue(2, "accepted", json!({"assignee": "Henry", "due": "2026-11-10", "actor": "James",
                                         "changed": "2026-11-04T09:00:00Z"})),
@@ -1254,6 +1328,8 @@ mod tests {
             issue(4, "canceled", json!({"reason": "  Not relevant: test harness only.\n", "actor": "Henry",
                                         "changed": "2026-11-04T10:00:00Z", "item_key": "CISA KEV:CVE-2026-1234"})),
             issue(5, "duplicate", json!({"actor": "James", "changed": "2026-11-04T11:00:00Z"})),
+            issue(6, "accepted-canceled", json!({"assignee": "Henry", "due": "2026-11-12", "actor": "Henry",
+                                                 "changed": "2026-11-04T09:30:00Z"})),
         ]});
         fs::write(d.file(), serde_json::to_string_pretty(&f).unwrap()).unwrap();
     }
@@ -1263,13 +1339,35 @@ mod tests {
         let d = TestDir::new();
         let cfg = d.cfg();
         hand_edited(&d);
-        let nodes = states(&cfg, &["mock-1", "mock-2", "mock-3", "mock-4", "mock-5"]);
+        let nodes = states(&cfg, &["mock-1", "mock-2", "mock-3", "mock-4", "mock-5", "mock-6"]);
         let st: Vec<(&str, &str)> = nodes
             .iter()
             .map(|n| (n["state"]["type"].as_str().unwrap(), n["state"]["name"].as_str().unwrap()))
             .collect();
         assert_eq!(st, [("triage", "Triage"), ("unstarted", "Todo"), ("completed", "Done"), ("canceled", "Canceled"),
-                        ("duplicate", "Duplicate")]);
+                        ("duplicate", "Duplicate"), ("canceled", "Canceled")]);
+        // createdAt, completedAt (done), canceledAt (declined, duplicate: at triagedAt, as Linear does).
+        let times: Vec<[Value; 4]> = nodes
+            .iter()
+            .map(|n| [n["createdAt"].clone(), n["startedAt"].clone(), n["completedAt"].clone(), n["canceledAt"].clone()])
+            .collect();
+        let c = json!("2026-11-04T08:00:00Z");
+        assert_eq!(times[..5], [
+            [c.clone(), Value::Null, Value::Null, Value::Null],
+            [c.clone(), Value::Null, Value::Null, Value::Null],
+            [c.clone(), Value::Null, c.clone(), Value::Null],
+            [c.clone(), Value::Null, Value::Null, json!("2026-11-04T10:00:00Z")],
+            [c.clone(), Value::Null, Value::Null, json!("2026-11-04T11:00:00Z")],
+        ]);
+        // Accepted, then canceled: canceledAt 1 h after triagedAt, two history entries newest first.
+        assert_eq!(nodes[5]["triagedAt"], json!("2026-11-04T09:30:00Z"));
+        assert_eq!(nodes[5]["canceledAt"], json!("2026-11-04T10:30:00Z"));
+        assert_eq!(nodes[5]["history"]["nodes"], json!([
+            {"createdAt": "2026-11-04T10:30:00Z", "actor": {"name": "Henry"}, "botActor": null,
+             "fromState": {"type": "backlog"}, "toState": {"type": "canceled", "name": "Canceled"}},
+            {"createdAt": "2026-11-04T09:30:00Z", "actor": {"name": "Henry"}, "botActor": null,
+             "fromState": {"type": "triage"}, "toState": {"type": "backlog", "name": "Backlog"}},
+        ]));
 
         assert_eq!(nodes[0]["history"]["nodes"], json!([]));
         assert_eq!(nodes[0]["triagedAt"], Value::Null);
@@ -1342,11 +1440,13 @@ mod tests {
     #[test]
     fn node_shape_matches_linear_fixture() {
         // Node id-TRI-15 of tests/fixtures/linear_issues_states_triage.json in the job repo (shaped like
-        // real Linear on 2026-11-04; comments trimmed to one).
+        // real Linear on 2026-11-04; comments trimmed to one), plus the four timestamps the query asks
+        // for since 2026-11-05 (keys as in linear_issues_states_timestamps.json; only keys are compared).
         let linear: Value = serde_json::from_str(r#"{
           "id": "id-TRI-15", "identifier": "TRI-15", "url": "https://linear.app/<workspace>/issue/TRI-15/x",
           "state": { "type": "canceled", "name": "Canceled" }, "assignee": { "name": "x" }, "dueDate": null,
           "triagedAt": "2026-11-04T10:33:41.207Z",
+          "createdAt": null, "startedAt": null, "completedAt": null, "canceledAt": null,
           "history": { "nodes": [ { "createdAt": "2026-11-04T10:33:41.180Z", "actor": { "name": "Tran Trung Hau" },
                                     "botActor": null, "fromState": { "type": "triage" },
                                     "toState": { "type": "canceled", "name": "Canceled" } } ] },
@@ -1355,23 +1455,40 @@ mod tests {
         let d = TestDir::new();
         let cfg = d.cfg();
         hand_edited(&d);
-        for n in states(&cfg, &["mock-1", "mock-2", "mock-3", "mock-4", "mock-5"]) {
+        for n in states(&cfg, &["mock-1", "mock-2", "mock-3", "mock-4", "mock-5", "mock-6"]) {
             same_keys(&n, &linear, "");
         }
     }
 
     /// The job's parse_issue_node (src/triage/tracker.rs, 2026-11-05) reduced to the fields it
-    /// derives: state type; outside triage, changed = triagedAt and actor = the history entry
-    /// within 5 s of it (one that left Triage first), else the newest entry that left Triage;
-    /// reason = latest comment not starting with "**exploit-watch**" when the state is declined
-    /// (canceled/duplicate), "Marked as duplicate" for a duplicate without one. Times are
-    /// compared as text here (the mock writes one format).
+    /// derives: state (the job's IssueState: canceled is "canceled" when canceledAt is more than
+    /// 5 s after triagedAt, else "declined"; without canceledAt the entry that left Triage
+    /// decides); outside triage, changed = triagedAt and actor = the history entry at it (one
+    /// that left Triage first), else the newest entry that left Triage; reason (declined only) =
+    /// latest comment not starting with "**exploit-watch**" written from triagedAt - 5 s on,
+    /// "Marked as duplicate" for a duplicate without one. Entry times are compared as text
+    /// here (the mock writes one format).
     fn job_view(n: &Value) -> (String, String, String, String, String, String) {
         let s = |v: &Value, p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or("").to_string();
+        let t = |v: &str| chrono::DateTime::parse_from_rfc3339(v).ok();
         let empty = vec![];
         let history = n["history"]["nodes"].as_array().unwrap_or(&empty);
-        let state = s(n, "/state/type");
+        let kind = s(n, "/state/type");
         let triaged_at = s(n, "/triagedAt");
+        let exit = history.iter().filter(|h| s(h, "/fromState/type") == "triage").max_by_key(|h| s(h, "/createdAt"))
+            .map(|h| s(h, "/toState/type")).unwrap_or_default();
+        let after_accept = match (t(&triaged_at), t(&s(n, "/canceledAt"))) {
+            (Some(a), Some(c)) => (c - a).num_milliseconds() > 5_000,
+            _ => matches!(exit.as_str(), "backlog" | "unstarted" | "started" | "completed"),
+        };
+        let state = match kind.as_str() {
+            "triage" => "triage",
+            "backlog" | "unstarted" | "started" => "accepted",
+            "completed" => "done",
+            "canceled" if after_accept => "canceled",
+            _ => "declined",
+        }
+        .to_string();
         let left = |h: &&Value| s(h, "/fromState/type") == "triage";
         let entry = history.iter().find(|h| left(h) && s(h, "/createdAt") == triaged_at)
             .or_else(|| history.iter().find(|h| s(h, "/createdAt") == triaged_at))
@@ -1381,13 +1498,15 @@ mod tests {
             (_, e) => (e.map(|h| s(h, "/actor/name")).unwrap_or_default(),
                        if triaged_at.is_empty() { e.map(|h| s(h, "/createdAt")).unwrap_or_default() } else { triaged_at.clone() }),
         };
-        let reason = if matches!(state.as_str(), "canceled" | "duplicate") {
+        let reason = if state == "declined" {
+            let from = t(&changed).map(|c| c - chrono::Duration::seconds(5));
             let c = n["comments"]["nodes"].as_array().unwrap_or(&empty).iter()
                 .filter(|c| !s(c, "/body").trim_start().starts_with("**exploit-watch**"))
+                .filter(|c| from.is_none_or(|f| t(&s(c, "/createdAt")).is_some_and(|at| at >= f)))
                 .max_by_key(|c| s(c, "/createdAt"))
                 .map(|c| s(c, "/body").trim().to_string())
                 .unwrap_or_default();
-            if c.is_empty() && state == "duplicate" { "Marked as duplicate".to_string() } else { c }
+            if c.is_empty() && kind == "duplicate" { "Marked as duplicate".to_string() } else { c }
         } else {
             String::new()
         };
@@ -1399,16 +1518,80 @@ mod tests {
         let d = TestDir::new();
         let cfg = d.cfg();
         hand_edited(&d);
-        let views: Vec<_> = states(&cfg, &["mock-1", "mock-2", "mock-4", "mock-5"]).iter().map(job_view).collect();
+        let views: Vec<_> =
+            states(&cfg, &["mock-1", "mock-2", "mock-4", "mock-5", "mock-6"]).iter().map(job_view).collect();
         let v = |a: &str, b: &str, c: &str, e: &str, f: &str, g: &str| {
             (a.to_string(), b.to_string(), c.to_string(), e.to_string(), f.to_string(), g.to_string())
         };
         assert_eq!(views, vec![
             v("triage", "", "", "", "", ""),
-            v("unstarted", "Henry", "2026-11-10", "", "James", "2026-11-04T09:00:00Z"),
-            v("canceled", "", "", "Not relevant: test harness only.", "Henry", "2026-11-04T10:00:00Z"),
-            v("duplicate", "", "", "Marked as duplicate", "James", "2026-11-04T11:00:00Z"),
+            v("accepted", "Henry", "2026-11-10", "", "James", "2026-11-04T09:00:00Z"),
+            v("declined", "", "", "Not relevant: test harness only.", "Henry", "2026-11-04T10:00:00Z"),
+            v("declined", "", "", "Marked as duplicate", "James", "2026-11-04T11:00:00Z"),
+            v("canceled", "Henry", "2026-11-12", "", "Henry", "2026-11-04T09:30:00Z"),
         ]);
+    }
+
+    /// accepted-canceled with hand-set times: canceledAt and the second entry follow
+    /// `canceled`, a reason comment goes with the cancel; `completed` sets completedAt of done.
+    #[test]
+    fn accepted_canceled_and_hand_set_times() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        hand_edited(&d);
+        let mut f = d.read();
+        f["issues"][5]["canceled"] = json!("2026-11-05T07:04:43Z");
+        f["issues"][5]["reason"] = json!("No longer needed.");
+        f["issues"][2]["changed"] = json!("2026-11-04T09:00:00Z");
+        f["issues"][2]["completed"] = json!("2026-11-04T09:00:05Z");
+        fs::write(d.file(), f.to_string()).unwrap();
+        let nodes = states(&cfg, &["mock-3", "mock-6"]);
+        assert_eq!((&nodes[0]["triagedAt"], &nodes[0]["completedAt"]),
+                   (&json!("2026-11-04T09:00:00Z"), &json!("2026-11-04T09:00:05Z")));
+        let n = &nodes[1];
+        assert_eq!(n["canceledAt"], json!("2026-11-05T07:04:43Z"));
+        let entries: Vec<(&str, &str, &str)> = n["history"]["nodes"].as_array().unwrap().iter()
+            .map(|h| (h["createdAt"].as_str().unwrap(), h["fromState"]["type"].as_str().unwrap(),
+                      h["toState"]["type"].as_str().unwrap()))
+            .collect();
+        assert_eq!(entries, [("2026-11-05T07:04:43Z", "backlog", "canceled"), ("2026-11-04T09:30:00Z", "triage", "backlog")]);
+        assert_eq!(n["comments"]["nodes"][0], json!({"body": "No longer needed.", "createdAt": "2026-11-05T07:04:43Z",
+                                                     "user": {"name": "Henry"}}));
+        assert_eq!(job_view(n).0, "canceled");
+        // Without canceledAt the entry that left Triage (to backlog) still says canceled after Accept.
+        let mut bare = n.clone();
+        bare["canceledAt"] = Value::Null;
+        assert_eq!(job_view(&bare).0, "canceled");
+        assert_eq!(d.read()["issues"][5]["state"], "accepted-canceled", "written back as typed");
+        // triagedAt that does not parse: no computed canceledAt.
+        let mut f = d.read();
+        f["issues"][5]["canceled"] = json!("");
+        f["issues"][5]["changed"] = json!("yesterday");
+        fs::write(d.file(), f.to_string()).unwrap();
+        assert_eq!(states(&cfg, &["mock-6"])[0]["canceledAt"], Value::Null);
+    }
+
+    /// Failure switch: a title with FAIL-CREATE is refused like a Linear user error, nothing is
+    /// written, and the next create still works.
+    #[test]
+    fn fail_create_switch() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        create(&cfg, "a");
+        let before = fs::read(d.file()).unwrap();
+        let v = create_with_id(&cfg, json!(UUID), "[CVE-2026-1] FAIL-CREATE test");
+        assert_eq!(v, json!({"errors": [{"message": "linear-mock: create refused (title contains FAIL-CREATE)",
+            "path": ["issueCreate"], "extensions": {"code": "INPUT_ERROR", "type": "invalid input", "statusCode": 400,
+            "userError": true, "userPresentableMessage": "Issue creation refused: the title contains FAIL-CREATE."}}],
+            "data": null}));
+        assert_eq!(fs::read(d.file()).unwrap(), before, "nothing created");
+        let body = json!({"query": M_ISSUE_CREATE, "variables": {"input": {"teamId": TEAM, "title": "FAIL-CREATE"}}});
+        let r = handle("POST", "/graphql", Some(KEY), body.to_string().as_bytes(), &cfg, NOW);
+        assert!(r.log.starts_with("IssueCreate as user error INPUT_ERROR: linear-mock: create refused"), "{}", r.log);
+        assert_eq!(create(&cfg, "b").pointer("/data/issueCreate/issue/identifier"), Some(&json!("MOCK-2")));
+        // The same UUID was never stored, so it can be used now.
+        let v = create_with_id(&cfg, json!(UUID), "fail-create in lower case is no switch");
+        assert_eq!(v.pointer("/data/issueCreate/issue/id"), Some(&json!(UUID)));
     }
 
     #[test]
