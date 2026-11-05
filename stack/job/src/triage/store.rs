@@ -45,7 +45,12 @@
 //!
 //!   decided           at first_seen: decision fields (decision, component/rule/
 //!                     evidence or triager), components_version, components_sha256,
-//!                     item_source, item_id, title, url, cves, published
+//!                     item_source, item_id, title, url, cves, published,
+//!                     score (CVSS base, null when unscored), severity (CRITICAL |
+//!                     HIGH | MEDIUM | LOW | ""), exploited (bool) and
+//!                     exploited_source ("CISA KEV" | "ENISA EUVD" | "SSVC active" | "")
+//!                     from exploited_source(); since 2026-11-05, so older lines lack
+//!                     the last four (the report fills them from triage.json)
 //!   issue_created     issue_id, identifier, url (at: when the job filed it)
 //!   triaged           Linear triagedAt changed: state (accepted | declined), actor
 //!   state_changed     from, to (IssueState names; from "none" before the first read-back);
@@ -215,8 +220,41 @@ fn decided_event(key: &str, r: &Record, ctx: &EventContext, ts: DateTime<Utc>, s
             ("cves".to_string(), json!(r.item.cves)),
             ("published".to_string(), json!(r.item.published)),
         ]);
+        o.extend(item_risk(&r.item));
     }
     event("decided", key, &r.first_seen, &[&r.first_seen], ts, source, fields)
+}
+
+/// Why an item counts as known exploited, from the item alone ("" = not known):
+/// it comes from the CISA KEV catalog or ENISA EUVD's exploited view (every item of
+/// those two feeds is exploited; a KEV row merged with EUVD lists both in
+/// extra.sources and CISA wins), or it is a CVE.org record whose CISA ADP SSVC
+/// "Exploitation" is "active". SSVC "poc" does not count. The report also marks an
+/// item exploited when one of its CVEs was logged from KEV or EUVD by the cut-off.
+pub fn exploited_source(item: &Item) -> &'static str {
+    use crate::feeds::{euvd, kev};
+    let from = |name: &str| item.source == name || item.x_list("sources").contains(&name);
+    if from(kev::NAME) {
+        kev::NAME
+    } else if from(euvd::NAME) {
+        euvd::NAME
+    } else if item.x("ssvc_exploitation").eq_ignore_ascii_case("active") {
+        "SSVC active"
+    } else {
+        ""
+    }
+}
+
+/// The `decided` fields that describe the item's risk: score, severity, exploited,
+/// exploited_source (module doc).
+pub fn item_risk(item: &Item) -> [(String, Value); 4] {
+    let src = exploited_source(item);
+    [
+        ("score".to_string(), if item.score > 0.0 { json!(item.score) } else { Value::Null }),
+        ("severity".to_string(), json!(item.severity.trim().to_uppercase())),
+        ("exploited".to_string(), json!(!src.is_empty())),
+        ("exploited_source".to_string(), json!(src)),
+    ]
 }
 
 fn issue_created_event(key: &str, issue: &IssueRef, at: &str, ts: DateTime<Utc>, source: &str) -> Value {
@@ -986,6 +1024,9 @@ mod tests {
         assert_eq!(ev[0]["components_sha256"], "abc");
         assert_eq!(ev[0]["component"], "tokio");
         assert_eq!(ev[2]["triager"], "matcher 1/3");
+        // risk fields: a KEV item is exploited; unscored -> null score
+        assert_eq!((ev[0]["score"].clone(), ev[0]["severity"].clone()), (Value::Null, json!("")));
+        assert_eq!((ev[0]["exploited"].clone(), ev[0]["exploited_source"].clone()), (json!(true), json!("CISA KEV")));
         assert!(s.pending_events().is_empty());
 
         // Henry accepts with an owner and a due date; Linear's read-back.
@@ -1023,6 +1064,27 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), ev.len());
         assert_eq!(Store::load().unwrap().records.len(), 0);
+    }
+
+    /// Known exploited: KEV and EUVD items, merged rows, CVE.org with SSVC "active".
+    #[test]
+    fn exploited_rule_and_risk_fields() {
+        let mut cve = Item::new("CVE.org cvelistV5", "CVE-9", "u", "t", "2026-11-03");
+        cve.score = 9.8;
+        cve.severity = "critical".into();
+        assert_eq!(exploited_source(&cve), "");
+        cve.extra.insert("ssvc_exploitation".into(), json!("poc"));
+        assert_eq!(exploited_source(&cve), "", "a proof of concept is not exploitation");
+        cve.extra.insert("ssvc_exploitation".into(), json!("active"));
+        assert_eq!(exploited_source(&cve), "SSVC active");
+        let risk: serde_json::Map<String, Value> = item_risk(&cve).into_iter().collect();
+        assert_eq!(Value::Object(risk), json!({"score": 9.8, "severity": "CRITICAL", "exploited": true,
+                                               "exploited_source": "SSVC active"}));
+        assert_eq!(exploited_source(&Item::new("ENISA EUVD", "CVE-9", "u", "t", "d")), "ENISA EUVD");
+        let mut merged = Item::new("ENISA EUVD", "CVE-9", "u", "t", "d");
+        merged.extra.insert("sources".into(), json!(["CISA KEV", "ENISA EUVD"]));
+        assert_eq!(exploited_source(&merged), "CISA KEV", "CISA wins on a merged row");
+        assert_eq!(exploited_source(&Item::new("GitHub Advisory", "GHSA-1", "u", "t", "d")), "");
     }
 
     /// A preview run never saves, so its decisions never reach the log.

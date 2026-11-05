@@ -15,6 +15,8 @@ pub struct Ev {
     pub kind: String,
     pub key: String,
     pub at: DateTime<Utc>,
+    /// Line number in the log: the order the job learned things in.
+    pub seq: usize,
     pub v: Value,
 }
 
@@ -71,7 +73,7 @@ pub fn read_events(raw: &str) -> Result<Log, String> {
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let (kind, key) = (s("event"), s("key"));
         let id = v.get("id").and_then(Value::as_str).map(String::from);
-        parsed.push((i, Ev { kind, key, at, v }, id));
+        parsed.push((i, Ev { kind, key, at, seq: i, v }, id));
     }
     let coverage_from = coverage_from.ok_or("the event log has no line with a readable `ts`")?;
 
@@ -109,6 +111,26 @@ pub fn read_events(raw: &str) -> Result<Log, String> {
         half_written_tail,
         duplicates,
     })
+}
+
+/// `decided` events logged before 2026-11-05 lack score, severity, exploited and
+/// exploited_source. Fill them, in memory only, from the item copy the store still
+/// holds (triage.json `records[key].item`); the log itself is never rewritten. A
+/// key no longer in triage.json keeps the gap (shown as unscored, not exploited).
+/// Returns how many events were filled.
+pub fn backfill(log: &mut Log, triage: &Value) -> usize {
+    let mut n = 0;
+    for e in log.events.iter_mut().filter(|e| e.kind == "decided" && e.v.get("exploited").is_none()) {
+        // triage.json is the records map itself (Store is serde-transparent).
+        let Some(item) = triage.get(&e.key).and_then(|r| r.get("item"))
+            .and_then(|v| serde_json::from_value::<crate::feeds::common::Item>(v.clone()).ok()) else { continue };
+        if let Value::Object(o) = &mut e.v {
+            o.extend(crate::triage::store::item_risk(&item));
+            o.insert("backfilled".into(), Value::Bool(true));
+            n += 1;
+        }
+    }
+    n
 }
 
 /// One runs.jsonl line with a readable `run_at`.
@@ -163,6 +185,15 @@ pub struct Item {
     pub source: String,
     pub title: String,
     pub url: String,
+    /// Source-native id (CVE-…, GHSA-…) and the CVEs the item names.
+    pub item_id: String,
+    pub cves: Vec<String>,
+    /// CVSS base score (None: unscored) and severity, from the `decided` event.
+    pub score: Option<f64>,
+    pub severity: String,
+    /// Known exploited and why (triage::store::exploited_source; widened by build.rs).
+    pub exploited: bool,
+    pub exploited_source: String,
     pub identifier: String,
     pub issue_url: String,
     pub issue_created: Option<DateTime<Utc>>,
@@ -171,6 +202,8 @@ pub struct Item {
     pub state: String,
     pub state_name: String,
     pub state_at: Option<DateTime<Utc>>,
+    /// Ev::seq of the state_changed that set `state`.
+    pub state_seq: usize,
     pub assignee: String,
     pub due: String,
     pub reason: String,
@@ -194,6 +227,13 @@ pub fn replay(events: &[Ev], until: DateTime<Utc>) -> BTreeMap<String, Item> {
                 it.source = e.s("item_source").into();
                 it.title = e.s("title").into();
                 it.url = e.s("url").into();
+                it.item_id = e.s("item_id").into();
+                it.cves = e.v.get("cves").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str).map(String::from).collect();
+                it.score = e.v.get("score").and_then(Value::as_f64).filter(|s| *s > 0.0);
+                it.severity = e.s("severity").into();
+                it.exploited = e.v.get("exploited").and_then(Value::as_bool).unwrap_or(false);
+                it.exploited_source = e.s("exploited_source").into();
             }
             "issue_created" => {
                 it.identifier = e.s("identifier").into();
@@ -205,10 +245,13 @@ pub fn replay(events: &[Ev], until: DateTime<Utc>) -> BTreeMap<String, Item> {
                     it.first_triaged = Some(Triaged { at: e.at, state: e.s("state").into(), actor: e.s("actor").into() });
                 }
             }
-            "state_changed" => {
+            // The state is the one logged last, not the one with the latest `at`: a
+            // reopened ticket carries its triage time, earlier than the cancel it undoes.
+            "state_changed" if it.state_at.is_none() || e.seq >= it.state_seq => {
                 it.state = e.s("to").into();
                 it.state_name = e.s("state_name").into();
                 it.state_at = Some(e.at);
+                it.state_seq = e.seq;
             }
             "field_changed" => {
                 let to = e.s("to").to_string();

@@ -6,12 +6,17 @@
 //! Interface fixed on 2026-11-05 so `run` (month-to-date PDF every writing run),
 //! `serve` (refresh on click) and the `report` subcommand share one engine.
 //!
-//!   model.rs    read the event log (tolerant) and runs.jsonl, replay per key
-//!   build.rs    the report sections and their definitions
+//! Layout approved by Henry on 2026-11-05: page 1 for the COO (overall status with a
+//! bottom line, attention list, KPIs against target and the previous month, open
+//! actions, resolved items, coverage), then detail and an audit appendix.
+//!
+//!   model.rs    read the event log (tolerant) and runs.jsonl, replay per key; fill
+//!               score/severity/exploited of older `decided` lines from triage.json
+//!   build.rs    the report sections, KPIs, RAG status and their definitions
 //!   pdf.rs      report.typ + data.json -> PDF/A-2b through the typst CLI
 //!
-//! The report takes no lock: it only reads the event log, and a last line still
-//! being written is skipped (model::read_events). data_sha is the sha256 of
+//! The report takes no lock: it only reads the event log (and triage.json for the
+//! backfill), and a last line still being written is skipped (model::read_events). data_sha is the sha256 of
 //! report.json without `generated_at`, serialised compact with sorted keys, so two
 //! reports of equal data have equal data_sha.
 
@@ -130,8 +135,10 @@ pub struct Generated {
     pub upload_error: Option<String>,
 }
 
-/// The sections whose change makes a new month-to-date upload worth it.
-const CONTENT_KEYS: [&str; 6] = ["components", "intake", "triage", "actions_taken", "actions_open", "exceptions"];
+/// The sections whose change makes a new month-to-date upload worth it. They do not
+/// move with the clock alone (no ages, no run counts, no cut-off time).
+const CONTENT_KEYS: [&str; 10] = ["components", "status", "bottom_line", "attention", "kpis", "open_actions",
+                                  "resolved", "outcomes", "funnel", "exceptions"];
 
 /// sha256 of the content sections of report.json (CONTENT_KEYS).
 pub fn content_sha(report: &Value) -> String {
@@ -161,7 +168,7 @@ pub fn generate(period: &Period, now: DateTime<Utc>, opts: &Opts) -> Result<Gene
     let raw = state::load_bytes(EVENTS_FILE).ok_or_else(|| Fatal(format!(
         "report: {}/{EVENTS_FILE} not found; the event log is started by the first writing `run` (since 2026-11-05)",
         state::dir().display())))?;
-    let log = model::read_events(&String::from_utf8_lossy(&raw))
+    let mut log = model::read_events(&String::from_utf8_lossy(&raw))
         .map_err(|e| Fatal(format!("report: {}/{EVENTS_FILE}: {e}", state::dir().display())))?;
     let (start, end) = period.bounds(now);
     if end <= log.coverage_from {
@@ -170,6 +177,9 @@ pub fn generate(period: &Period, now: DateTime<Utc>, opts: &Opts) -> Result<Gene
             period.month_name(now), build::local(end), build::local(log.coverage_from))));
     }
     let runs = model::read_runs(&String::from_utf8_lossy(&state::load_bytes("runs.jsonl").unwrap_or_default()));
+    // Older `decided` lines lack score, severity and exploited: take them from triage.json.
+    model::backfill(&mut log, &state::load_json::<Value>(crate::triage::store::FILE).unwrap_or(Value::Null));
+    let list = crate::triage::components::load().ok().map(|c| (c.sha256.clone(), c.components.len()));
     let cut = end.min(now);
     let as_of = opts.tickets_as_of
         .or_else(|| runs.iter().filter(|r| r.read_back() && r.at <= cut).map(|r| r.at).max())
@@ -178,7 +188,9 @@ pub fn generate(period: &Period, now: DateTime<Utc>, opts: &Opts) -> Result<Gene
         .min(cut);
 
     let label = period.label(now);
-    let mut data = build::build(&log, &runs, &build::Frame { start, end, cut, as_of });
+    let mut data = build::build(&log, &runs, &build::Frame {
+        start, end, cut, as_of, mtd: *period == Period::MonthToDate, list,
+    });
     data["label"] = json!(label);
     // UTC twin of tickets_as_of (local), read by `serve` to label the last PDF.
     data["as_of"] = json!(iso_utc(as_of));

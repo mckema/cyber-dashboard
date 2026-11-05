@@ -1,44 +1,63 @@
-// FR-A4 resolution report. Compiled by report/pdf.rs with data.json (report.json
-// plus data_sha) next to it; only typst's embedded fonts are used.
+// Cyber threat report (FR-A4). Compiled by report/pdf.rs with data.json (report.json
+// plus data_sha) next to it; only typst's embedded fonts are used. Layout approved
+// on 2026-11-05: page 1 for the COO, then detail, then the audit appendix.
 #let d = json("data.json")
 #let lab = d.tracker.lab_data
-#let tlp = box(fill: black, inset: (x: 4pt, y: 2.5pt), radius: 1pt,
-  text(fill: rgb("#FFC000"), weight: "bold", font: "DejaVu Sans Mono", size: 8pt)[TLP:AMBER+STRICT])
-#let labtag = box(fill: rgb("#B00020"), inset: (x: 4pt, y: 2.5pt), radius: 1pt,
-  text(fill: white, weight: "bold", font: "DejaVu Sans Mono", size: 8pt)[LAB DATA])
+#let mtd = d.period.kind == "month-to-date"
+
+// FIRST TLP 2.0: the label in amber (#FFC000) on black, at least 11 pt.
+#let tlp = box(fill: black, inset: (x: 5pt, y: 3pt), radius: 1pt,
+  text(fill: rgb("#FFC000"), weight: "bold", font: "DejaVu Sans Mono", size: 11pt)[TLP:AMBER+STRICT])
+#let labtag = box(fill: rgb("#B00020"), inset: (x: 4pt, y: 3pt), radius: 1pt,
+  text(fill: white, weight: "bold", font: "DejaVu Sans Mono", size: 9pt)[LAB DATA])
+
+#let rag-fill = (GREEN: rgb("#1e7b34"), AMBER: rgb("#c77700"), RED: rgb("#b00020"))
+#let rag-tint = (Green: rgb("#e3f2e6"), Amber: rgb("#fff1d6"), Red: rgb("#fbe3e6"))
+#let warn = text(font: "DejaVu Sans Mono", fill: rgb("#c77700"), weight: "bold")[⚠]
 
 // Times in data.json are Amsterdam local with offset: show "YYYY-MM-DD HH:MM".
 #let short(t) = if t == none { "–" } else { t.slice(0, 16).replace("T", " ") }
-#let day(t) = if t == none { "–" } else { t.slice(0, 10) }
-#let dash(s) = if s == none or s == "" { "–" } else { str(s) }
-#let num(x) = if x == none { "–" } else { str(x) }
+#let dash(s) = if s == none or s == "" { "—" } else { str(s) }
+#let num(x) = if x == none { "—" } else { str(x) }
+// 3855 -> "3,855"
+#let thou(n) = {
+  let s = str(n)
+  let c = s.clusters()
+  let out = ""
+  for (i, ch) in c.enumerate() {
+    if i > 0 and calc.rem(c.len() - i, 3) == 0 { out += "," }
+    out += ch
+  }
+  out
+}
 #let cut(s, n) = {
   let c = s.clusters()
   if c.len() > n { c.slice(0, n).join() + "…" } else { s }
 }
 #let ticket(i) = if i.identifier == "" { text(size: 7.5pt, i.key) } else { link(i.url, i.identifier) }
+#let sev(i) = if i.severity == "" { "—" } else if i.score == none { i.severity } else [#i.severity #text(size: 7.5pt)[#i.score]]
 
-#set document(title: d.label, author: "Exploit Watch (fairCT)")
-#set text(font: "Libertinus Serif", size: 9.5pt, lang: "en")
-#set par(justify: false)
+#set document(title: d.title, author: "Exploit Watch (fairCT)")
+#set text(font: "Libertinus Serif", size: 10pt, lang: "en")
+#set par(justify: false, leading: 0.55em)
 #set page(
   paper: "a4",
-  margin: (x: 1.7cm, top: 2.4cm, bottom: 2.2cm),
+  margin: (x: 1.6cm, top: 2.2cm, bottom: 2.1cm),
   header: {
     set text(size: 8.5pt)
     grid(columns: (1fr, auto), align: (left + horizon, right + horizon), column-gutter: 6pt,
-      d.label,
+      [Cyber threat report · #d.period.month · #d.document.id],
       { if lab { labtag; h(4pt) }; tlp })
-    v(-4pt)
+    v(-3pt)
     line(length: 100%, stroke: 0.4pt + gray)
   },
   footer: context {
-    set text(size: 7.5pt, fill: luma(80))
+    set text(size: 7.5pt, fill: luma(70))
     line(length: 100%, stroke: 0.4pt + gray)
-    v(-4pt)
-    grid(columns: (1fr, auto, auto), column-gutter: 14pt,
-      [Generated #short(d.generated_at) (Europe/Amsterdam) · data sha256 #raw(d.data_sha.slice(0, 12))],
-      if lab [*LAB DATA*] else [],
+    v(-3pt)
+    grid(columns: (auto, 1fr, auto), column-gutter: 10pt, align: (left + horizon, left + horizon, right + horizon),
+      tlp,
+      [Generated #short(d.generated_at) (Amsterdam) · data sha256 #raw(d.data_sha.slice(0, 12))#if lab [ · *LAB DATA*]],
       [Page #counter(page).display() / #counter(page).final().first()])
   },
   background: if lab {
@@ -46,139 +65,175 @@
   },
 )
 #set table(stroke: 0.4pt + luma(170), inset: (x: 4pt, y: 3pt))
-#show heading.where(level: 1): set block(above: 1.3em, below: 0.6em)
-#show heading.where(level: 2): set block(above: 1em, below: 0.5em)
+#show table: set text(size: 8.5pt)
+#show heading.where(level: 1): set text(size: 13pt)
+#show heading.where(level: 1): set block(above: 1.1em, below: 0.6em)
+#show heading.where(level: 2): set text(size: 11pt)
+#show heading.where(level: 2): set block(above: 0.9em, below: 0.45em)
+#show heading.where(level: 3): set block(above: 0.8em, below: 0.4em)
 #show link: set text(fill: rgb("#1a4f8b"))
 
 #let none-row = emph[None.]
 #let maybe-table(items, cols, head, f) = if items.len() == 0 { none-row } else {
   table(columns: cols, table.header(..head.map(strong)), ..items.map(f).flatten())
 }
+#let notice(fill, stroke, body) = block(fill: fill, stroke: 0.6pt + stroke, inset: (x: 6pt, y: 4pt), width: 100%, below: 0.5em, text(size: 9pt, body))
 
-// ------------------------------------------------------------------ title
-#text(size: 17pt, weight: "bold")[Cyber threat report]
-#v(-6pt)
-#text(size: 12pt)[#d.label]
+// ================================================================== page 1
+#text(size: 17pt, weight: "bold")[#d.title]
+#v(-8pt)
+#text(size: 10.5pt)[#d.subtitle] \
+#text(size: 9pt, fill: luma(60))[Period #d.period.text · generated #short(d.generated_at) (Europe/Amsterdam) · tickets as of #short(d.tickets_as_of)]
 
-#if lab [
-  #block(fill: rgb("#fde7ea"), stroke: 0.6pt + rgb("#B00020"), inset: 6pt, width: 100%)[
-    *LAB DATA.* The tracker is the local `linear-mock` (#d.tracker.endpoint): tickets, owners and dates are test data, not fairCT's.
-  ]
-]
-#if d.coverage.partial [
-  #block(fill: rgb("#fff4d6"), stroke: 0.6pt + rgb("#c58a00"), inset: 6pt, width: 100%)[
-    *History covers from #short(d.coverage.from).* The event log starts then, so counts for the period before that moment are incomplete.
-  ]
-]
-#if not d.period.complete [
-  #block(fill: luma(240), inset: 6pt, width: 100%)[
-    The period is not over: figures run to #short(d.period.data_to).
-  ]
+#if lab {
+  notice(rgb("#fde7ea"), rgb("#B00020"))[*LAB DATA* – tickets, owners and dates come from a test tracker, not from fairCT's.]
+}
+#if d.coverage.partial {
+  notice(rgb("#fff4d6"), rgb("#c58a00"))[*Partial history* – records start on #short(d.coverage.from)#[;] figures before that moment are incomplete.]
+}
+
+// ------------------------------------------------------------------ status and bottom line
+#let rag = d.status.rag
+#block(stroke: 0.8pt + rag-fill.at(rag), inset: 7pt, width: 100%, radius: 2pt, below: 0.8em)[
+  #grid(columns: (auto, 1fr), column-gutter: 10pt, align: (center + horizon, left + horizon),
+    box(fill: rag-fill.at(rag), inset: (x: 8pt, y: 6pt), radius: 2pt)[
+      #set align(center)
+      #text(fill: white, size: 7.5pt)[OVERALL STATUS] \
+      #text(fill: white, size: 15pt, weight: "bold")[#rag]
+    ],
+    d.bottom_line.join(" "),
+  )
 ]
 
-#table(columns: (auto, 1fr), stroke: none, inset: (x: 0pt, y: 2.5pt), column-gutter: 10pt,
-  [*Period*], [#short(d.period.start) to #short(d.period.end) (Europe/Amsterdam; end excluded)],
-  [*Generated*], [#short(d.generated_at)],
-  [*Tickets as of*], [#short(d.tickets_as_of) (last read-back from the tracker included)],
-  [*History covers from*], [#short(d.coverage.from)],
-  [*Component list*], [#if d.components.len() == 0 [no decisions in the period] else {
-    d.components.map(c => [#c.version (sha256 #raw(c.sha256.slice(0, calc.min(12, c.sha256.len()))), #c.decisions decisions)]).join([; ])
-  }],
-  [*Tracker*], [#dash(d.tracker.endpoint)#if lab [ — *LAB DATA*]],
-  [*Job runs*], [#d.runs.writing writing runs#if d.runs.writing > 0 [ (#d.runs.by_result.pairs().map(((k, v)) => [#k #v]).join([, ]))]],
-  [*Data sha256*], [#raw(d.data_sha)],
-  [*Distribution*], [#tlp internal to fairCT: the COO and those who need it; no external sharing],
+// ------------------------------------------------------------------ attention
+== Attention / decisions needed
+#if d.attention.len() == 0 [
+  #if mtd [None so far this month.] else [None this month.]
+] else {
+  set text(size: 9.5pt)
+  list(..d.attention.map(a => [#text(fill: rag-fill.at(a.rag), weight: "bold", size: 8pt)[#a.rag] #a.text]))
+}
+
+// ------------------------------------------------------------------ KPIs
+== Key figures
+#let status-cell(s) = if s == "—" { [—] } else {
+  table.cell(fill: rag-tint.at(s))[#text(fill: rag-fill.at(upper(s)), weight: "bold")[#s]]
+}
+#table(columns: (1fr, auto, auto, auto, auto),
+  align: (left, left, left, left, left),
+  table.header([*Measure*], [*This period*], [*Target*], [*Status*], [*vs #d.previous.label*]),
+  ..d.kpis.map(k => (k.label, k.value, k.target, status-cell(k.status), k.previous)).flatten())
+
+// ------------------------------------------------------------------ open actions
+== Open actions and plans
+#if d.open_actions.items.len() == 0 [
+  No open actions: nothing is waiting on fairCT.
+] else {
+  table(columns: (auto, 1fr, auto, auto, auto, auto, auto, auto),
+    table.header([*Ticket*], [*Vulnerability*], [*Component*], [*Exploited*], [*Severity*], [*Owner*], [*Due*], [*Status*]),
+    ..d.open_actions.items.map(i => {
+      let f = if i.overdue { rgb("#fbe3e6") } else { none }
+      (
+        table.cell(fill: f, ticket(i)),
+        table.cell(fill: f)[#i.vulnerability \ #text(size: 7.5pt, fill: luma(60), cut(i.title, 60))],
+        table.cell(fill: f, dash(i.component)),
+        table.cell(fill: f, if i.exploited [*yes* \ #text(size: 7.5pt, i.exploited_source)] else [no]),
+        table.cell(fill: f, sev(i)),
+        table.cell(fill: f, if i.owner == "" [*none*] else { i.owner }),
+        table.cell(fill: f, if i.due == "" [*none*] else if i.overdue [*#i.due* \ #text(size: 7.5pt, fill: rgb("#b00020"), weight: "bold")[OVERDUE]] else { i.due }),
+        table.cell(fill: f, dash(i.state_name)),
+      )
+    }).flatten())
+}
+
+// ------------------------------------------------------------------ resolved
+== Resolved in the period
+#if d.resolved.len() == 0 [
+  Nothing was resolved in the period.
+] else {
+  set text(size: 9.5pt)
+  list(..d.resolved.map(r => [#ticket(r) · #r.vulnerability (#cut(r.title, 50)) — #r.outcome#if r.warn and r.outcome.ends-with("no reason given") [ #warn]]))
+}
+
+// ------------------------------------------------------------------ coverage
+#v(0.4em)
+#block(fill: luma(244), inset: 6pt, width: 100%, text(size: 8.5pt)[*Coverage.* #d.monitoring.sentence])
+
+// ================================================================== detail
+#pagebreak(weak: true)
+= Detail
+
+== Assessment funnel
+#let f = d.funnel
+#let stage(n, l) = box(stroke: 0.4pt + luma(150), inset: (x: 5pt, y: 4pt), radius: 2pt)[
+  #align(center)[#text(size: 13pt, weight: "bold", if type(n) == content { n } else { thou(n) }) \ #text(size: 7.5pt, l)]]
+#let arrow = text(size: 12pt, fill: luma(110))[→]
+#grid(columns: (1fr, auto, 1fr, auto, 1fr, auto, 1fr, auto, 1.3fr), column-gutter: 3pt, align: horizon,
+  stage(f.notices, [new public notices]), arrow,
+  stage(f.auto_ruled_out, [automatically ruled out]), arrow,
+  stage(f.relevant, [relevant to fairCT]), arrow,
+  stage(f.assessed, [assessed]), arrow,
+  stage([#f.action_planned / #f.ruled_out_by_person / #f.waiting], [action planned / ruled out by a person / waiting]),
 )
 
-== Summary
-#let kpi(n, l) = box(width: 100%, stroke: 0.4pt + luma(170), inset: 5pt)[
-  #align(center)[#text(size: 15pt, weight: "bold", str(n)) \ #text(size: 8pt, l)]]
-#grid(columns: (1fr,) * 6, column-gutter: 5pt,
-  kpi(d.intake.total, [items assessed]),
-  kpi(d.triage.matched, [matched]),
-  kpi(d.triage.triaged.total, [triaged]),
-  kpi(d.triage.untriaged_at_end, [untriaged at end]),
-  kpi(d.actions_taken.done_count, [done]),
-  kpi(d.actions_open.count, [open (#d.actions_open.overdue overdue)]),
-)
+Time to assess (Amsterdam business hours, Monday–Friday, from first seen to the decision in the tracker), #f.time_to_assess.count items: median #num(f.time_to_assess.median_business_hours) h, maximum #num(f.time_to_assess.max_business_hours) h. Target: within 1 business day (24 business hours).
 
-== Feed health (writing runs in the period)
-#maybe-table(d.feeds, (1fr, auto, auto, 2fr, auto),
-  ([Feed], [Runs], [OK], [By status], [Last]),
-  f => (f.feed, str(f.runs), str(f.ok), f.by_status.pairs().map(((k, v)) => k + " " + str(v)).join(", "), f.last_status))
+=== Over 1 business day
+#maybe-table(f.over_one_day, (auto, auto, 1fr, auto, auto, auto),
+  ([Ticket], [Vulnerability], [Title], [First seen], [Assessed], [Business h]),
+  i => (ticket(i), i.vulnerability, cut(i.title, 60), short(i.first_seen),
+        if i.assessed_at == none [*not yet*] else { short(i.assessed_at) }, num(i.business_hours)))
 
-= Intake
-Items first seen in the period, as decided by the matcher.
-#maybe-table(d.intake.by_source, (1fr, auto, auto, auto),
-  ([Source], [Items], [Matched], [Not relevant]),
-  s => (s.source, str(s.total), str(s.matched), str(s.not_relevant)))
-#if d.intake.by_source.len() > 0 [Total #d.intake.total: #d.intake.matched matched, #d.intake.not_relevant not relevant by rule.]
+=== By source
+#maybe-table(f.by_source, (1fr, auto, auto, auto),
+  ([Source], [Notices], [Relevant to fairCT], [Automatically ruled out]),
+  s => (s.source, thou(s.total), thou(s.relevant), thou(s.auto_ruled_out)))
 
-= Triage (FR-A2)
-#table(columns: (1fr, auto),
-  table.header([*Measure*], [*Count*]),
-  [Not relevant by rule (decided by the matcher, first seen in the period)], str(d.triage.auto_not_relevant),
-  [Matched (first seen in the period)], str(d.triage.matched),
-  [Triaged in Linear in the period (any first-seen date)], str(d.triage.triaged.total),
-  [#h(1em) accepted], str(d.triage.triaged.accepted),
-  [#h(1em) declined with a reason], str(d.triage.triaged.declined_with_reason),
-  [#h(1em) declined without a reason], str(d.triage.triaged.declined_without_reason),
-  [Untriaged at the end of the period], str(d.triage.untriaged_at_end),
-)
-Time to triage (Amsterdam business hours, Monday–Friday, from first seen to the triage in Linear), #d.triage.time_to_triage.count items:
-median #num(d.triage.time_to_triage.median_business_hours) h, max #num(d.triage.time_to_triage.max_business_hours) h. Target: within one business day (24 business hours).
-
-=== Over one business day
-#maybe-table(d.triage.sla_breaches, (auto, 1fr, auto, auto, auto),
-  ([Ticket], [Title], [First seen], [Triaged], [Business h]),
-  i => (ticket(i), cut(i.title, 110), short(i.first_seen),
-        if i.triaged_at == none [*not yet*] else { short(i.triaged_at) }, str(i.business_hours)))
-
-= Actions taken
-== Done in the period
-#maybe-table(d.actions_taken.done, (auto, 1fr, auto, auto, auto, auto, auto),
-  ([Ticket], [Title], [Component], [Owner], [Due], [Closed], [On time]),
-  i => (ticket(i), cut(i.title, 90), dash(i.component), dash(i.owner), dash(i.due), short(i.closed_at),
-        if i.on_time == none [no due date] else if i.on_time [yes] else [*no*]))
-#if d.actions_taken.done_count > 0 [
-  #d.actions_taken.done_count done: #d.actions_taken.on_time on time, #d.actions_taken.late late, #d.actions_taken.no_due without a due date.
-  Median time to resolve (first seen to done): #num(d.actions_taken.mttr_median_days) days.
+== Fixed in the period
+#let o = d.outcomes
+#maybe-table(o.fixed, (auto, auto, 1fr, auto, auto, auto, auto),
+  ([Ticket], [Vulnerability], [Title], [Owner], [Due], [Fixed], [By due date]),
+  i => (ticket(i), i.vulnerability, cut(i.title, 60), dash(i.owner), dash(i.due), short(i.closed_at),
+        if i.on_time == none [no due date] else if i.on_time [on time] else [*late*]))
+#if o.fixed_count > 0 [
+  #o.fixed_count fixed: #o.on_time on time, #o.late late, #o.no_due without a due date. Median time to fix (first seen to fixed): #num(o.mttr_median_days) days.
 ]
 
-== Canceled after acceptance
-#maybe-table(d.actions_taken.canceled, (auto, 1fr, auto, auto, auto),
-  ([Ticket], [Title], [Component], [Owner], [Canceled]),
-  i => (ticket(i), cut(i.title, 100), dash(i.component), dash(i.owner), short(i.closed_at)))
+== Closed without fix
+#maybe-table(o.closed_without_fix, (auto, auto, 1fr, auto, auto),
+  ([Ticket], [Vulnerability], [Title], [Owner], [Closed]),
+  i => (ticket(i), i.vulnerability, cut(i.title, 60), dash(i.owner), short(i.closed_at)))
 
-== Declined in the period
-#maybe-table(d.actions_taken.declined, (auto, 1fr, auto, 1fr, auto),
-  ([Ticket], [Title], [By], [Reason], [Declined]),
-  i => (ticket(i), cut(i.title, 80), dash(i.actor),
-        if i.reason == "" [*no reason given*] else { cut(i.reason, 160) }, short(i.declined_at)))
+== Ruled out by a person
+#maybe-table(o.ruled_out, (auto, auto, 1fr, auto, 1fr, auto),
+  ([Ticket], [Vulnerability], [Title], [By], [Reason], [When]),
+  i => (ticket(i), i.vulnerability, cut(i.title, 50), dash(i.actor),
+        if i.reason == "" [*no reason given* #warn] else { cut(i.reason, 140) }, short(i.declined_at)))
 
-= Actions open (with plans)
-Tickets accepted and not closed at #short(d.period.data_to): the owner and due date are the plan.
-#maybe-table(d.actions_open.items, (auto, 1fr, auto, auto, auto, auto, auto),
-  ([Ticket], [Title], [Component], [Owner], [Due], [Status], [Age (d)]),
-  i => (ticket(i), cut(i.title, 90), dash(i.component),
-        if i.owner == "" [*no owner*] else { i.owner },
-        if i.due == "" [*no due date*] else if i.overdue [*#i.due (overdue)*] else { i.due },
-        dash(i.state_name), num(i.age_days)))
-
-= Exceptions
+== Exceptions
 #let ex = d.exceptions
 #let idlist(xs) = if xs.len() == 0 { none-row } else {
-  list(..xs.map(x => [#if x.identifier != "" [#x.identifier: ]#cut(x.title, 120)]))
+  list(..xs.map(x => [#if x.identifier != "" [#x.identifier: ]#cut(x.title, 100)]))
 }
-*Open tickets without an owner* (#ex.open_without_owner.len()): #idlist(ex.open_without_owner)
+#set text(size: 9.5pt)
+*Overdue actions* (#ex.overdue.len()): #idlist(ex.overdue)
 
-*Open tickets without a due date* (#ex.open_without_due.len()): #idlist(ex.open_without_due)
+*Open actions without an owner* (#ex.open_without_owner.len()): #idlist(ex.open_without_owner)
 
-*Declined without a reason* (#ex.declined_without_reason.len()): #idlist(ex.declined_without_reason)
+*Open actions without a due date* (#ex.open_without_due.len()): #idlist(ex.open_without_due)
 
-*Triaged without a recorded actor* (#ex.triaged_without_actor.len()): #idlist(ex.triaged_without_actor)
+*Relevant items not assessed after more than 1 business day* (#ex.unassessed_over_one_day.len()): #idlist(ex.unassessed_over_one_day)
 
-*Tracker errors in the period* (#ex.tracker_errors.len()):
+*Ruled out by a person without a reason* (#ex.declined_without_reason.len()): #idlist(ex.declined_without_reason)
+
+*Assessed without a recorded person* (#ex.triaged_without_actor.len()): #idlist(ex.triaged_without_actor)
+
+*Sources not healthy in the last run* (#ex.sources_unhealthy.len()):
+#if ex.sources_unhealthy.len() == 0 { none-row } else {
+  list(..ex.sources_unhealthy.map(s => [#s.feed: #s.status]))
+}
+
+*Ticket tracker errors in the period* (#ex.tracker_errors.len()):
 #if ex.tracker_errors.len() == 0 { none-row } else {
   table(columns: (auto, 1fr), table.header([*Run*], [*Error*]),
     ..ex.tracker_errors.map(e => (short(e.run_at), text(size: 8pt, e.error))).flatten())
@@ -187,11 +242,57 @@ Tickets accepted and not closed at #short(d.period.data_to): the owner and due d
   *Unreadable event log lines skipped:* #ex.log_lines_skipped.
 ]
 
-= Definitions
+// ================================================================== appendix
+#set text(size: 10pt)
+#pagebreak(weak: true)
+= Appendix (audit)
+
+== Report provenance
+#table(columns: (auto, 1fr), stroke: none, inset: (x: 0pt, y: 2.5pt), column-gutter: 10pt,
+  [*Period*], [#short(d.period.start) to #short(d.period.end) (Europe/Amsterdam; end excluded)#if not d.period.complete [; figures to #short(d.period.data_to)]],
+  [*Generated*], [#short(d.generated_at)],
+  [*Tickets as of*], [#short(d.tickets_as_of) (last read-back from the tracker included)],
+  [*History covers from*], [#short(d.coverage.from)#if d.coverage.partial [ (after the period start: partial)]#[;] #thou(d.coverage.duplicates_dropped) repeated events dropped#if d.coverage.half_written_tail [; a half-written last line skipped]#if d.coverage.backfilled > 0 [; risk fields of #thou(d.coverage.backfilled) older decisions taken from triage.json]],
+  [*Component list*], [#if d.component_list.version == "" [—] else [#d.component_list.version#if d.component_list.count != none [ (#d.component_list.count components)], sha256 #raw(d.component_list.sha256)]#if d.components.len() > 1 [; decisions in the period: #d.components.map(c => [#c.version (#c.decisions)]).join([, ])]],
+  [*Tracker*], [#dash(d.tracker.endpoint)#if lab [ — *LAB DATA*]],
+  [*Scheduled runs*], [#d.runs.writing#if d.runs.writing > 0 [ (#d.runs.by_result.pairs().map(((k, v)) => [#k #v]).join([, ]))]],
+  [*Data sha256*], [#raw(d.data_sha)],
+  [*Source files*], [`triage-events.jsonl` (event log), `runs.jsonl` (run log), `triage.json` (item copies for older decisions); output `report.json`, `report.pdf`, `SHA256SUMS`],
+)
+
+=== Feed health (last scheduled run of the period)
+#maybe-table(d.feeds, (1fr, auto, auto, 2fr, auto),
+  ([Source], [Runs], [OK], [By status], [Last run]),
+  f => (f.feed, str(f.runs), str(f.ok), f.by_status.pairs().map(((k, v)) => k + " " + str(v)).join(", "),
+        if f.healthy { f.last_status } else { strong(f.last_status) }))
+#if d.feeds_removed.len() > 0 [
+  Removed during the period: #d.feeds_removed.join(", ").
+]
+
+== Definitions
 #set text(size: 8.5pt)
-- Source: the append-only triage event log of Exploit Watch (`triage-events.jsonl`) and its run log (`runs.jsonl`). Events are placed at the time the tracker gives (Linear `triagedAt`, `completedAt`, `canceledAt`), not when they were logged; repeated events are counted once.
-- *Triaged* counts an item in the period of its first triage in Linear. *Declined with a reason* uses the reason known at the end of the period. *Untriaged* means matched and still in Linear's Triage inbox (or not filed yet).
-- *Time to triage* counts Monday to Friday in Europe/Amsterdam time, no holiday calendar, as on the dashboard.
-- *On time*: closed on or before the due date (Amsterdam date). *Overdue*: due date before the end of the period. *Age*: days since the ticket was filed.
-- *Canceled after acceptance* is a ticket accepted, then canceled in Linear; it is closed, not declined.
-- *Data sha256* is the sha256 of report.json without its `generated_at`: two reports with equal data have equal values.
+- *Source of the figures*: the append-only event log of Exploit Watch and its run log. Events are placed at the time the tracker gives (when the ticket was triaged, completed or canceled), not when they were logged; repeated events are counted once.
+- *New public vulnerability notice*: an item first seen by the job in the period, from any monitored source. *Automatically ruled out*: no component on fairCT's list matches it (decided by rule). *Relevant to fairCT*: it matches a listed component; a ticket is filed.
+- *Assessed*: a person decided on the ticket in the tracker: *action planned* (accepted) or *ruled out by a person* (declined, with a reason). Counted for the items relevant in the period, whenever the decision came. *Time to assess* counts Monday to Friday in Europe/Amsterdam time, no holiday calendar.
+- *Open action*: accepted and not closed at the end of the period; the owner and due date are the plan. *Overdue*: due date before the end of the period. *Fixed*: done in the tracker; *on time* when closed on or before the due date (Amsterdam date). *Closed without fix*: accepted, then canceled.
+- *Known exploited*: the item comes from the CISA Known Exploited Vulnerabilities catalog or ENISA EUVD's exploited list, its CVE.org record has CISA's SSVC "Exploitation: active", or one of its CVEs was seen in CISA KEV or ENISA EUVD by the end of the period.
+- *Sources healthy*: sources fetched in the last scheduled run of the period, or read from the job's cache within their polling interval; *stale* or *failing* means the fetch failed.
+- *KPIs*: assessed within 1 business day = assessments within 24 business hours ÷ (assessments + items waiting longer), target 100%; open actions and overdue, target 0 overdue; fixed by due date = fixes on or before the due date ÷ fixes in the period, target ≥ 95% (remediation by due date and time to remediate as in NIST SP 800-40r4, Table 1); known-exploited items still open, target 0 overdue; sources healthy, target all. Recording and monitoring of ICT-related threats follow RTS (EU) 2024/1774, Art. 10. *vs previous month* is the same measure for the previous calendar month when the event log covers it, else "first period".
+- *Overall status* is the worst of the rules below (team proposal, 2026-11-05). *GREEN*: every relevant item assessed within 1 business day, no overdue action, every open action has an owner and a due date, all sources healthy in the last run, no tracker error in the period, at least 95% of fixes by their due date. *AMBER*, any of: an assessment took (or an item has waited) more than 1 business day; an open action lacks an owner or a due date; ruled out by a person without a reason; a source stale or failing in the last run, or no scheduled run in the period; a tracker error in the period; an overdue action on an item not known to be exploited; fewer than 95% of the fixes in the period by their due date. *RED*, any of: an overdue action on a known-exploited item; a relevant item not assessed for more than 3 business days at the end of the period; a core source (CISA KEV or CVE.org) failing for more than 2 days.
+- *Data sha256* is the sha256 of report.json without its generation time: two reports with equal data have equal values. This report implements requirement FR-A4 (resolution report to the fairCT COO).
+
+#set text(size: 10pt)
+#block(breakable: false)[
+== Document control
+#table(columns: (auto, 1fr), inset: (x: 5pt, y: 3pt),
+  [*Document ID*], [#d.document.id],
+  [*Version*], [#d.document.version],
+  [*Status*], [#d.document.status],
+  [*Prepared by*], [#d.document.prepared_by],
+  [*Reviewed by*], [#box(width: 5cm, repeat[\_]) (date #box(width: 2.2cm, repeat[\_]))],
+  [*Acknowledged by the fairCT COO*], [#box(width: 5cm, repeat[\_]) (date #box(width: 2.2cm, repeat[\_]))],
+  [*Distribution*], [#d.document.distribution],
+  [*Retention*], [#d.document.retention],
+  [*Integrity*], [data sha256 #raw(d.data_sha)#[;] SHA256SUMS next to the file],
+)
+]
