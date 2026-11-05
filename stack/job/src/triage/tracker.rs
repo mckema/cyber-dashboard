@@ -36,6 +36,22 @@
 //! canceled, duplicate. Linear has no "decline reason" field; the reason is the
 //! latest comment that the job did not write itself.
 //!
+//! Reading triage back (parse_issue_node), as observed on a real Linear
+//! workspace on 2026-11-04/05:
+//!   - Any move out of Triage (Accept, Decline, a status change, Mark as
+//!     duplicate) sets Issue.triagedAt and writes one history entry, by the
+//!     person, within ~50 ms of triagedAt. Accept, Decline and a status change
+//!     give that entry fromState.type "triage"; Mark as duplicate gives an
+//!     entry with fromState and toState null (the relation only) and the state
+//!     type "duplicate", not "canceled". Snooze leaves the issue in Triage
+//!     (snoozedUntilAt set, triagedAt null, no history entry): still untriaged.
+//!   - A decline reason is a separate comment, at the same time as the state
+//!     change or some seconds later.
+//!   - history and comments come back newest first; first: N keeps the N
+//!     newest. The code does not rely on the order (it compares createdAt).
+//!   - An OAuth app shows as a user in actor / creator ("Exploit Watch");
+//!     botActor stayed null.
+//!
 //! Credential: LINEAR_API_KEY holds either a personal API key or an OAuth access
 //! token (e.g. from an OAuth app's client_credentials grant, actor=app). The
 //! prefix picks the header (auth_value): a value starting with
@@ -66,9 +82,18 @@ pub const BOT_PREFIX: &str = "**exploit-watch**";
 /// Issue titles longer than this are cut with "…".
 pub const TITLE_MAX: usize = 120;
 /// Issues per fetch_states() request. Each issue also asks for NESTED_N history and
-/// NESTED_N comment nodes, which count toward Linear's complexity budget.
+/// NESTED_N comment nodes, which count toward Linear's complexity budget: measured
+/// 2026-11-05, x-complexity of IssueStates was 99 with 20 and 234 with 50, the same
+/// for 1 or 19 ids (limit 10,000 per query).
 const FETCH_BATCH: usize = 25;
-const NESTED_N: usize = 20;
+/// Newest history entries and comments read per issue. 50, not 20: Linear keeps the
+/// newest, so the entry that left Triage and the decline comment drop out of the
+/// window once an issue has that many later changes or comments.
+const NESTED_N: usize = 50;
+/// A history entry this close to triagedAt is the triage action (measured: under 50 ms).
+const TRIAGE_MATCH_MS: i64 = 5_000;
+/// `reason` of an issue marked as duplicate when nobody left a comment.
+pub const DUPLICATE_REASON: &str = "Marked as duplicate";
 
 // ---------------------------------------------------------------- types
 
@@ -91,7 +116,7 @@ pub enum IssueState {
     Accepted,
     /// Ticket closed as done (Linear: completed).
     Done,
-    /// Not relevant (Linear: canceled, or duplicate).
+    /// Not relevant (Linear: canceled, or duplicate = Mark as duplicate).
     Declined,
 }
 
@@ -122,12 +147,17 @@ pub struct IssueStatus {
     pub assignee: String,
     #[serde(default)]
     pub due: String,        // YYYY-MM-DD
+    /// Decline reason; only filled when state is Declined: the latest comment the job did
+    /// not write, else DUPLICATE_REASON for a duplicate.
     #[serde(default)]
-    pub reason: String,     // decline reason; only filled when state is Declined
+    pub reason: String,
+    /// Who triaged the issue, i.e. moved it out of Triage (Accept, Decline, a status
+    /// change, Mark as duplicate); later moves do not change it. "" while in Triage.
     #[serde(default)]
-    pub actor: String,      // who moved the issue to its current state
+    pub actor: String,
+    /// When the issue left Triage (UTC ISO; Linear triagedAt). "" while in Triage.
     #[serde(default)]
-    pub changed: String,    // when that happened (UTC ISO)
+    pub changed: String,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -638,7 +668,8 @@ const Q_ISSUE_STATES: &str = "query IssueStates($ids: [ID!]!, $first: Int!, $nes
       state { type name }
       assignee { name }
       dueDate
-      history(first: $nested) { nodes { createdAt actor { name } botActor { name } toState { type name } } }
+      triagedAt
+      history(first: $nested) { nodes { createdAt actor { name } botActor { name } fromState { type } toState { type name } } }
       comments(first: $nested) { nodes { body createdAt user { name } } }
     }
   }
@@ -743,9 +774,47 @@ fn issue_ref(v: &Value, label: &str) -> Result<IssueRef, TrackerError> {
     Ok(r)
 }
 
-/// Node with the latest `createdAt` among `nodes` that pass `keep` (order of the API not assumed).
+/// Node with the latest `createdAt` among `nodes` that pass `keep`. Linear returns
+/// nodes newest first, but this does not rely on it.
 fn latest(nodes: Option<&Value>, keep: impl Fn(&Value) -> bool) -> Option<&Value> {
     nodes?.as_array()?.iter().filter(|n| keep(n)).max_by_key(|n| parse_iso(&s(n, "/createdAt")))
+}
+
+/// Name on a history entry: actor (people, and an OAuth app acting as itself), else botActor.
+fn entry_actor(h: &Value) -> String {
+    let a = s(h, "/actor/name");
+    if a.is_empty() { s(h, "/botActor/name") } else { a }
+}
+
+/// A history entry that moved the issue out of Triage (Accept, Decline, status change).
+fn left_triage(h: &Value) -> bool {
+    s(h, "/fromState/type") == "triage"
+}
+
+/// (actor, changed) of the triage: who moved the issue out of Triage and when (UTC ISO).
+///
+/// `changed` is triagedAt. `actor` is the name on the history entry closest to
+/// triagedAt, within TRIAGE_MATCH_MS, preferring an entry that left Triage: Mark as
+/// duplicate writes an entry without states, so only its time ties it to the triage.
+/// Without such an entry (it fell out of the NESTED_N window): the newest entry that
+/// left Triage, else "". Without triagedAt (not set by older data): that entry's name
+/// and time. ("", "") when neither is there.
+fn triaged_by(n: &Value) -> (String, String) {
+    let history = n.pointer("/history/nodes").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    let at = |h: &Value| parse_iso(&s(h, "/createdAt"));
+    let left = history.iter().filter(|h| left_triage(h)).max_by_key(|h| at(h));
+    match parse_iso(&s(n, "/triagedAt")) {
+        Some(t) => {
+            let near = history
+                .iter()
+                .filter_map(|h| Some((h, (at(h)? - t).num_milliseconds().abs())))
+                .filter(|(_, ms)| *ms <= TRIAGE_MATCH_MS)
+                .min_by_key(|(h, ms)| (!left_triage(h), *ms))
+                .map(|(h, _)| h);
+            (near.or(left).map(entry_actor).unwrap_or_default(), iso_utc(t))
+        }
+        None => left.map(|h| (entry_actor(h), utc(&s(h, "/createdAt")))).unwrap_or_default(),
+    }
 }
 
 /// One node of the IssueStates query -> (IssueRef, IssueStatus).
@@ -754,15 +823,13 @@ pub fn parse_issue_node(n: &Value) -> Result<(IssueRef, IssueStatus), TrackerErr
     let t = s(n, "/state/type");
     let state = IssueState::from_linear(&t)
         .ok_or_else(|| TrackerError::Reply(format!("issues: {} has unknown state type {t:?}", r.identifier)))?;
-    let change = latest(n.pointer("/history/nodes"), |h| h.pointer("/toState").is_some_and(|v| !v.is_null()));
-    let actor = change.map(|h| {
-        let a = s(h, "/actor/name");
-        if a.is_empty() { s(h, "/botActor/name") } else { a }
-    });
+    // In Triage (also snoozed): not triaged, whatever an earlier triage left behind.
+    let (actor, changed) = if state == IssueState::Triage { Default::default() } else { triaged_by(n) };
     let reason = if state == IssueState::Declined {
-        latest(n.pointer("/comments/nodes"), |c| !s(c, "/body").trim_start().starts_with(BOT_PREFIX))
+        let comment = latest(n.pointer("/comments/nodes"), |c| !s(c, "/body").trim_start().starts_with(BOT_PREFIX))
             .map(|c| s(c, "/body").trim().to_string())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if comment.is_empty() && t == "duplicate" { DUPLICATE_REASON.to_string() } else { comment }
     } else {
         String::new()
     };
@@ -772,8 +839,8 @@ pub fn parse_issue_node(n: &Value) -> Result<(IssueRef, IssueStatus), TrackerErr
         assignee: s(n, "/assignee/name"),
         due: s(n, "/dueDate"),
         reason,
-        actor: actor.unwrap_or_default(),
-        changed: change.map(|h| utc(&s(h, "/createdAt"))).unwrap_or_default(),
+        actor,
+        changed,
     }))
 }
 
@@ -1102,9 +1169,13 @@ mod tests {
             .map(|i| IssueRef { id: format!("id-{i}"), identifier: i.to_string(), url: String::new() })
             .collect();
         let st = l.fetch_states(&refs).unwrap();
-        let v = &seen.lock().unwrap()[0]["variables"];
+        let req = &seen.lock().unwrap()[0];
+        let v = &req["variables"];
         assert_eq!(v["ids"], json!(["id-CTP-123", "id-CTP-124", "id-CTP-125", "id-CTP-126"]));
         assert_eq!(v["first"], 4);
+        assert_eq!(v["nested"], NESTED_N);
+        let q = req["query"].as_str().unwrap();
+        assert!(q.contains("triagedAt") && q.contains("fromState { type }"), "{q}");
 
         assert_eq!(st.len(), 4);
         let by = |i: &str| st.iter().find(|(r, _)| r.identifier == i).unwrap().1.clone();
@@ -1112,10 +1183,11 @@ mod tests {
             state: IssueState::Triage, state_name: "Triage".into(), assignee: String::new(), due: String::new(),
             reason: String::new(), actor: String::new(), changed: String::new(),
         });
+        // Triaged by Vu Huy Hoang (triage -> Todo), later moved on by someone else: the triage counts.
         assert_eq!(by("CTP-124"), IssueStatus {
             state: IssueState::Accepted, state_name: "In Progress".into(), assignee: "Tran Trung Hau".into(),
             due: "2026-11-10".into(), reason: String::new(), actor: "Vu Huy Hoang".into(),
-            changed: "2026-11-03T09:15:00Z".into(),
+            changed: "2026-11-03T09:00:00Z".into(),
         });
         let declined = by("CTP-125");
         assert_eq!(declined.state, IssueState::Declined);
@@ -1123,9 +1195,111 @@ mod tests {
         assert_eq!((declined.actor.as_str(), declined.changed.as_str()), ("Tran Trung Hau", "2026-11-03T10:00:00Z"));
         let dup = by("CTP-126");
         assert_eq!(IssueState::from_linear("duplicate"), Some(IssueState::Declined));
-        assert_eq!((dup.state, dup.actor.as_str()), (IssueState::Declined, "Triage Intelligence"));
-        assert_eq!(dup.reason, "", "the job's own comments are never a reason");
+        assert_eq!((dup.state, dup.actor.as_str()), (IssueState::Declined, "Triage Intelligence"), "botActor name");
+        assert_eq!(dup.reason, DUPLICATE_REASON, "the job's own comments are never a reason");
         assert_eq!(st[0].0.url, "https://linear.app/ediphy/issue/CTP-123/x");
+    }
+
+    /// Replies shaped like the real Linear workspace on 2026-11-04 (results T06-T11): nested
+    /// nodes newest first, Mark as duplicate with a state-less history entry, a decline
+    /// comment 10 s after the state change, a snoozed issue, and TRI-7 accepted by a person
+    /// and then moved on by the OAuth app.
+    #[test]
+    fn linear_triage_read_back_like_real_linear() {
+        let (mut l, _) = linear(vec![reply(200, &fixture("linear_issues_states_triage.json"), &[])]);
+        let refs: Vec<IssueRef> = ["TRI-1", "TRI-15", "TRI-3", "TRI-4", "TRI-6", "TRI-7", "TRI-17"]
+            .iter()
+            .map(|i| IssueRef { id: format!("id-{i}"), identifier: i.to_string(), url: String::new() })
+            .collect();
+        let st = l.fetch_states(&refs).unwrap();
+        assert_eq!(st.len(), 7);
+        let by = |i: &str| st.iter().find(|(r, _)| r.identifier == i).unwrap().1.clone();
+        let henry = "Tran Trung Hau";
+        let who = |i: &str| {
+            let s = by(i);
+            (s.state, s.actor, s.changed, s.reason)
+        };
+        let t = |state, actor: &str, changed: &str, reason: &str| (state, actor.to_string(), changed.to_string(), reason.to_string());
+
+        // T06: Accept; status menu straight to In Progress.
+        assert_eq!(who("TRI-1"), t(IssueState::Accepted, henry, "2026-11-04T10:34:02Z", ""));
+        assert_eq!((by("TRI-1").assignee.as_str(), by("TRI-1").due.as_str()), (henry, "2026-11-06"));
+        assert_eq!(who("TRI-17"), t(IssueState::Accepted, henry, "2026-11-04T10:27:06Z", ""));
+        // T07: Decline with the reason as a later comment; Decline without a comment.
+        assert_eq!(who("TRI-15"), t(IssueState::Declined, henry, "2026-11-04T10:33:41Z",
+                                    "Not relevant: fairCT does not ship this component."));
+        assert_eq!(who("TRI-3"), t(IssueState::Declined, henry, "2026-11-04T10:33:58Z", ""));
+        // T08: Mark as duplicate. The entry has no states; triagedAt ties it to the person.
+        assert_eq!(who("TRI-4"), t(IssueState::Declined, henry, "2026-11-04T10:34:47Z", DUPLICATE_REASON));
+        assert_eq!(by("TRI-4").state_name, "Duplicate");
+        // T09: Snooze leaves the issue untriaged.
+        assert_eq!(who("TRI-6"), t(IssueState::Triage, "", "", ""));
+        // T11: accepted by Henry, then moved by the OAuth app: Henry triaged it.
+        assert_eq!(who("TRI-7"), t(IssueState::Accepted, henry, "2026-11-04T10:35:20Z", ""));
+    }
+
+    /// The triage actor rule on the real T10 body (TRI-18: 20 newest of 26 history entries,
+    /// newest first, all priority/label changes) and on small hand-made nodes.
+    #[test]
+    fn triage_actor_rule() {
+        let real: Value = serde_json::from_str(&fixture("linear_issue_detail_t10.json")).unwrap();
+        let real = real.pointer("/data/issue").unwrap().clone();
+        let first = |n: &Value| n["history"]["nodes"][0]["createdAt"].as_str().unwrap().to_string();
+        let last = |n: &Value| n["history"]["nodes"][19]["createdAt"].as_str().unwrap().to_string();
+        assert!(first(&real) > last(&real), "Linear returns history newest first");
+        let read = |n: &Value| {
+            let (_, st) = parse_issue_node(n).unwrap();
+            (st.actor, st.changed)
+        };
+        let pair = |a: &str, c: &str| (a.to_string(), c.to_string());
+
+        // Still in Triage: nothing, although history has 20 entries.
+        assert_eq!(read(&real), pair("", ""));
+        let mut n = real.clone();
+        n["state"] = json!({"type": "backlog", "name": "Backlog"});
+        // Triaged before the window: when is known, who is not.
+        n["triagedAt"] = json!("2026-11-04T10:30:00.000Z");
+        assert_eq!(read(&n), pair("", "2026-11-04T10:30:00Z"));
+        // The closest entry wins, although its neighbours (3.3 s away) are within the tolerance too.
+        n["history"]["nodes"][9]["actor"] = json!({"name": "Vu Huy Hoang"});
+        n["triagedAt"] = json!("2026-11-05T02:14:30.278Z");
+        assert_eq!(n["history"]["nodes"][9]["createdAt"], "2026-11-05T02:14:30.248Z");
+        assert_eq!(read(&n), pair("Vu Huy Hoang", "2026-11-05T02:14:30Z"));
+        // No triagedAt and no entry that left Triage: unknown.
+        n["triagedAt"] = Value::Null;
+        assert_eq!(read(&n), pair("", ""));
+
+        let node = |triaged: Value, history: Value| {
+            json!({"id": "x", "identifier": "CTP-9", "url": "u", "state": {"type": "started", "name": "In Progress"},
+                   "triagedAt": triaged, "history": {"nodes": history}, "comments": {"nodes": []}})
+        };
+        let entry = |at: &str, who: &str, from: Option<&str>| {
+            json!({"createdAt": at, "actor": {"name": who}, "botActor": null,
+                   "fromState": from.map(|f| json!({"type": f})), "toState": from.map(|_| json!({"type": "started", "name": "x"}))})
+        };
+        // Within the tolerance an entry that left Triage beats a closer one that did not.
+        let n = node(json!("2026-11-04T10:00:00.000Z"), json!([
+            entry("2026-11-04T10:00:00.010Z", "Exploit Watch", None),
+            entry("2026-11-04T10:00:02.000Z", "Henry", Some("triage")),
+        ]));
+        assert_eq!(read(&n), pair("Henry", "2026-11-04T10:00:00Z"));
+        // Nothing near triagedAt: the newest entry that left Triage.
+        let n = node(json!("2026-11-04T09:00:00Z"), json!([
+            entry("2026-11-04T11:00:00Z", "Exploit Watch", Some("backlog")),
+            entry("2026-11-04T10:00:00Z", "James", Some("triage")),
+            entry("2026-11-04T08:00:00Z", "Henry", Some("triage")),
+        ]));
+        assert_eq!(read(&n), pair("James", "2026-11-04T09:00:00Z"));
+        // No triagedAt (older data): that entry's name and time.
+        let n = node(Value::Null, json!([
+            entry("2026-11-04T11:00:00Z", "Exploit Watch", Some("backlog")),
+            entry("2026-11-04T10:00:00Z", "James", Some("triage")),
+        ]));
+        assert_eq!(read(&n), pair("James", "2026-11-04T10:00:00Z"));
+        // Fields missing altogether (no history, no triagedAt): unknown, not an error.
+        let bare = json!({"id": "x", "identifier": "CTP-9", "url": "u", "state": {"type": "duplicate", "name": "Duplicate"}});
+        let (_, st) = parse_issue_node(&bare).unwrap();
+        assert_eq!((st.actor.as_str(), st.changed.as_str(), st.reason.as_str()), ("", "", DUPLICATE_REASON));
     }
 
     #[test]

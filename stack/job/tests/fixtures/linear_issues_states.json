@@ -9,7 +9,8 @@
           "state": { "type": "triage", "name": "Triage" },
           "assignee": null,
           "dueDate": null,
-          "history": { "nodes": [ { "createdAt": "2026-11-03T08:00:01.000Z", "actor": { "name": "exploit-watch bot" }, "botActor": null, "toState": null } ] },
+          "triagedAt": null,
+          "history": { "nodes": [ { "createdAt": "2026-11-03T08:00:01.000Z", "actor": { "name": "exploit-watch bot" }, "botActor": null, "fromState": null, "toState": null } ] },
           "comments": { "nodes": [] }
         },
         {
@@ -19,11 +20,12 @@
           "state": { "type": "started", "name": "In Progress" },
           "assignee": { "name": "Tran Trung Hau" },
           "dueDate": "2026-11-10",
+          "triagedAt": "2026-11-03T09:00:00.012Z",
           "history": {
             "nodes": [
-              { "createdAt": "2026-11-03T09:15:00.000Z", "actor": { "name": "Vu Huy Hoang" }, "botActor": null, "toState": { "type": "started", "name": "In Progress" } },
-              { "createdAt": "2026-11-03T09:16:30.000Z", "actor": { "name": "Vu Huy Hoang" }, "botActor": null, "toState": null },
-              { "createdAt": "2026-11-03T09:00:00.000Z", "actor": { "name": "Vu Huy Hoang" }, "botActor": null, "toState": { "type": "unstarted", "name": "Todo" } }
+              { "createdAt": "2026-11-03T09:16:30.000Z", "actor": { "name": "Vu Huy Hoang" }, "botActor": null, "fromState": null, "toState": null },
+              { "createdAt": "2026-11-03T09:15:00.000Z", "actor": { "name": "Tran Trung Hau" }, "botActor": null, "fromState": { "type": "unstarted" }, "toState": { "type": "started", "name": "In Progress" } },
+              { "createdAt": "2026-11-03T09:00:00.000Z", "actor": { "name": "Vu Huy Hoang" }, "botActor": null, "fromState": { "type": "triage" }, "toState": { "type": "unstarted", "name": "Todo" } }
             ]
           },
           "comments": { "nodes": [ { "body": "Looking at it.", "createdAt": "2026-11-03T09:20:00.000Z", "user": { "name": "Tran Trung Hau" } } ] }
@@ -35,7 +37,8 @@
           "state": { "type": "canceled", "name": "Canceled" },
           "assignee": null,
           "dueDate": null,
-          "history": { "nodes": [ { "createdAt": "2026-11-03T10:00:00.000Z", "actor": { "name": "Tran Trung Hau" }, "botActor": null, "toState": { "type": "canceled", "name": "Canceled" } } ] },
+          "triagedAt": "2026-11-03T10:00:00.030Z",
+          "history": { "nodes": [ { "createdAt": "2026-11-03T10:00:00.000Z", "actor": { "name": "Tran Trung Hau" }, "botActor": null, "fromState": { "type": "triage" }, "toState": { "type": "canceled", "name": "Canceled" } } ] },
           "comments": {
             "nodes": [
               { "body": "**exploit-watch**: the feed item changed.", "createdAt": "2026-11-03T10:05:00.000Z", "user": { "name": "exploit-watch bot" } },
@@ -51,7 +54,8 @@
           "state": { "type": "duplicate", "name": "Duplicate" },
           "assignee": null,
           "dueDate": null,
-          "history": { "nodes": [ { "createdAt": "2026-11-03T11:00:00.000Z", "actor": null, "botActor": { "name": "Triage Intelligence" }, "toState": { "type": "duplicate", "name": "Duplicate" } } ] },
+          "triagedAt": "2026-11-03T11:00:00.040Z",
+          "history": { "nodes": [ { "createdAt": "2026-11-03T11:00:00.000Z", "actor": null, "botActor": { "name": "Triage Intelligence" }, "fromState": null, "toState": null } ] },
           "comments": { "nodes": [ { "body": "**exploit-watch**: the feed item changed.", "createdAt": "2026-11-03T11:05:00.000Z", "user": { "name": "exploit-watch bot" } } ] }
         }
       ]

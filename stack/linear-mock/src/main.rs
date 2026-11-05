@@ -67,37 +67,48 @@
 //!      "title": "[CVE-2026-1234] ...",
 //!      "description": "...",
 //!      "created": "2026-11-04T08:00:00Z",
-//!      "state": "triage",      edit: triage | accepted | done | declined
+//!      "state": "triage",      edit: triage | accepted | done | declined | duplicate
 //!                                    (completed, canceled, cancelled also read)
 //!      "assignee": "",         edit: owner name, "" = unassigned
 //!      "due": "",              edit: YYYY-MM-DD, "" = none
 //!      "reason": "",           edit: why it was declined
-//!      "actor": "",            edit: who moved it to its state ("" = "mock user")
-//!      "changed": "",          edit: when (UTC ISO), "" = use `created`
+//!      "actor": "",            edit: who triaged it, i.e. moved it out of Triage
+//!                                    ("" = "mock user")
+//!      "changed": "",          edit: when it left Triage (UTC ISO), "" = use `created`
 //!      "comments": [{"at": "2026-11-04T09:00:00Z", "body": "..."}]   job-only
 //!     }
 //!    ]
 //!   }
 //!
-//! The editable fields match the job's test double FakeTracker. Other fields a
+//! The editable fields match the job's test double FakeTracker (which has no
+//! `duplicate` state). Other fields a
 //! person adds to an issue are kept when the mock rewrites the file. `comments`
 //! holds the job's comments only (shown as written by "exploit-watch bot"); a
 //! decline reason goes in `reason`, not in `comments`. A leading UTF-8 BOM is
 //! ignored. Reset the mock together with the job's state/triage.json.
 //!
-//! How IssueStates maps an issue to Linear's shape:
+//! How IssueStates maps an issue to Linear's shape, following what a real
+//! Linear workspace returned on 2026-11-04/05:
 //!
-//!   state     triage -> triage "Triage", accepted -> unstarted "Todo",
-//!             done -> completed "Done", declined -> canceled "Canceled"
-//!   assignee  "" -> null, else {name}; due "" -> dueDate null
-//!   history   state triage: no nodes; otherwise one node {createdAt: changed
-//!             or created, actor {name: actor or "mock user"}, botActor null,
-//!             toState {type, name}}
-//!   comments  the job's comments with user "exploit-watch bot", plus, when
-//!             `reason` is set, a comment {body: reason, createdAt: changed or
-//!             created, user {name: actor or "mock user"}}
+//!   state      triage -> triage "Triage", accepted -> unstarted "Todo",
+//!              done -> completed "Done", declined -> canceled "Canceled",
+//!              duplicate -> duplicate "Duplicate" (Linear's own state type
+//!              for Mark as duplicate, not canceled)
+//!   assignee   "" -> null, else {name}; due "" -> dueDate null
+//!   triagedAt  state triage: null; otherwise changed or created (Linear sets
+//!              it on any move out of Triage)
+//!   history    state triage: no nodes; otherwise the entry that left Triage,
+//!              {createdAt: changed or created, actor {name: actor or
+//!              "mock user"}, botActor null, fromState {type "triage"},
+//!              toState {type, name}}; for duplicate fromState and toState
+//!              are null (Linear records only the relation)
+//!   comments   the job's comments with user "exploit-watch bot", plus, when
+//!              `reason` is set, a separate comment {body: reason, createdAt:
+//!              changed or created, user {name: actor or "mock user"}}
 //!
-//! Timestamps are passed through as written in the file.
+//! history and comments are newest first, as Linear returns them (times that
+//! do not parse as RFC 3339 sort last). Timestamps are passed through as
+//! written in the file.
 //!
 //! Environment:
 //!
@@ -120,7 +131,9 @@
 //! pagination (`first` and nested `first` are ignored, all matches are
 //! returned), archived issues, any other query or mutation, other workflow
 //! states or teams, comment authors other than the two above, the OAuth flow
-//! itself (token endpoint, expiry, refresh, scopes, app attribution).
+//! itself (token endpoint, expiry, refresh, scopes, app attribution), moves
+//! after the triage (one history entry per issue at most), Snooze
+//! (snoozedUntilAt) and the duplicate relation to the canonical issue.
 //! Requests are served one at a time.
 
 use std::fs;
@@ -253,6 +266,8 @@ enum MockState {
     Done,
     #[serde(alias = "canceled", alias = "cancelled")]
     Declined,
+    /// Mark as duplicate.
+    Duplicate,
 }
 
 impl MockState {
@@ -263,6 +278,7 @@ impl MockState {
             Self::Accepted => ("unstarted", "Todo"),
             Self::Done => ("completed", "Done"),
             Self::Declined => ("canceled", "Canceled"),
+            Self::Duplicate => ("duplicate", "Duplicate"),
         }
     }
 }
@@ -595,16 +611,27 @@ fn issue_states(vars: &Value, cfg: &Config) -> OpResult {
     Ok((json!({"issues": {"nodes": nodes}}), detail))
 }
 
+/// Sort nodes newest first by createdAt, as Linear returns history and comments.
+/// Times that do not parse go last; equal times keep their order.
+fn newest_first(nodes: &mut [Value]) {
+    let at = |v: &Value| chrono::DateTime::parse_from_rfc3339(v["createdAt"].as_str().unwrap_or("")).ok();
+    nodes.sort_by(|a, b| at(b).cmp(&at(a)));
+}
+
 /// One issue in the shape of Linear's IssueStates node (see the module doc for the mapping).
 fn issue_node(i: &Issue) -> Value {
     let (state_type, state_name) = i.state.linear();
     let when = nonempty(&i.changed).unwrap_or(i.created.trim());
     let who = nonempty(&i.actor).unwrap_or(DEFAULT_ACTOR);
-    let history: Vec<Value> = if i.state == MockState::Triage {
+    let (from, to) = match i.state {
+        // Mark as duplicate: Linear's entry holds the relation only, no states.
+        MockState::Duplicate => (Value::Null, Value::Null),
+        _ => (json!({"type": "triage"}), json!({"type": state_type, "name": state_name})),
+    };
+    let mut history: Vec<Value> = if i.state == MockState::Triage {
         vec![]
     } else {
-        vec![json!({"createdAt": when, "actor": {"name": who}, "botActor": null,
-                    "toState": {"type": state_type, "name": state_name}})]
+        vec![json!({"createdAt": when, "actor": {"name": who}, "botActor": null, "fromState": from, "toState": to})]
     };
     let mut comments: Vec<Value> = i
         .comments
@@ -614,6 +641,8 @@ fn issue_node(i: &Issue) -> Value {
     if let Some(reason) = nonempty(&i.reason) {
         comments.push(json!({"body": reason, "createdAt": when, "user": {"name": who}}));
     }
+    newest_first(&mut history);
+    newest_first(&mut comments);
     json!({
         "id": i.id,
         "identifier": i.identifier,
@@ -621,6 +650,7 @@ fn issue_node(i: &Issue) -> Value {
         "state": {"type": state_type, "name": state_name},
         "assignee": nonempty(&i.assignee).map(|a| json!({"name": a})),
         "dueDate": nonempty(&i.due),
+        "triagedAt": (i.state != MockState::Triage).then_some(when),
         "history": {"nodes": history},
         "comments": {"nodes": comments},
     })
@@ -750,7 +780,8 @@ mod tests {
       state { type name }
       assignee { name }
       dueDate
-      history(first: $nested) { nodes { createdAt actor { name } botActor { name } toState { type name } } }
+      triagedAt
+      history(first: $nested) { nodes { createdAt actor { name } botActor { name } fromState { type } toState { type name } } }
       comments(first: $nested) { nodes { body createdAt user { name } } }
     }
   }
@@ -1021,7 +1052,7 @@ mod tests {
         let nodes = states(&cfg, &[id1.as_str(), "mock-404"]);
         assert_eq!(nodes, vec![json!({
             "id": id1, "identifier": "MOCK-1", "url": "http://linear-mock.invalid/issue/MOCK-1",
-            "state": {"type": "triage", "name": "Triage"}, "assignee": null, "dueDate": null,
+            "state": {"type": "triage", "name": "Triage"}, "assignee": null, "dueDate": null, "triagedAt": null,
             "history": {"nodes": []},
             "comments": {"nodes": [{"body": "**exploit-watch**: c", "createdAt": NOW, "user": {"name": "exploit-watch bot"}}]}
         })]);
@@ -1032,7 +1063,7 @@ mod tests {
         assert_eq!(error_code(&gql(&cfg, Q_ISSUE_STATES, json!({"first": 1}))), "GRAPHQL_VALIDATION_FAILED");
     }
 
-    /// A file as a person would leave it after triaging four issues by hand.
+    /// A file as a person would leave it after triaging four issues by hand and marking one as duplicate.
     fn hand_edited(d: &TestDir) {
         let issue = |n: u32, state: &str, extra: Value| {
             let mut i = json!({"id": format!("mock-{n}"), "identifier": format!("MOCK-{n}"),
@@ -1045,13 +1076,14 @@ mod tests {
             }
             i
         };
-        let f = json!({"next": 5, "issues": [
+        let f = json!({"next": 6, "issues": [
             issue(1, "triage", json!({})),
             issue(2, "accepted", json!({"assignee": "Henry", "due": "2026-11-10", "actor": "James",
                                         "changed": "2026-11-04T09:00:00Z"})),
             issue(3, "completed", json!({"assignee": "Henry"})),
             issue(4, "canceled", json!({"reason": "  Not relevant: test harness only.\n", "actor": "Henry",
                                         "changed": "2026-11-04T10:00:00Z", "item_key": "CISA KEV:CVE-2026-1234"})),
+            issue(5, "duplicate", json!({"actor": "James", "changed": "2026-11-04T11:00:00Z"})),
         ]});
         fs::write(d.file(), serde_json::to_string_pretty(&f).unwrap()).unwrap();
     }
@@ -1061,27 +1093,58 @@ mod tests {
         let d = TestDir::new();
         let cfg = d.cfg();
         hand_edited(&d);
-        let nodes = states(&cfg, &["mock-1", "mock-2", "mock-3", "mock-4"]);
+        let nodes = states(&cfg, &["mock-1", "mock-2", "mock-3", "mock-4", "mock-5"]);
         let st: Vec<(&str, &str)> = nodes
             .iter()
             .map(|n| (n["state"]["type"].as_str().unwrap(), n["state"]["name"].as_str().unwrap()))
             .collect();
-        assert_eq!(st, [("triage", "Triage"), ("unstarted", "Todo"), ("completed", "Done"), ("canceled", "Canceled")]);
+        assert_eq!(st, [("triage", "Triage"), ("unstarted", "Todo"), ("completed", "Done"), ("canceled", "Canceled"),
+                        ("duplicate", "Duplicate")]);
 
         assert_eq!(nodes[0]["history"]["nodes"], json!([]));
+        assert_eq!(nodes[0]["triagedAt"], Value::Null);
         assert_eq!(nodes[1]["assignee"], json!({"name": "Henry"}));
         assert_eq!(nodes[1]["dueDate"], json!("2026-11-10"));
+        assert_eq!(nodes[1]["triagedAt"], json!("2026-11-04T09:00:00Z"));
         assert_eq!(nodes[1]["history"]["nodes"], json!([{"createdAt": "2026-11-04T09:00:00Z", "actor": {"name": "James"},
-            "botActor": null, "toState": {"type": "unstarted", "name": "Todo"}}]));
+            "botActor": null, "fromState": {"type": "triage"}, "toState": {"type": "unstarted", "name": "Todo"}}]));
         // No actor / changed: "mock user" at the creation time.
         assert_eq!(nodes[2]["history"]["nodes"][0]["actor"], json!({"name": "mock user"}));
         assert_eq!(nodes[2]["history"]["nodes"][0]["createdAt"], json!("2026-11-04T08:00:00Z"));
+        assert_eq!(nodes[2]["triagedAt"], json!("2026-11-04T08:00:00Z"));
         assert_eq!(nodes[2]["comments"]["nodes"].as_array().unwrap().len(), 1);
 
+        // The reason is a separate comment; comments come newest first.
         assert_eq!(nodes[3]["comments"]["nodes"], json!([
-            {"body": "**exploit-watch**: changed", "createdAt": "2026-11-04T08:30:00Z", "user": {"name": "exploit-watch bot"}},
             {"body": "Not relevant: test harness only.", "createdAt": "2026-11-04T10:00:00Z", "user": {"name": "Henry"}},
+            {"body": "**exploit-watch**: changed", "createdAt": "2026-11-04T08:30:00Z", "user": {"name": "exploit-watch bot"}},
         ]));
+        // Mark as duplicate: an entry without states, by the person, at triagedAt.
+        assert_eq!(nodes[4]["triagedAt"], json!("2026-11-04T11:00:00Z"));
+        assert_eq!(nodes[4]["history"]["nodes"], json!([{"createdAt": "2026-11-04T11:00:00Z", "actor": {"name": "James"},
+            "botActor": null, "fromState": null, "toState": null}]));
+    }
+
+    #[test]
+    fn nested_nodes_newest_first() {
+        let mut v = vec![json!({"createdAt": "2026-11-04T08:00:00Z", "n": 1}), json!({"createdAt": "bad", "n": 2}),
+                         json!({"createdAt": "2026-11-04T10:00:00+02:00", "n": 3}), json!({"createdAt": "2026-11-04T09:00:00Z", "n": 4})];
+        newest_first(&mut v);
+        let order: Vec<i64> = v.iter().map(|n| n["n"].as_i64().unwrap()).collect();
+        assert_eq!(order, [4, 1, 3, 2], "10:00+02:00 is 08:00Z; equal times keep their order; unparsable last");
+        // Several job comments plus a reason written later: newest first.
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        hand_edited(&d);
+        let mut f = d.read();
+        f["issues"][3]["comments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"at": "2026-11-04T12:00:00Z", "body": "**exploit-watch**: again"}));
+        fs::write(d.file(), f.to_string()).unwrap();
+        let n = &states(&cfg, &["mock-4"])[0];
+        let times: Vec<&str> = n["comments"]["nodes"].as_array().unwrap().iter().map(|c| c["createdAt"].as_str().unwrap()).collect();
+        assert_eq!(times, ["2026-11-04T12:00:00Z", "2026-11-04T10:00:00Z", "2026-11-04T08:30:00Z"]);
     }
 
     /// Recursive check that `ours` has the same keys as Linear's node at every level.
@@ -1108,43 +1171,57 @@ mod tests {
 
     #[test]
     fn node_shape_matches_linear_fixture() {
-        // Node id-CTP-125 of tests/fixtures/linear_issues_states.json in the job repo (comments trimmed to one).
+        // Node id-TRI-15 of tests/fixtures/linear_issues_states_triage.json in the job repo (shaped like
+        // real Linear on 2026-11-04; comments trimmed to one).
         let linear: Value = serde_json::from_str(r#"{
-          "id": "id-CTP-125", "identifier": "CTP-125", "url": "https://linear.app/ediphy/issue/CTP-125/z",
+          "id": "id-TRI-15", "identifier": "TRI-15", "url": "https://linear.app/<workspace>/issue/TRI-15/x",
           "state": { "type": "canceled", "name": "Canceled" }, "assignee": { "name": "x" }, "dueDate": null,
-          "history": { "nodes": [ { "createdAt": "2026-11-03T10:00:00.000Z", "actor": { "name": "Tran Trung Hau" },
-                                    "botActor": null, "toState": { "type": "canceled", "name": "Canceled" } } ] },
-          "comments": { "nodes": [ { "body": "Not relevant.", "createdAt": "2026-11-03T10:00:00.000Z",
+          "triagedAt": "2026-11-04T10:33:41.207Z",
+          "history": { "nodes": [ { "createdAt": "2026-11-04T10:33:41.180Z", "actor": { "name": "Tran Trung Hau" },
+                                    "botActor": null, "fromState": { "type": "triage" },
+                                    "toState": { "type": "canceled", "name": "Canceled" } } ] },
+          "comments": { "nodes": [ { "body": "Not relevant.", "createdAt": "2026-11-04T10:33:51.522Z",
                                      "user": { "name": "Tran Trung Hau" } } ] } }"#).unwrap();
         let d = TestDir::new();
         let cfg = d.cfg();
         hand_edited(&d);
-        for n in states(&cfg, &["mock-1", "mock-2", "mock-3", "mock-4"]) {
+        for n in states(&cfg, &["mock-1", "mock-2", "mock-3", "mock-4", "mock-5"]) {
             same_keys(&n, &linear, "");
         }
     }
 
-    /// The job's parse_issue_node (src/triage/tracker.rs) reduced to the fields it derives:
-    /// state type, actor and time of the latest node with a toState, reason = latest comment
-    /// not starting with "**exploit-watch**" when the state is declined (canceled/duplicate).
+    /// The job's parse_issue_node (src/triage/tracker.rs, 2026-11-05) reduced to the fields it
+    /// derives: state type; outside triage, changed = triagedAt and actor = the history entry
+    /// within 5 s of it (one that left Triage first), else the newest entry that left Triage;
+    /// reason = latest comment not starting with "**exploit-watch**" when the state is declined
+    /// (canceled/duplicate), "Marked as duplicate" for a duplicate without one. Times are
+    /// compared as text here (the mock writes one format).
     fn job_view(n: &Value) -> (String, String, String, String, String, String) {
         let s = |v: &Value, p: &str| v.pointer(p).and_then(Value::as_str).unwrap_or("").to_string();
         let empty = vec![];
-        let change = n["history"]["nodes"].as_array().unwrap_or(&empty).iter()
-            .filter(|h| h.get("toState").is_some_and(|v| !v.is_null()))
-            .max_by_key(|h| s(h, "/createdAt"));
-        let declined = matches!(s(n, "/state/type").as_str(), "canceled" | "duplicate");
-        let reason = if declined {
-            n["comments"]["nodes"].as_array().unwrap_or(&empty).iter()
+        let history = n["history"]["nodes"].as_array().unwrap_or(&empty);
+        let state = s(n, "/state/type");
+        let triaged_at = s(n, "/triagedAt");
+        let left = |h: &&Value| s(h, "/fromState/type") == "triage";
+        let entry = history.iter().find(|h| left(h) && s(h, "/createdAt") == triaged_at)
+            .or_else(|| history.iter().find(|h| s(h, "/createdAt") == triaged_at))
+            .or_else(|| history.iter().filter(left).max_by_key(|h| s(h, "/createdAt")));
+        let (actor, changed) = match (state.as_str(), entry) {
+            ("triage", _) => (String::new(), String::new()),
+            (_, e) => (e.map(|h| s(h, "/actor/name")).unwrap_or_default(),
+                       if triaged_at.is_empty() { e.map(|h| s(h, "/createdAt")).unwrap_or_default() } else { triaged_at.clone() }),
+        };
+        let reason = if matches!(state.as_str(), "canceled" | "duplicate") {
+            let c = n["comments"]["nodes"].as_array().unwrap_or(&empty).iter()
                 .filter(|c| !s(c, "/body").trim_start().starts_with("**exploit-watch**"))
                 .max_by_key(|c| s(c, "/createdAt"))
                 .map(|c| s(c, "/body").trim().to_string())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            if c.is_empty() && state == "duplicate" { "Marked as duplicate".to_string() } else { c }
         } else {
             String::new()
         };
-        (s(n, "/state/type"), s(n, "/assignee/name"), s(n, "/dueDate"), reason,
-         change.map(|h| s(h, "/actor/name")).unwrap_or_default(), change.map(|h| s(h, "/createdAt")).unwrap_or_default())
+        (state, s(n, "/assignee/name"), s(n, "/dueDate"), reason, actor, changed)
     }
 
     #[test]
@@ -1152,7 +1229,7 @@ mod tests {
         let d = TestDir::new();
         let cfg = d.cfg();
         hand_edited(&d);
-        let views: Vec<_> = states(&cfg, &["mock-1", "mock-2", "mock-4"]).iter().map(job_view).collect();
+        let views: Vec<_> = states(&cfg, &["mock-1", "mock-2", "mock-4", "mock-5"]).iter().map(job_view).collect();
         let v = |a: &str, b: &str, c: &str, e: &str, f: &str, g: &str| {
             (a.to_string(), b.to_string(), c.to_string(), e.to_string(), f.to_string(), g.to_string())
         };
@@ -1160,6 +1237,7 @@ mod tests {
             v("triage", "", "", "", "", ""),
             v("unstarted", "Henry", "2026-11-10", "", "James", "2026-11-04T09:00:00Z"),
             v("canceled", "", "", "Not relevant: test harness only.", "Henry", "2026-11-04T10:00:00Z"),
+            v("duplicate", "", "", "Marked as duplicate", "James", "2026-11-04T11:00:00Z"),
         ]);
     }
 
