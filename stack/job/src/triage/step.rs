@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 use super::components;
 use super::matcher;
-use super::store::{Gaps, Store};
+use super::store::{EventContext, Gaps, Store};
 use super::sync::{SyncReport, sync};
 use super::tracker;
 use super::types::Decision;
@@ -87,6 +87,7 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
             };
         }
     };
+    store.set_context(EventContext { components_version: comps.version.clone(), components_sha256: comps.sha256.clone() });
 
     let index = matcher::cve_index(cves);
     let (mut matched, mut not_relevant) = (0usize, 0usize);
@@ -113,7 +114,7 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
     };
 
     let mut record = json!({
-        "components": comps.version, "mode": mode,
+        "components": comps.version, "components_sha256": comps.sha256, "mode": mode,
         "new_matched": matched, "new_not_relevant": not_relevant,
     });
     if mode == "live" {
@@ -154,6 +155,7 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
     record["missing_owner"] = json!(gaps.missing_owner);
     record["missing_due"] = json!(gaps.missing_due);
     record["missing_reason"] = json!(gaps.missing_reason);
+    record["missing_actor"] = json!(gaps.missing_actor);
     if gaps != Gaps::default() {
         println!("  triage: {}", gaps_note(gaps));
     }
@@ -264,7 +266,7 @@ mod tests {
         let v = view(&s, &[], at(4, 9), None);
         let rows: Vec<(&str, &str)> = v.tickets.iter().map(|t| (t.assignee.as_str(), t.due.as_str())).collect();
         assert_eq!(rows, [("Henry", "2026-11-10"), ("", "")]);
-        assert_eq!(s.gaps(), Gaps { missing_owner: 1, missing_due: 1, missing_reason: 0 });
+        assert_eq!(s.gaps(), Gaps { missing_owner: 1, missing_due: 1, missing_reason: 0, missing_actor: 2 });
     }
 
     #[test]
@@ -285,7 +287,7 @@ mod tests {
 
     #[test]
     fn gaps_note_wording() {
-        let g = Gaps { missing_owner: 1, missing_due: 2, missing_reason: 3 };
+        let g = Gaps { missing_owner: 1, missing_due: 2, missing_reason: 3, ..Default::default() };
         assert_eq!(gaps_note(g),
                    "incomplete triage: 1 open ticket without an owner, 2 without a due date, 3 declined without a reason");
     }

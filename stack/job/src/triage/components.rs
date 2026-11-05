@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::feeds::common::Fatal;
 
@@ -52,6 +53,11 @@ pub struct Components {
     pub version: String,
     #[serde(rename = "component", default)]
     pub components: Vec<Component>,
+    /// sha256 hex of the file's text, set by parse(). `version` is typed by hand;
+    /// the hash shows which list a decision was really made with (triage events,
+    /// runs.jsonl).
+    #[serde(skip)]
+    pub sha256: String,
 }
 
 /// The list is missing, unparseable or fails validation.
@@ -87,8 +93,9 @@ pub fn load_file(p: &Path) -> Result<Components, ComponentsError> {
 /// Parse and validate TOML text. Err is the reason; a TOML syntax or type error
 /// keeps toml's own multi-line report (line, column, caret).
 pub fn parse(text: &str) -> Result<Components, String> {
-    let c: Components = toml::from_str(text).map_err(|e| e.to_string().trim_end().to_string())?;
+    let mut c: Components = toml::from_str(text).map_err(|e| e.to_string().trim_end().to_string())?;
     validate(&c)?;
+    c.sha256 = hex::encode(Sha256::digest(text.as_bytes()));
     Ok(c)
 }
 
@@ -144,6 +151,8 @@ mod tests {
     fn parses_with_defaults() {
         let c = parse(ONE).unwrap();
         assert_eq!(c.version, "t1");
+        assert_eq!(c.sha256.len(), 64, "sha256 hex of the text");
+        assert_ne!(c.sha256, parse(&ONE.replace("\"t1\"", "\"t2\"")).unwrap().sha256);
         let n = &c.components[0];
         assert_eq!((n.id.as_str(), n.kind, n.ecosystem.as_str()), ("nginx", Kind::Image, ""));
         assert_eq!(n.cpe, ["cpe:2.3:a:f5:nginx"]);

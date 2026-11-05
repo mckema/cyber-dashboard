@@ -110,12 +110,25 @@ pub fn seen() -> BTreeMap<String, String> {
 }
 
 pub fn append_run(record: &serde_json::Value) {
-    let p = path("runs.jsonl");
+    // One write call per line: a `locked` line may be appended while another run holds the lock.
+    append_jsonl("runs.jsonl", std::slice::from_ref(record));
+}
+
+/// Append one JSON line per value to STATE_DIR/name, in a single write call.
+pub fn append_jsonl(name: &str, values: &[serde_json::Value]) {
+    if values.is_empty() {
+        return;
+    }
+    let p = path(name);
     let mut f = fs::OpenOptions::new().create(true).append(true).open(&p)
         .unwrap_or_else(|e| panic!("cannot open {}: {e}", p.display()));
-    // One write call per line: a `locked` line may be appended while another run holds the lock.
-    let line = serde_json::to_string(record).expect("json") + "\n";
-    f.write_all(line.as_bytes()).expect("append runs.jsonl");
+    let text: String = values.iter().map(|v| serde_json::to_string(v).expect("json") + "\n").collect();
+    f.write_all(text.as_bytes()).unwrap_or_else(|e| panic!("append {}: {e}", p.display()));
+}
+
+/// STATE_DIR/name exists.
+pub fn exists(name: &str) -> bool {
+    dir().join(name).exists()
 }
 
 // ---------------------------------------------------------------- run lock

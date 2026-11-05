@@ -32,12 +32,36 @@
 //! Everything here is pure except load()/save(); the clock is a parameter.
 //! Records are kept 30 days (like seen.json) unless their ticket is still open or
 //! their triage is incomplete (declined without a reason).
+//!
+//! History (FR-A4 report, audit): triage.json is the working set and forgets. Every
+//! change the store makes is also an event, appended to STATE_DIR/triage-events.jsonl,
+//! which is never pruned. The mutators queue events; save() appends them before it
+//! writes triage.json, so only a writing run (the only kind that saves) logs them,
+//! and a crash after the append replays them with the same `id` (the report drops
+//! repeats). One JSON object per line:
+//!
+//!   {"id": "<32 hex>", "event": "decided", "key": "CISA KEV:CVE-…", "at": "<when it
+//!    happened, UTC>", "ts": "<when it was logged>", "source": "live" | "baseline", …}
+//!
+//!   decided           at first_seen: decision fields (decision, component/rule/
+//!                     evidence or triager), components_version, components_sha256,
+//!                     item_source, item_id, title, url, cves, published
+//!   issue_created     issue_id, identifier, url (at: when the job filed it)
+//!   triaged           Linear triagedAt changed: state (accepted | declined), actor
+//!   state_changed     from, to (IssueState names; from "none" before the first read-back);
+//!                     at: completedAt / canceledAt / startedAt / triagedAt when known
+//!   field_changed     field (assignee | due | reason), from, to (at: the read-back)
+//!   pruned            the record left triage.json (first_seen)
+//!
+//! When the file does not exist yet, the first save() writes a baseline instead
+//! of the queued events: the same events rebuilt from every record, with dates
+//! taken from the record, and "source": "baseline".
 
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc, Weekday};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::tracker::{IssueRef, IssueState, IssueStatus};
@@ -46,6 +70,8 @@ use crate::feeds::common::{Fatal, Item, iso_utc, parse_iso};
 use crate::feeds::state;
 
 pub const FILE: &str = "triage.json";
+/// Append-only history of the store (module doc).
+pub const EVENTS_FILE: &str = "triage-events.jsonl";
 /// Same retention as seen.json.
 pub const KEEP_DAYS: i64 = 30;
 
@@ -117,12 +143,113 @@ pub struct Gaps {
     pub missing_due: usize,
     /// Matched records declined without a reason.
     pub missing_reason: usize,
+    /// Matched records out of Triage whose tracker gave no name for who triaged them.
+    pub missing_actor: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// Which component list the decisions of this run come from; copied into every
+/// `decided` event.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EventContext {
+    pub components_version: String,
+    pub components_sha256: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Store {
     pub records: BTreeMap<String, Record>,
+    /// Events queued for EVENTS_FILE; save() appends and clears them. Not in triage.json.
+    #[serde(skip)]
+    pending: Vec<Value>,
+    #[serde(skip)]
+    context: EventContext,
+}
+
+/// Two stores are equal when their records are: queued events and the context
+/// are not part of the saved state.
+impl PartialEq for Store {
+    fn eq(&self, other: &Self) -> bool {
+        self.records == other.records
+    }
+}
+
+/// One event line (module doc). `parts` make the id: equal parts, equal id, so a
+/// replayed event can be dropped.
+fn event(kind: &str, key: &str, at: &str, parts: &[&str], ts: DateTime<Utc>, source: &str, fields: Value) -> Value {
+    let id = hex::encode(&Sha256::digest(format!("{kind}|{key}|{}", parts.join("|")).as_bytes())[..16]);
+    let mut v = json!({"id": id, "event": kind, "key": key, "at": at, "ts": iso_utc(ts), "source": source});
+    if let (Some(o), Value::Object(f)) = (v.as_object_mut(), fields) {
+        o.extend(f);
+    }
+    v
+}
+
+fn state_name(s: Option<IssueState>) -> String {
+    s.map(|s| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default())
+        .unwrap_or_else(|| "none".into())
+}
+
+/// When an issue reached `st.state`, as far as the tracker says; else `fallback`.
+fn state_time(st: &IssueStatus, fallback: &str) -> String {
+    let t = match st.state {
+        IssueState::Done => &st.completed,
+        IssueState::Declined | IssueState::Canceled => &st.canceled,
+        IssueState::Accepted if !st.started.is_empty() => &st.started,
+        IssueState::Accepted => &st.changed,
+        IssueState::Triage => &st.created,
+    };
+    if t.is_empty() { fallback.to_string() } else { t.clone() }
+}
+
+fn decided_event(key: &str, r: &Record, ctx: &EventContext, ts: DateTime<Utc>, source: &str) -> Value {
+    let mut fields = serde_json::to_value(&r.decision).unwrap_or_else(|_| json!({}));
+    if let Value::Object(o) = &mut fields {
+        o.extend([
+            ("components_version".to_string(), json!(ctx.components_version)),
+            ("components_sha256".to_string(), json!(ctx.components_sha256)),
+            ("item_source".to_string(), json!(r.item.source)),
+            ("item_id".to_string(), json!(r.item.id)),
+            ("title".to_string(), json!(r.item.title)),
+            ("url".to_string(), json!(r.item.url)),
+            ("cves".to_string(), json!(r.item.cves)),
+            ("published".to_string(), json!(r.item.published)),
+        ]);
+    }
+    event("decided", key, &r.first_seen, &[&r.first_seen], ts, source, fields)
+}
+
+fn issue_created_event(key: &str, issue: &IssueRef, at: &str, ts: DateTime<Utc>, source: &str) -> Value {
+    event("issue_created", key, at, &[&issue.id], ts, source,
+          json!({"issue_id": issue.id, "identifier": issue.identifier, "url": issue.url}))
+}
+
+/// Events for one read-back of an issue: `old` is what the store held (None before
+/// the first read-back), `new` what the tracker says now.
+fn status_events(key: &str, issue_id: &str, old: Option<&IssueStatus>, new: &IssueStatus, now: DateTime<Utc>,
+                 source: &str) -> Vec<Value> {
+    let stamp = iso_utc(now);
+    let blank = IssueStatus::default();
+    let o = old.unwrap_or(&blank);
+    let mut v = Vec::new();
+    if !new.changed.is_empty() && new.changed != o.changed {
+        let state = if new.state == IssueState::Declined { "declined" } else { "accepted" };
+        v.push(event("triaged", key, &new.changed, &[issue_id, &new.changed], now, source,
+                     json!({"issue_id": issue_id, "state": state, "actor": new.actor})));
+    }
+    let (from, to) = (state_name(old.map(|s| s.state)), state_name(Some(new.state)));
+    if from != to {
+        let at = state_time(new, &stamp);
+        v.push(event("state_changed", key, &at, &[issue_id, &from, &to, &at], now, source,
+                     json!({"issue_id": issue_id, "from": from, "to": to, "state_name": new.state_name})));
+    }
+    for (field, a, b) in [("assignee", &o.assignee, &new.assignee), ("due", &o.due, &new.due), ("reason", &o.reason, &new.reason)] {
+        if a != b {
+            v.push(event("field_changed", key, &stamp, &[issue_id, field, a, b, &stamp], now, source,
+                         json!({"issue_id": issue_id, "field": field, "from": a, "to": b})));
+        }
+    }
+    v
 }
 
 /// Hash of the item fields whose change is worth a comment on the issue.
@@ -195,8 +322,44 @@ impl Store {
             .map_err(|e| Fatal(format!("{}/{FILE} is not valid ({e}); fix or remove it", state::dir().display())))
     }
 
-    pub fn save(&self) {
+    /// Append the queued events to EVENTS_FILE (or, when it does not exist yet, a
+    /// baseline of every record), then write triage.json.
+    pub fn save(&mut self) {
+        let queued = std::mem::take(&mut self.pending);
+        let events = if state::exists(EVENTS_FILE) { queued } else { self.baseline(state::utcnow()) };
+        state::append_jsonl(EVENTS_FILE, &events);
         state::save_json(FILE, self);
+    }
+
+    /// The component list this run's decisions come from (copied into `decided` events).
+    pub fn set_context(&mut self, context: EventContext) {
+        self.context = context;
+    }
+
+    /// Events queued since the last save() (tests and callers that log elsewhere).
+    pub fn pending_events(&self) -> &[Value] {
+        &self.pending
+    }
+
+    /// Every record as dated events, for the first save() of an event log.
+    pub fn baseline(&self, now: DateTime<Utc>) -> Vec<Value> {
+        let src = "baseline";
+        let mut v = Vec::new();
+        for (key, r) in &self.records {
+            v.push(decided_event(key, r, &self.context, now, src));
+            let Some(issue) = &r.issue else { continue };
+            let created = r.issue_status.as_ref().map(|s| s.created.clone()).filter(|c| !c.is_empty());
+            v.push(issue_created_event(key, issue, created.as_deref().unwrap_or(&r.first_seen), now, src));
+            if let Some(st) = &r.issue_status {
+                let mut ev = status_events(key, &issue.id, None, st, now, src);
+                // Field values were last seen at the record's last change, not now.
+                for e in ev.iter_mut().filter(|e| e["event"] == "field_changed") {
+                    e["at"] = json!(r.updated);
+                }
+                v.extend(ev);
+            }
+        }
+        v
     }
 
     /// Record the matcher's decision for a new item. False (and no change) when
@@ -207,10 +370,12 @@ impl Store {
             return false;
         }
         let stamp = iso_utc(now);
-        self.records.insert(key, Record {
+        let r = Record {
             first_seen: stamp.clone(), decision, issue_create_id: None, issue: None, issue_status: None,
             item_fingerprint: fingerprint(item), updated: stamp, item: item.clone(),
-        });
+        };
+        self.pending.push(decided_event(&key, &r, &self.context, now, "live"));
+        self.records.insert(key, r);
         true
     }
 
@@ -281,6 +446,7 @@ impl Store {
     pub fn set_issue(&mut self, key: &str, issue: IssueRef, now: DateTime<Utc>) -> bool {
         match self.records.get_mut(key) {
             Some(r) if r.issue.is_none() => {
+                self.pending.push(issue_created_event(key, &issue, &iso_utc(now), now, "live"));
                 r.issue = Some(issue);
                 r.updated = iso_utc(now);
                 true
@@ -319,15 +485,27 @@ impl Store {
 
     /// Store what the tracker said. Matches on IssueRef.id; the ref itself is
     /// refreshed too (identifier and URL change when an issue moves team).
-    /// Returns how many records changed.
+    /// Who triaged and when (`actor`, `changed`) are kept when a later read-back of
+    /// an issue still out of Triage comes back without them (the triage history
+    /// entry can fall out of the newest-50 window). Returns how many records changed.
     pub fn apply_statuses(&mut self, statuses: &[(IssueRef, IssueStatus)], now: DateTime<Utc>) -> usize {
         let mut n = 0;
-        for r in self.records.values_mut() {
+        for (key, r) in self.records.iter_mut() {
             let Some(id) = r.issue.as_ref().map(|i| i.id.clone()) else { continue };
             let Some((iref, st)) = statuses.iter().find(|(i, _)| i.id == id) else { continue };
-            if r.issue.as_ref() != Some(iref) || r.issue_status.as_ref() != Some(st) {
+            let mut st = st.clone();
+            if let Some(old) = r.issue_status.as_ref().filter(|_| st.state != IssueState::Triage) {
+                if st.actor.is_empty() {
+                    st.actor = old.actor.clone();
+                }
+                if st.changed.is_empty() {
+                    st.changed = old.changed.clone();
+                }
+            }
+            if r.issue.as_ref() != Some(iref) || r.issue_status.as_ref() != Some(&st) {
+                self.pending.extend(status_events(key, &id, r.issue_status.as_ref(), &st, now, "live"));
                 r.issue = Some(iref.clone());
-                r.issue_status = Some(st.clone());
+                r.issue_status = Some(st);
                 r.updated = iso_utc(now);
                 n += 1;
             }
@@ -377,6 +555,10 @@ impl Store {
             missing_owner: open.iter().filter(|(_, r)| blank(r, |s| s.assignee.as_str())).count(),
             missing_due: open.iter().filter(|(_, r)| blank(r, |s| s.due.as_str())).count(),
             missing_reason: self.records.values().filter(|r| r.matched().is_some() && r.declined_without_reason()).count(),
+            missing_actor: self.records.values()
+                .filter(|r| r.matched().is_some() && !matches!(r.state(), None | Some(IssueState::Triage)))
+                .filter(|r| blank(r, |s| s.actor.as_str()))
+                .count(),
         }
     }
 
@@ -387,10 +569,16 @@ impl Store {
     pub fn prune(&mut self, now: DateTime<Utc>) -> usize {
         let cutoff = iso_utc(now - Duration::days(KEEP_DAYS));
         let before = self.records.len();
-        self.records.retain(|_, r| {
+        let pending = &mut self.pending;
+        self.records.retain(|key, r| {
             let finished = r.matched().is_none()
                 || (r.state().is_some_and(IssueState::is_closed) && !r.declined_without_reason());
-            !(finished && r.first_seen < cutoff)
+            let drop = finished && r.first_seen < cutoff;
+            if drop {
+                pending.push(event("pruned", key, &iso_utc(now), &[&r.first_seen], now, "live",
+                                   json!({"first_seen": r.first_seen})));
+            }
+            !drop
         });
         before - self.records.len()
     }
@@ -658,7 +846,7 @@ mod tests {
 
         let open: Vec<&str> = s.open_tickets().into_iter().map(|(k, _)| k).collect();
         assert_eq!(open, ["CISA KEV:CVE-4", "CISA KEV:CVE-3", "CISA KEV:CVE-2"]);
-        assert_eq!(s.gaps(), Gaps { missing_owner: 0, missing_due: 1, missing_reason: 0 });
+        assert_eq!(s.gaps(), Gaps { missing_owner: 0, missing_due: 1, missing_reason: 0, missing_actor: 4 });
     }
 
     /// FR-A2 asks for a reason on every decline; Linear does not. A decline without one
@@ -688,7 +876,7 @@ mod tests {
         let rows: Vec<(&str, bool, bool)> = s.untriaged(at(5, 10, 0)).iter().map(|u| (u.key, u.overdue, u.no_reason)).collect();
         assert_eq!(rows, [("CISA KEV:CVE-1", true, true), ("CISA KEV:CVE-2", false, true)]);
         assert!(s.open_tickets().is_empty());
-        assert_eq!(s.gaps(), Gaps { missing_owner: 0, missing_due: 0, missing_reason: 2 });
+        assert_eq!(s.gaps(), Gaps { missing_owner: 0, missing_due: 0, missing_reason: 2, missing_actor: 5 });
 
         // 30 days on: the complete declines go, the incomplete ones stay.
         assert_eq!(s.prune(at(30, 12, 0) + Duration::days(5)), 3);
@@ -721,7 +909,7 @@ mod tests {
         ];
         s.apply_statuses(&st, at(4, 9, 0));
         assert_eq!(s.open_tickets().len(), 4);
-        assert_eq!(s.gaps(), Gaps { missing_owner: 2, missing_due: 2, missing_reason: 0 });
+        assert_eq!(s.gaps(), Gaps { missing_owner: 2, missing_due: 2, missing_reason: 0, missing_actor: 5 });
         assert_eq!(Store::default().gaps(), Gaps::default());
     }
 
@@ -769,6 +957,125 @@ mod tests {
 
         std::fs::write(t.dir.join(FILE), "{\"CISA KEV:CVE-1\": {").unwrap();
         assert!(Store::load().unwrap_err().0.contains("triage.json is not valid"));
+    }
+
+    fn events_in(dir: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(dir.join(EVENTS_FILE)).unwrap_or_default()
+            .lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    fn kinds(ev: &[Value]) -> Vec<String> {
+        ev.iter().map(|e| format!("{} {}", e["event"].as_str().unwrap(), e["key"].as_str().unwrap())).collect()
+    }
+
+    /// First save writes a dated baseline; later saves append what changed, once.
+    #[test]
+    fn event_log_baseline_then_changes() {
+        let t = state::testing::temp_state("triage-events");
+        let mut s = Store::default();
+        s.set_context(EventContext { components_version: "t1".into(), components_sha256: "abc".into() });
+        s.record_decision(&item("CVE-1"), matched("tokio"), at(3, 8, 0));
+        s.record_decision(&item("CVE-2"), not_relevant(), at(3, 8, 0));
+        s.set_issue("CISA KEV:CVE-1", iref(1), at(3, 8, 1));
+        assert_eq!(s.pending_events().len(), 3, "decided x2 + issue_created");
+        s.save();
+        let ev = events_in(&t.dir);
+        assert_eq!(kinds(&ev), ["decided CISA KEV:CVE-1", "issue_created CISA KEV:CVE-1", "decided CISA KEV:CVE-2"]);
+        assert!(ev.iter().all(|e| e["source"] == "baseline"));
+        assert_eq!(ev[0]["at"], "2026-11-03T08:00:00Z");
+        assert_eq!(ev[0]["components_sha256"], "abc");
+        assert_eq!(ev[0]["component"], "tokio");
+        assert_eq!(ev[2]["triager"], "matcher 1/3");
+        assert!(s.pending_events().is_empty());
+
+        // Henry accepts with an owner and a due date; Linear's read-back.
+        let mut st = status(IssueState::Accepted, "2026-11-10");
+        st.actor = "Henry".into();
+        st.changed = "2026-11-03T09:00:00Z".into();
+        assert_eq!(s.apply_statuses(&[(iref(1), st.clone())], at(3, 10, 0)), 1);
+        assert_eq!(s.apply_statuses(&[(iref(1), st.clone())], at(3, 16, 0)), 0, "nothing new, no event");
+        s.save();
+        let ev = events_in(&t.dir);
+        let new: Vec<&Value> = ev[3..].iter().collect();
+        assert_eq!(new.iter().map(|e| e["event"].as_str().unwrap()).collect::<Vec<_>>(),
+                   ["triaged", "state_changed", "field_changed", "field_changed"]);
+        assert_eq!(new[0]["state"], "accepted");
+        assert_eq!(new[0]["actor"], "Henry");
+        assert_eq!(new[0]["at"], "2026-11-03T09:00:00Z");
+        assert_eq!((new[1]["from"].as_str(), new[1]["to"].as_str()), (Some("none"), Some("accepted")));
+        assert_eq!((new[2]["field"].as_str(), new[2]["to"].as_str()), (Some("assignee"), Some("Henry")));
+        assert_eq!((new[3]["field"].as_str(), new[3]["to"].as_str()), (Some("due"), Some("2026-11-10")));
+        assert!(new.iter().all(|e| e["source"] == "live"));
+
+        // Done; then the not-relevant record ages out of triage.json.
+        let mut done = st.clone();
+        done.state = IssueState::Done;
+        done.completed = "2026-11-05T12:00:00Z".into();
+        s.apply_statuses(&[(iref(1), done)], at(5, 13, 0));
+        assert_eq!(s.prune(at(3, 8, 0) + Duration::days(KEEP_DAYS + 1)), 2);
+        s.save();
+        let ev = events_in(&t.dir);
+        assert_eq!(kinds(&ev[7..]), ["state_changed CISA KEV:CVE-1", "pruned CISA KEV:CVE-1", "pruned CISA KEV:CVE-2"]);
+        assert_eq!(ev[7]["at"], "2026-11-05T12:00:00Z", "completedAt");
+        // Ids are unique and stable: the same change gives the same id.
+        let mut ids: Vec<&str> = ev.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), ev.len());
+        assert_eq!(Store::load().unwrap().records.len(), 0);
+    }
+
+    /// A preview run never saves, so its decisions never reach the log.
+    #[test]
+    fn unsaved_events_are_not_logged() {
+        let t = state::testing::temp_state("triage-events-preview");
+        let mut s = Store::default();
+        s.record_decision(&item("CVE-1"), matched("tokio"), at(3, 8, 0));
+        drop(s);
+        assert!(!t.dir.join(EVENTS_FILE).exists());
+    }
+
+    /// F5: a read-back that lost who triaged (history window) keeps the earlier answer.
+    #[test]
+    fn read_back_keeps_actor_and_changed() {
+        let mut s = Store::default();
+        s.record_decision(&item("CVE-1"), matched("tokio"), at(3, 8, 0));
+        s.set_issue("CISA KEV:CVE-1", iref(1), at(3, 8, 0));
+        let mut st = status(IssueState::Accepted, "2026-11-10");
+        st.actor = "Henry".into();
+        st.changed = "2026-11-03T09:00:00Z".into();
+        s.apply_statuses(&[(iref(1), st.clone())], at(3, 10, 0));
+        let mut later = st.clone();
+        later.actor = String::new();
+        later.changed = String::new();
+        later.state_name = "In Progress".into();
+        s.apply_statuses(&[(iref(1), later)], at(4, 10, 0));
+        let got = s.records["CISA KEV:CVE-1"].issue_status.clone().unwrap();
+        assert_eq!((got.actor.as_str(), got.changed.as_str(), got.state_name.as_str()),
+                   ("Henry", "2026-11-03T09:00:00Z", "In Progress"));
+        assert_eq!(s.gaps().missing_actor, 0);
+
+        // Moved back to Triage: nothing is kept (Linear clears triagedAt).
+        let mut back = st;
+        back.state = IssueState::Triage;
+        back.actor = String::new();
+        back.changed = String::new();
+        s.apply_statuses(&[(iref(1), back)], at(4, 11, 0));
+        assert_eq!(s.records["CISA KEV:CVE-1"].issue_status.as_ref().unwrap().actor, "");
+    }
+
+    #[test]
+    fn gaps_count_triage_without_actor() {
+        let mut s = Store::default();
+        for (n, actor) in [(1, ""), (2, "James")] {
+            let id = format!("CVE-{n}");
+            s.record_decision(&item(&id), matched("tokio"), at(3, 8, 0));
+            s.set_issue(&format!("CISA KEV:{id}"), iref(n), at(3, 8, 0));
+            let mut st = status(IssueState::Accepted, "2026-11-10");
+            st.actor = actor.into();
+            s.apply_statuses(&[(iref(n), st)], at(3, 9, 0));
+        }
+        assert_eq!(s.gaps().missing_actor, 1);
     }
 
     /// The approved flow end to end on the fake tracker: one issue per item, a
