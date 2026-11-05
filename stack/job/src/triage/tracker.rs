@@ -60,6 +60,25 @@
 //! expires, calls fail with AUTHENTICATION_ERROR until LINEAR_API_KEY is replaced.
 //! The credential never appears in errors, logs or the health note; the header
 //! value is marked sensitive.
+//!
+//! Idempotent issue creation (real Linear, 2026-11-05): every create sends the
+//! job's own id in IssueCreateInput.id, a random UUID v4 (new_issue_id) that the
+//! store saves in the record before the first attempt (sync.rs), so every retry
+//! for the same item sends the same id. Linear stores that id as the issue id
+//! (T15). A second issueCreate with an id that exists answers HTTP 200,
+//! `data: null`, extensions.code INPUT_ERROR, message "conflict on insert of
+//! Issue", and creates nothing (T15). So when the answer to a create is lost
+//! (timeout, proxy reset), the next run's create conflicts and create_issue()
+//! reads the issue with `issue(id:)` and returns it as if just created
+//! (counted in recovered()). Any other INPUT_ERROR stays an error. If the id
+//! conflicts but `issue(id:)` finds nothing (the issue was deleted and Linear
+//! still holds its id; not verified), create_issue() returns IdTaken and sync
+//! retries once with a fresh id, so a deleted issue never blocks later runs.
+//! Linear accepts only version 4: a name-based v5 id was refused with
+//! INVALID_INPUT "id must be a UUID" (2026-11-05), so the id cannot be derived
+//! from the item key. Attachment URLs are no dedup key either: Linear upserts
+//! them per (issue, url) only, the same url on another issue is a new
+//! attachment (T16).
 
 use chrono::{DateTime, Utc};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, USER_AGENT};
@@ -180,6 +199,10 @@ pub enum TrackerError {
     /// The answer does not have the expected shape.
     #[error("Linear: unexpected reply to {0}")]
     Reply(String),
+    /// issueCreate: an issue with this id exists, but Linear does not return it
+    /// (deleted). The caller retries with a new id.
+    #[error("Linear: issue id {0} is taken by an issue Linear does not return (deleted?)")]
+    IdTaken(String),
     /// state/fake-linear.json problems (FakeTracker, test builds only).
     #[cfg(test)]
     #[error("fake tracker: {0}")]
@@ -187,8 +210,15 @@ pub enum TrackerError {
 }
 
 pub trait Tracker {
-    /// Create one issue for a matched item in the triage inbox.
-    fn create_issue(&mut self, item: &Item, m: &Match) -> Result<IssueRef, TrackerError>;
+    /// Create one issue for a matched item in the triage inbox, with `id` (a UUID
+    /// v4 the store keeps for the item) as its tracker id. Called again with the
+    /// same id after an answer was lost, it returns the issue that exists.
+    fn create_issue(&mut self, item: &Item, m: &Match, id: &str) -> Result<IssueRef, TrackerError>;
+    /// How many create_issue() calls so far found their issue already created
+    /// (an earlier answer was lost) instead of creating it.
+    fn recovered(&self) -> usize {
+        0
+    }
     /// Add a comment (Markdown) to an existing issue.
     fn comment(&mut self, issue: &IssueRef, body: &str) -> Result<(), TrackerError>;
     /// Current state of each issue. An issue the tracker no longer returns
@@ -313,6 +343,46 @@ pub fn update_comment(item: &Item) -> String {
          | Updated (UTC) | {} |\n| Title | {} |\n| CVEs | {} |\n| Score / severity | {} |\n\nItem key: `{}`\n",
         cell(&utc(&item.updated)), cell(&item.title), cell(&item.cves.join(", ")), cell(&score_text(item)), item.key()
     )
+}
+
+// ---------------------------------------------------------------- issue ids
+
+/// `b` as a UUID version 4 (RFC 9562 §5.4): version and variant bits set,
+/// lowercase and hyphenated.
+pub fn uuid_v4(mut b: [u8; 16]) -> String {
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+    let h = hex::encode(b);
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
+/// A new random UUID v4 for IssueCreateInput.id (Linear accepts version 4 only).
+/// 16 bytes from /dev/urandom (the job runs on Linux); where that cannot be read,
+/// SHA-256 of OS-seeded hasher keys, the time, the process id and a counter.
+/// Uniqueness is what matters here, not secrecy.
+pub fn new_issue_id() -> String {
+    use std::hash::{BuildHasher, Hasher, RandomState};
+    use std::io::Read;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use sha2::{Digest, Sha256};
+
+    let mut b = [0u8; 16];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_err() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let mut h = Sha256::new();
+        for _ in 0..2 {
+            let mut s = RandomState::new().build_hasher();
+            s.write_u64(n);
+            h.update(s.finish().to_le_bytes());
+        }
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        h.update(nanos.to_le_bytes());
+        h.update(std::process::id().to_le_bytes());
+        b.copy_from_slice(&h.finalize()[..16]);
+    }
+    uuid_v4(b)
 }
 
 // ---------------------------------------------------------------- fake (test builds only)
@@ -453,7 +523,8 @@ impl FakeTracker {
 
 #[cfg(test)]
 impl Tracker for FakeTracker {
-    fn create_issue(&mut self, item: &Item, m: &Match) -> Result<IssueRef, TrackerError> {
+    /// `id` is ignored: the fake's issue id is its identifier (FAKE-n).
+    fn create_issue(&mut self, item: &Item, m: &Match, _id: &str) -> Result<IssueRef, TrackerError> {
         let mut f = Self::load()?;
         let identifier = format!("FAKE-{}", f.next);
         let url = format!("https://linear.invalid/fake/issue/{identifier}");
@@ -652,6 +723,11 @@ const M_ISSUE_CREATE: &str = "mutation IssueCreate($input: IssueCreateInput!) {
   }
 }";
 
+/// The issue an issueCreate conflict refers to. `id` takes the UUID (or an identifier such as "TRI-7").
+const Q_ISSUE_BY_ID: &str = "query IssueById($id: String!) {
+  issue(id: $id) { id identifier url }
+}";
+
 const M_COMMENT_CREATE: &str = "mutation CommentCreate($input: CommentCreateInput!) {
   commentCreate(input: $input) {
     success
@@ -681,11 +757,13 @@ pub struct LinearTracker {
     triage_state: Option<String>,
     /// Rate-limit headers of the last answer, for the health note.
     pub rate: RateLimit,
+    /// create_issue() calls that found their issue already created (Tracker::recovered).
+    recovered: usize,
 }
 
 impl LinearTracker {
     pub fn new(transport: Box<dyn Transport>, team_id: &str) -> Self {
-        Self { transport, team_id: team_id.into(), triage_state: None, rate: RateLimit::default() }
+        Self { transport, team_id: team_id.into(), triage_state: None, rate: RateLimit::default(), recovered: 0 }
     }
 
     /// LINEAR_API_KEY + LINEAR_TEAM_ID from the environment (used by the live test).
@@ -732,6 +810,10 @@ impl LinearTracker {
                 m.push_str(" (LINEAR_API_KEY missing, wrong, revoked or an expired OAuth token)");
             } else if codes.iter().any(|c| c == "FORBIDDEN") || r.status == 403 {
                 m.push_str(" (the key's user or OAuth app cannot access LINEAR_TEAM_ID, or lacks a scope)");
+            } else if codes.iter().any(|c| c == "INPUT_ERROR") && m.contains("Entity not found: Team") {
+                // Real Linear (T13, 2026-11-05): a wrong LINEAR_TEAM_ID, and a key scoped to other
+                // teams, both get this INPUT_ERROR (HTTP 200), not FORBIDDEN.
+                m.push_str(" (wrong LINEAR_TEAM_ID, or the key or OAuth app is not scoped to that team)");
             }
             return Err(TrackerError::GraphQl { message: format!("{label}: {m}"), codes });
         }
@@ -760,6 +842,26 @@ impl LinearTracker {
         self.triage_state = Some(id.to_string());
         Ok(id.to_string())
     }
+
+    /// The issue with this id, None when Linear does not return it (`issue: null`
+    /// or "Entity not found: Issue"; the exact not-found answer is not verified).
+    pub fn issue_by_id(&mut self, id: &str) -> Result<Option<IssueRef>, TrackerError> {
+        match self.gql(Q_ISSUE_BY_ID, json!({"id": id}), "issue") {
+            Ok(d) => match d.get("issue") {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) => issue_ref(v, "issue").map(Some),
+            },
+            Err(TrackerError::GraphQl { message, .. }) if message.contains("Entity not found: Issue") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// issueCreate refused because an issue with the input's id exists (real Linear,
+/// 2026-11-05: HTTP 200, extensions.code INPUT_ERROR, "conflict on insert of Issue").
+fn is_id_conflict(e: &TrackerError) -> bool {
+    matches!(e, TrackerError::GraphQl { message, codes }
+             if codes.iter().any(|c| c == "INPUT_ERROR") && message.contains("conflict on insert of Issue"))
 }
 
 fn s(v: &Value, ptr: &str) -> String {
@@ -845,15 +947,30 @@ pub fn parse_issue_node(n: &Value) -> Result<(IssueRef, IssueStatus), TrackerErr
 }
 
 impl Tracker for LinearTracker {
-    fn create_issue(&mut self, item: &Item, m: &Match) -> Result<IssueRef, TrackerError> {
+    /// issueCreate with `id` as IssueCreateInput.id. On an id conflict the
+    /// existing issue is returned; IdTaken when Linear does not return it (module doc).
+    fn create_issue(&mut self, item: &Item, m: &Match, id: &str) -> Result<IssueRef, TrackerError> {
         let state = self.triage_state_id()?;
-        let input = json!({"teamId": self.team_id, "title": issue_title(item),
+        let input = json!({"id": id, "teamId": self.team_id, "title": issue_title(item),
                            "description": issue_description(item, m), "stateId": state});
-        let d = self.gql(M_ISSUE_CREATE, json!({"input": input}), "issueCreate")?;
+        let d = match self.gql(M_ISSUE_CREATE, json!({"input": input}), "issueCreate") {
+            Ok(d) => d,
+            Err(e) if is_id_conflict(&e) => {
+                // Created by an earlier attempt whose answer was lost.
+                let r = self.issue_by_id(id)?.ok_or_else(|| TrackerError::IdTaken(id.into()))?;
+                self.recovered += 1;
+                return Ok(r);
+            }
+            Err(e) => return Err(e),
+        };
         if d.pointer("/issueCreate/success") != Some(&Value::Bool(true)) {
             return Err(TrackerError::Reply(format!("issueCreate: success is not true: {}", head(&d.to_string(), 200))));
         }
         issue_ref(d.pointer("/issueCreate/issue").unwrap_or(&Value::Null), "issueCreate")
+    }
+
+    fn recovered(&self) -> usize {
+        self.recovered
     }
 
     fn comment(&mut self, issue: &IssueRef, body: &str) -> Result<(), TrackerError> {
@@ -912,6 +1029,31 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 11, 3, 8, 0, 0).unwrap()
     }
 
+    /// The issue id the tests send; the conflict and lookup fixtures name it too.
+    const ID: &str = "3d4f6a2e-8b1c-4e7a-9f20-5c6b7a8d9e01";
+
+    /// Linear's IsUUID("4") check, as observed on 2026-11-05 (v5 refused).
+    fn is_uuid_v4(s: &str) -> bool {
+        let b = s.as_bytes();
+        s.len() == 36
+            && s.char_indices().all(|(i, c)| if [8, 13, 18, 23].contains(&i) { c == '-' } else { c.is_ascii_hexdigit() })
+            && b[14] == b'4'
+            && matches!(b[19], b'8' | b'9' | b'a' | b'b')
+    }
+
+    // ------------------------------------------------ issue ids
+
+    #[test]
+    fn issue_ids_are_random_uuid_v4() {
+        assert_eq!(uuid_v4([0; 16]), "00000000-0000-4000-8000-000000000000");
+        assert_eq!(uuid_v4([0xff; 16]), "ffffffff-ffff-4fff-bfff-ffffffffffff");
+        assert!(is_uuid_v4(ID));
+        assert!(!is_uuid_v4("e8caf09b-8627-59c1-8257-e4112feff854"), "the v5 id Linear refused");
+        let ids: std::collections::BTreeSet<String> = (0..1000).map(|_| new_issue_id()).collect();
+        assert_eq!(ids.len(), 1000, "no repeats");
+        assert!(ids.iter().all(|i| is_uuid_v4(i)), "{ids:?}");
+    }
+
     // ------------------------------------------------ content
 
     #[test]
@@ -965,10 +1107,10 @@ mod tests {
     fn fake_round_trip_with_hand_edit() {
         let t = state::testing::temp_state("fake-linear");
         let mut f = FakeTracker::with_clock(fixed_now);
-        let a = f.create_issue(&item(), &m()).unwrap();
+        let a = f.create_issue(&item(), &m(), ID).unwrap();
         let mut other = item();
         other.id = "CVE-2026-9".into();
-        let b = f.create_issue(&other, &m()).unwrap();
+        let b = f.create_issue(&other, &m(), ID).unwrap();
         assert_eq!((a.identifier.as_str(), b.identifier.as_str()), ("FAKE-1", "FAKE-2"));
         f.comment(&a, &update_comment(&item())).unwrap();
 
@@ -1012,7 +1154,7 @@ mod tests {
         let p = t.dir.join(FAKE_FILE);
         std::fs::write(&p, r#"{"next": 2, "issues": [{"identifier": "FAKE-1", "url": "u", "title": "t", "state": "maybe"}]}"#).unwrap();
         let mut f = FakeTracker::new();
-        let e = f.create_issue(&item(), &m()).unwrap_err();
+        let e = f.create_issue(&item(), &m(), ID).unwrap_err();
         assert!(matches!(&e, TrackerError::Fake(msg) if msg.contains("is not valid")), "{e}");
         assert!(std::fs::read_to_string(&p).unwrap().contains("maybe"), "file must not be overwritten");
         let r = IssueRef { id: "FAKE-7".into(), identifier: "FAKE-7".into(), url: String::new() };
@@ -1139,13 +1281,13 @@ mod tests {
             reply(200, &fixture("linear_issue_create.json"), &[]),
             reply(200, &fixture("linear_comment_create.json"), &[]),
         ]);
-        let r = l.create_issue(&item(), &m()).unwrap();
+        let r = l.create_issue(&item(), &m(), ID).unwrap();
         assert_eq!(r, IssueRef {
             id: "a1b2c3d4-0000-4000-8000-000000000123".into(), identifier: "CTP-123".into(),
             url: "https://linear.app/ediphy/issue/CTP-123/cve-2026-1234-tokio-runtime-use-after-free".into(),
         });
         assert_eq!(l.rate.note(), "requests 2498/2500 (reset 2026-11-03T08:00:00Z)");
-        l.create_issue(&item(), &m()).unwrap(); // triage state id is cached: no second lookup
+        l.create_issue(&item(), &m(), ID).unwrap(); // triage state id is cached: no second lookup
         l.comment(&r, "**exploit-watch**: x").unwrap();
 
         let seen = seen.lock().unwrap();
@@ -1153,12 +1295,88 @@ mod tests {
         assert!(seen[0]["query"].as_str().unwrap().contains("type: { eq: \"triage\" }"));
         assert_eq!(seen[0]["variables"], json!({"team": "team-uuid"}));
         let input = &seen[1]["variables"]["input"];
+        assert_eq!(input["id"], ID, "the job's own issue id");
         assert_eq!(input["teamId"], "team-uuid");
         assert_eq!(input["stateId"], "6f1e2d3c-0000-4000-8000-00000000000a");
         assert_eq!(input["title"], "[CVE-2026-1234] Tokio | runtime use-after-free");
         assert!(input["description"].as_str().unwrap().contains("Item key: `CISA KEV:CVE-2026-1234`"));
         assert!(seen[2]["query"].as_str().unwrap().starts_with("mutation IssueCreate"));
         assert_eq!(seen[3]["variables"]["input"], json!({"issueId": r.id, "body": "**exploit-watch**: x"}));
+    }
+
+    /// The answer to an earlier create was lost: Linear refuses the same id
+    /// (T15 body), and the issue is read back by id instead.
+    #[test]
+    fn linear_create_conflict_is_recovered_by_lookup() {
+        let (mut l, seen) = linear(vec![
+            reply(200, &fixture("linear_workflow_states.json"), &[]),
+            reply(200, &fixture("linear_error_issue_conflict.json"), &[]),
+            reply(200, &fixture("linear_issue_by_id.json"), &[]),
+        ]);
+        assert_eq!(l.recovered(), 0);
+        let r = l.create_issue(&item(), &m(), ID).unwrap();
+        assert_eq!(r, IssueRef {
+            id: ID.into(), identifier: "CTP-120".into(),
+            url: "https://linear.app/ediphy/issue/CTP-120/cve-2026-1234-tokio-runtime-use-after-free".into(),
+        });
+        assert_eq!(l.recovered(), 1);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[1]["variables"]["input"]["id"], ID);
+        assert!(seen[2]["query"].as_str().unwrap().starts_with("query IssueById"));
+        assert!(seen[2]["query"].as_str().unwrap().contains("issue(id: $id)"));
+        assert_eq!(seen[2]["variables"], json!({"id": ID}));
+    }
+
+    /// The id is taken but its issue is gone: IdTaken, so sync can retry with a new id.
+    #[test]
+    fn linear_create_conflict_without_issue_is_id_taken() {
+        let not_found = r#"{"errors":[{"message":"Entity not found: Issue","path":["issue"],
+                            "extensions":{"type":"invalid input","code":"INPUT_ERROR","statusCode":400}}],"data":null}"#;
+        let (mut l, _) = linear(vec![
+            reply(200, &fixture("linear_error_issue_conflict.json"), &[]),
+            reply(200, r#"{"data":{"issue":null}}"#, &[]),
+            reply(200, &fixture("linear_error_issue_conflict.json"), &[]),
+            reply(200, not_found, &[]),
+            reply(200, &fixture("linear_error_issue_conflict.json"), &[]),
+            Err("operation timed out".into()),
+        ]);
+        l.triage_state = Some("s".into());
+        assert_eq!(l.create_issue(&item(), &m(), ID).unwrap_err(), TrackerError::IdTaken(ID.into()));
+        let e = l.create_issue(&item(), &m(), ID).unwrap_err();
+        assert_eq!(e, TrackerError::IdTaken(ID.into()));
+        assert_eq!(e.to_string(), format!("Linear: issue id {ID} is taken by an issue Linear does not return (deleted?)"));
+        // The lookup itself fails: that error, not IdTaken (the next run tries again).
+        assert_eq!(l.create_issue(&item(), &m(), ID).unwrap_err(),
+                   TrackerError::Network("issue: operation timed out".into()));
+        assert_eq!(l.recovered(), 0);
+    }
+
+    /// Only "conflict on insert of Issue" is recovered; every other INPUT_ERROR or
+    /// INVALID_INPUT stays an error, with no lookup.
+    #[test]
+    fn linear_other_input_errors_stay_errors() {
+        let other = r#"{"errors":[{"message":"conflict on insert of Comment",
+                        "extensions":{"code":"INPUT_ERROR"}}],"data":null}"#;
+        let (mut l, seen) = linear(vec![
+            reply(200, &fixture("linear_error_team_not_found.json"), &[]),
+            reply(200, &fixture("linear_error_id_not_uuid.json"), &[]),
+            reply(200, other, &[]),
+        ]);
+        l.triage_state = Some("s".into());
+        // T13 (2026-11-05): wrong LINEAR_TEAM_ID or a key scoped to other teams.
+        let e = l.create_issue(&item(), &m(), ID).unwrap_err();
+        assert!(matches!(&e, TrackerError::GraphQl { codes, .. } if codes == &["INPUT_ERROR"]), "{e:?}");
+        assert_eq!(e.to_string(), "Linear: GraphQL errors: issueCreate: Entity not found: Team \
+                                   (wrong LINEAR_TEAM_ID, or the key or OAuth app is not scoped to that team)");
+        // 2026-11-05: Linear accepts only UUID v4 as IssueCreateInput.id.
+        let e = l.create_issue(&item(), &m(), "e8caf09b-8627-59c1-8257-e4112feff854").unwrap_err();
+        assert!(matches!(&e, TrackerError::GraphQl { codes, .. } if codes == &["INVALID_INPUT"]), "{e:?}");
+        assert_eq!(e.to_string(), "Linear: GraphQL errors: issueCreate: Argument Validation Error");
+        let e = l.create_issue(&item(), &m(), ID).unwrap_err();
+        assert!(matches!(&e, TrackerError::GraphQl { message, .. } if message.contains("Comment")), "{e:?}");
+        assert_eq!(seen.lock().unwrap().len(), 3, "no issue lookup after these errors");
+        assert_eq!(l.recovered(), 0);
     }
 
     #[test]
@@ -1344,9 +1562,9 @@ mod tests {
         assert_eq!(q(&mut l), TrackerError::Reply("viewer: non-JSON body: not json".into()));
 
         l.triage_state = Some("s".into());
-        assert!(matches!(l.create_issue(&item(), &m()).unwrap_err(), TrackerError::Reply(m) if m.starts_with("issueCreate: success")));
+        assert!(matches!(l.create_issue(&item(), &m(), ID).unwrap_err(), TrackerError::Reply(m) if m.starts_with("issueCreate: success")));
         l.triage_state = None;
-        let e = l.create_issue(&item(), &m()).unwrap_err();
+        let e = l.create_issue(&item(), &m(), ID).unwrap_err();
         assert!(matches!(&e, TrackerError::Config(m) if m.contains("has no triage state")), "{e}");
         let r = IssueRef { id: "x".into(), identifier: "CTP-1".into(), url: String::new() };
         assert!(matches!(l.fetch_states(&[r]).unwrap_err(), TrackerError::Reply(m) if m.contains("\"paused\"")));
@@ -1380,7 +1598,7 @@ mod tests {
         let mut l = LinearTracker::from_env().unwrap();
         let mut it = item();
         it.title = format!("exploit-watch live test {}", iso_utc(Utc::now()));
-        let r = l.create_issue(&it, &m()).unwrap();
+        let r = l.create_issue(&it, &m(), &new_issue_id()).unwrap();
         eprintln!("created {} {}", r.identifier, r.url);
         l.comment(&r, &update_comment(&it)).unwrap();
         let st = l.fetch_states(std::slice::from_ref(&r)).unwrap();

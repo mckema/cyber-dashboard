@@ -1,0 +1,17 @@
+{
+  "errors": [
+    {
+      "message": "conflict on insert of Issue",
+      "path": ["issueCreate"],
+      "locations": [{"line": 2, "column": 3}],
+      "extensions": {
+        "type": "invalid input",
+        "code": "INPUT_ERROR",
+        "statusCode": 400,
+        "userError": true,
+        "userPresentableMessage": "Entity Issue with id 3d4f6a2e-8b1c-4e7a-9f20-5c6b7a8d9e01 already exists."
+      }
+    }
+  ],
+  "data": null
+}

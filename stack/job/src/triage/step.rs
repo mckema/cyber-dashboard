@@ -86,6 +86,7 @@ pub fn step(items: &[Item], cves: &[Item], now: DateTime<Utc>, write: bool) -> O
                 let rep = sync(&mut store, t.as_mut(), items, now);
                 println!("  triage: {}", rep.note());
                 record["created"] = json!(rep.created);
+                record["recovered"] = json!(rep.recovered);
                 record["commented"] = json!(rep.commented);
                 record["updated"] = json!(rep.updated);
                 if !rep.errors.is_empty() {

@@ -1,0 +1,30 @@
+{
+  "errors": [
+    {
+      "message": "Argument Validation Error",
+      "path": ["issueCreate"],
+      "locations": [{"line": 2, "column": 3}],
+      "extensions": {
+        "code": "INVALID_INPUT",
+        "validationErrors": [
+          {
+            "target": {
+              "id": "e8caf09b-8627-59c1-8257-e4112feff854",
+              "title": "[linear-test] v5 IssueCreateInput.id (2026-11-05)",
+              "description": "Checks that Linear accepts a name-based (version 5) UUID as IssueCreateInput.id. Test data only.",
+              "teamId": "6f1e2d3c-0000-4000-8000-0000000000aa"
+            },
+            "value": "e8caf09b-8627-59c1-8257-e4112feff854",
+            "property": "id",
+            "children": [],
+            "constraints": {"isUuid": "id must be a UUID"}
+          }
+        ],
+        "type": "invalid input",
+        "userError": true,
+        "userPresentableMessage": "id must be a UUID."
+      }
+    }
+  ],
+  "data": null
+}

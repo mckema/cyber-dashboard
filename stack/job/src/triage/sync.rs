@@ -2,9 +2,13 @@
 //! in line. In order:
 //!
 //!   1. refresh the snapshot of records without an issue from this run's items
-//!   2. create an issue for each pending record (from its snapshot, so also for
-//!      items that left the 7-day window); save the store after each create, so
-//!      a crash cannot cause a duplicate
+//!   2. give each pending record its issue_create_id (a new UUID v4) and save the
+//!      store before any create sends one; then create an issue for each pending
+//!      record (from its snapshot, so also for items that left the 7-day window)
+//!      with that id; save the store after each create, so a crash cannot cause a
+//!      duplicate. A create whose answer was lost is sent again with the same id
+//!      next run and comes back as the existing issue (recovered); an id whose
+//!      issue was deleted (IdTaken) is replaced by a new one and tried once more
 //!   3. comment on items whose fields changed since their issue was created or
 //!      last commented on
 //!   4. read every issue's state back and store it
@@ -17,15 +21,17 @@
 use chrono::{DateTime, Utc};
 
 use super::store::Store;
-use super::tracker::{Tracker, update_comment};
+use super::tracker::{Tracker, TrackerError, new_issue_id, update_comment};
 use super::types::Match;
 use crate::feeds::common::Item;
 
 /// What one sync() did, for the health note.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
-    /// Issues created.
+    /// Issues created (including the recovered ones).
     pub created: usize,
+    /// Of `created`: issues an earlier run had created but never got the answer for.
+    pub recovered: usize,
     /// Update comments added.
     pub commented: usize,
     /// Records whose issue state (or ref) changed.
@@ -35,9 +41,12 @@ pub struct SyncReport {
 }
 
 impl SyncReport {
-    /// "tracker: 2 created, 1 commented, 3 updated" plus "; error: …" when one occurred.
+    /// "tracker: 2 created, 1 commented, 3 updated" plus "; error: …" when one occurred;
+    /// "2 created (1 already existed)" when issues were recovered.
     pub fn note(&self) -> String {
-        let mut s = format!("tracker: {} created, {} commented, {} updated", self.created, self.commented, self.updated);
+        let existed = if self.recovered > 0 { format!(" ({} already existed)", self.recovered) } else { String::new() };
+        let mut s = format!("tracker: {} created{existed}, {} commented, {} updated", self.created, self.commented,
+                            self.updated);
         for e in &self.errors {
             s.push_str("; error: ");
             s.push_str(e);
@@ -49,9 +58,11 @@ impl SyncReport {
 /// Run steps 1-5 of the module doc. `items` are this run's feed items.
 pub fn sync(store: &mut Store, tracker: &mut dyn Tracker, items: &[Item], now: DateTime<Utc>) -> SyncReport {
     let mut rep = SyncReport::default();
+    let recovered_before = tracker.recovered();
     if let Err(e) = round(store, tracker, items, now, &mut rep) {
         rep.errors.push(e);
     }
+    rep.recovered = tracker.recovered().saturating_sub(recovered_before);
     store.save();
     rep
 }
@@ -61,10 +72,26 @@ fn round(store: &mut Store, tracker: &mut dyn Tracker, items: &[Item], now: Date
          -> Result<(), String> {
     store.refresh_pending(items, now);
 
-    let pending: Vec<(String, Item, Match)> =
-        store.pending_issues().into_iter().map(|(k, it, m)| (k.to_string(), it.clone(), m.clone())).collect();
-    for (key, item, m) in pending {
-        let issue = tracker.create_issue(&item, &m).map_err(|e| format!("create issue for {key}: {e}"))?;
+    if store.assign_create_ids(new_issue_id) > 0 {
+        store.save(); // on disk before any create sends them
+    }
+    let pending: Vec<(String, Item, Match, String)> = store
+        .pending_issues()
+        .into_iter()
+        .map(|(k, it, m)| (k.to_string(), it.clone(), m.clone(), store.create_id(k).unwrap_or_default().to_string()))
+        .collect();
+    for (key, item, m, id) in pending {
+        let issue = match tracker.create_issue(&item, &m, &id) {
+            Err(TrackerError::IdTaken(_)) => {
+                // The id's issue was deleted and Linear keeps the id: file the item under a new one.
+                let fresh = new_issue_id();
+                store.renew_create_id(&key, fresh.clone(), now);
+                store.save();
+                tracker.create_issue(&item, &m, &fresh)
+            }
+            r => r,
+        }
+        .map_err(|e| format!("create issue for {key}: {e}"))?;
         let identifier = issue.identifier.clone();
         if !store.set_issue(&key, issue, now) {
             // Cannot happen (pending records have no issue); never lose the created one silently.
@@ -94,8 +121,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::Value;
+
     use crate::feeds::state;
-    use crate::triage::tracker::{FAKE_FILE, FakeTracker, IssueRef, IssueState, IssueStatus, TrackerError};
+    use crate::triage::tracker::{FAKE_FILE, FakeTracker, HttpReply, IssueRef, IssueState, IssueStatus, LinearTracker,
+                                 Transport};
     use crate::triage::types::Decision;
 
     fn at(d: u32, h: u32) -> DateTime<Utc> {
@@ -138,7 +170,7 @@ mod tests {
     }
 
     impl Tracker for Flaky {
-        fn create_issue(&mut self, item: &Item, _m: &Match) -> Result<IssueRef, TrackerError> {
+        fn create_issue(&mut self, item: &Item, _m: &Match, _id: &str) -> Result<IssueRef, TrackerError> {
             self.call(format!("create {}", item.id))?;
             let n = &item.id[10..]; // NCSC-2026-0464 -> CTP-0464
             Ok(IssueRef { id: format!("id-{n}"), identifier: format!("CTP-{n}"), url: format!("https://linear.app/x/issue/CTP-{n}") })
@@ -169,7 +201,7 @@ mod tests {
         let items: Vec<Item> = ids.iter().map(|i| item(i)).collect();
 
         let r = sync(&mut s, &mut tr, &items, at(3, 12));
-        assert_eq!(r, SyncReport { created: 2, commented: 0, updated: 2, errors: vec![] });
+        assert_eq!(r, SyncReport { created: 2, recovered: 0, commented: 0, updated: 2, errors: vec![] });
         assert_eq!(r.note(), "tracker: 2 created, 0 commented, 2 updated");
         assert_eq!(Store::load().unwrap(), s, "saved");
         assert_eq!(s.records["NCSC-NL:NCSC-2026-0464"].issue.as_ref().unwrap().identifier, "FAKE-1");
@@ -241,5 +273,136 @@ mod tests {
         assert_eq!(r.commented, 0);
         let r = sync(&mut s, &mut Flaky { fail_at: 99, calls: vec![] }, &changed, at(3, 15));
         assert_eq!((r.commented, r.updated, r.errors.len()), (1, 3, 0));
+    }
+
+    // ------------------------------------------------ lost answers, over a Linear-like transport
+
+    /// What the fake Linear server holds: issue ids (in creation order), ids that
+    /// are taken by deleted issues, the answers to lose, and every operation seen.
+    #[derive(Default)]
+    struct Server {
+        issues: Vec<String>,
+        deleted: Vec<String>,
+        lose_creates: usize,
+        ops: Vec<String>,
+    }
+
+    /// Transport that answers like Linear (T15): IssueCreate stores input.id, a
+    /// second create with that id is INPUT_ERROR "conflict on insert of Issue"
+    /// (HTTP 200), IssueById finds an issue by id. A "lost" create is stored on
+    /// the server but the client gets a network error, as on a proxy reset.
+    struct FakeLinear(Arc<Mutex<Server>>);
+
+    fn ok(v: Value) -> Result<HttpReply, String> {
+        Ok(HttpReply { status: 200, headers: vec![], body: v.to_string().into_bytes() })
+    }
+
+    fn node(id: &str, n: usize) -> Value {
+        json!({"id": id, "identifier": format!("TRI-{n}"), "url": format!("https://linear.app/x/issue/TRI-{n}"),
+               "state": {"type": "triage", "name": "Triage"}, "assignee": null, "dueDate": null,
+               "history": {"nodes": []}, "comments": {"nodes": []}})
+    }
+
+    impl Transport for FakeLinear {
+        fn post(&mut self, body: &Value) -> Result<HttpReply, String> {
+            let mut s = self.0.lock().unwrap();
+            let q = body["query"].as_str().unwrap_or("");
+            let op = q.split(['(', ' ']).nth(1).unwrap_or("").to_string();
+            s.ops.push(op.clone());
+            let find = |s: &Server, id: &str| s.issues.iter().position(|i| i == id).map(|n| node(id, n + 1));
+            match op.as_str() {
+                "TriageState" => ok(json!({"data": {"workflowStates": {"nodes": [{"id": "st", "name": "Triage", "type": "triage"}]}}})),
+                "IssueCreate" => {
+                    let id = body["variables"]["input"]["id"].as_str().unwrap_or("").to_string();
+                    if s.issues.contains(&id) || s.deleted.contains(&id) {
+                        return ok(json!({"errors": [{"message": "conflict on insert of Issue", "path": ["issueCreate"],
+                                                     "extensions": {"type": "invalid input", "code": "INPUT_ERROR",
+                                                                    "statusCode": 400, "userError": true}}],
+                                         "data": null}));
+                    }
+                    s.issues.push(id.clone());
+                    if s.lose_creates > 0 {
+                        s.lose_creates -= 1;
+                        return Err("error sending request: operation timed out".into());
+                    }
+                    let n = find(&s, &id).unwrap();
+                    ok(json!({"data": {"issueCreate": {"success": true, "issue": n}}}))
+                }
+                "IssueById" => {
+                    let id = body["variables"]["id"].as_str().unwrap_or("");
+                    match find(&s, id) {
+                        Some(n) => ok(json!({"data": {"issue": n}})),
+                        None => ok(json!({"errors": [{"message": "Entity not found: Issue",
+                                                      "extensions": {"code": "INPUT_ERROR"}}], "data": null})),
+                    }
+                }
+                "IssueStates" => {
+                    let ids: Vec<&str> = body["variables"]["ids"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+                    let nodes: Vec<Value> = ids.iter().filter_map(|i| find(&s, i)).collect();
+                    ok(json!({"data": {"issues": {"nodes": nodes}}}))
+                }
+                _ => panic!("unexpected operation {op:?}"),
+            }
+        }
+    }
+
+    fn fake_linear(server: &Arc<Mutex<Server>>) -> LinearTracker {
+        LinearTracker::new(Box::new(FakeLinear(server.clone())), "team-uuid")
+    }
+
+    /// The create succeeds on the server but its answer is lost: the run reports the
+    /// error and keeps the id on disk; the next run sends the same id, gets the
+    /// conflict, reads the issue back and records it. One issue per item.
+    #[test]
+    fn lost_create_answer_is_recovered_next_run() {
+        let _t = state::testing::temp_state("triage-sync-lost");
+        let ids = ["NCSC-2026-0464", "NCSC-2026-0465"];
+        let items: Vec<Item> = ids.iter().map(|i| item(i)).collect();
+        let mut s = store_with(&ids);
+        let server = Arc::new(Mutex::new(Server { lose_creates: 1, ..Default::default() }));
+
+        let r = sync(&mut s, &mut fake_linear(&server), &items, at(3, 12));
+        assert_eq!((r.created, r.recovered), (0, 0));
+        assert_eq!(r.errors, ["create issue for NCSC-NL:NCSC-2026-0464: \
+                               Linear: network error: issueCreate: error sending request: operation timed out"]);
+        assert_eq!(server.lock().unwrap().issues.len(), 1, "Linear has the issue, the job does not know it");
+        let sent = s.create_id("NCSC-NL:NCSC-2026-0464").unwrap().to_string();
+        assert_eq!(server.lock().unwrap().issues[0], sent);
+        assert_eq!(Store::load().unwrap(), s, "the id is on disk although the create failed");
+
+        // Next run, from the saved store (a fresh process).
+        let mut s = Store::load().unwrap();
+        server.lock().unwrap().ops.clear();
+        let r = sync(&mut s, &mut fake_linear(&server), &items, at(3, 18));
+        assert_eq!(r, SyncReport { created: 2, recovered: 1, commented: 0, updated: 2, errors: vec![] });
+        assert_eq!(r.note(), "tracker: 2 created (1 already existed), 0 commented, 2 updated");
+        let srv = server.lock().unwrap();
+        assert_eq!(srv.ops, ["TriageState", "IssueCreate", "IssueById", "IssueCreate", "IssueStates"]);
+        assert_eq!(srv.issues.len(), 2, "no second issue for the first item");
+        let first = s.records["NCSC-NL:NCSC-2026-0464"].issue.clone().unwrap();
+        assert_eq!((first.id.as_str(), first.identifier.as_str()), (sent.as_str(), "TRI-1"));
+        assert_eq!(s.records["NCSC-NL:NCSC-2026-0465"].issue.as_ref().unwrap().identifier, "TRI-2");
+        assert_eq!(s.untriaged(at(3, 18)).len(), 2);
+    }
+
+    /// The id's issue was deleted and Linear keeps the id: the record gets a new
+    /// id (saved first) and the issue is filed once, in the same run.
+    #[test]
+    fn id_of_a_deleted_issue_is_replaced_once() {
+        let _t = state::testing::temp_state("triage-sync-deleted");
+        let items = vec![item("NCSC-2026-0464")];
+        let mut s = store_with(&["NCSC-2026-0464"]);
+        s.assign_create_ids(|| "0f0e0d0c-0b0a-4908-8706-050403020100".into());
+        let server = Arc::new(Mutex::new(Server { deleted: vec!["0f0e0d0c-0b0a-4908-8706-050403020100".into()],
+                                                   ..Default::default() }));
+        let r = sync(&mut s, &mut fake_linear(&server), &items, at(3, 12));
+        assert_eq!((r.created, r.recovered, r.errors.len()), (1, 0, 0), "{:?}", r.errors);
+        let srv = server.lock().unwrap();
+        assert_eq!(srv.ops, ["TriageState", "IssueCreate", "IssueById", "IssueCreate", "IssueStates"]);
+        let rec = &s.records["NCSC-NL:NCSC-2026-0464"];
+        let new_id = rec.issue_create_id.clone().unwrap();
+        assert_ne!(new_id, "0f0e0d0c-0b0a-4908-8706-050403020100");
+        assert_eq!(rec.issue.as_ref().unwrap().id, new_id);
+        assert_eq!(srv.issues, [new_id]);
     }
 }

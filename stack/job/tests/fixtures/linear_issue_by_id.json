@@ -1,0 +1,9 @@
+{
+  "data": {
+    "issue": {
+      "id": "3d4f6a2e-8b1c-4e7a-9f20-5c6b7a8d9e01",
+      "identifier": "CTP-120",
+      "url": "https://linear.app/ediphy/issue/CTP-120/cve-2026-1234-tokio-runtime-use-after-free"
+    }
+  }
+}

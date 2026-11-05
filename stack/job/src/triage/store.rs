@@ -4,6 +4,8 @@
 //!    "CISA KEV:CVE-2026-1234": {
 //!     "first_seen": "2026-11-03T08:00:00Z",
 //!     "decision": {"decision": "matched", "component": "fairct-scorer", "rule": "package", "evidence": "rust:tokio"},
+//!     "issue_create_id": "5f0c…-4…",     UUID v4 sent as IssueCreateInput.id; set and saved
+//!                                        before the first create, absent on records without one
 //!     "issue": {"id": "…", "identifier": "CTP-123", "url": "https://linear.app/…"},      null until created
 //!     "issue_status": {"state": "accepted", "assignee": "…", "due": "2026-11-10", …},  null until read back
 //!     "item_fingerprint": "3f9c…",       hash of the item fields that matter; a change -> comment
@@ -19,7 +21,10 @@
 //! The store is what keeps one issue per item: an issue is created only for a
 //! matched record without one, and set_issue() refuses a second. Save it right
 //! after each create, so a crash between create and save cannot cause a duplicate
-//! (sync.rs does).
+//! (sync.rs does). A create whose answer is lost is covered by issue_create_id:
+//! assign_create_ids() gives each pending record its id once, sync saves it
+//! before the first create, and every retry sends the same id, which Linear
+//! refuses to insert twice (tracker.rs).
 //!
 //! FR-A2 "triaged within 1 business day" is counted in Amsterdam local time
 //! (Ediphy), Monday to Friday, no holiday calendar: business_time() / is_overdue().
@@ -47,6 +52,10 @@ pub const KEEP_DAYS: i64 = 30;
 pub struct Record {
     pub first_seen: String,
     pub decision: Decision,
+    /// The id every issueCreate for this record sends (UUID v4), so a retry after a
+    /// lost answer cannot file a second issue. Kept after the issue is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_create_id: Option<String>,
     #[serde(default)]
     pub issue: Option<IssueRef>,
     #[serde(default)]
@@ -177,7 +186,7 @@ impl Store {
         }
         let stamp = iso_utc(now);
         self.records.insert(key, Record {
-            first_seen: stamp.clone(), decision, issue: None, issue_status: None,
+            first_seen: stamp.clone(), decision, issue_create_id: None, issue: None, issue_status: None,
             item_fingerprint: fingerprint(item), updated: stamp, item: item.clone(),
         });
         true
@@ -213,6 +222,37 @@ impl Store {
             .collect();
         v.sort_by(|a, b| a.1.first_seen.cmp(&b.1.first_seen).then(a.0.cmp(b.0)));
         v.into_iter().map(|(k, r, m)| (k, &r.item, m)).collect()
+    }
+
+    /// Give every pending record (pending_issues) without an issue_create_id one
+    /// from `new_id`. Save before sending any of them. Returns how many were set.
+    pub fn assign_create_ids(&mut self, mut new_id: impl FnMut() -> String) -> usize {
+        let mut n = 0;
+        for r in self.records.values_mut() {
+            if r.issue.is_none() && r.issue_create_id.is_none() && r.matched().is_some() {
+                r.issue_create_id = Some(new_id());
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// The id the next issueCreate for `key` sends.
+    pub fn create_id(&self, key: &str) -> Option<&str> {
+        self.records.get(key)?.issue_create_id.as_deref()
+    }
+
+    /// Replace the create id of a record without an issue (its old id belongs to a
+    /// deleted issue). False when the key is unknown or already has an issue.
+    pub fn renew_create_id(&mut self, key: &str, id: String, now: DateTime<Utc>) -> bool {
+        match self.records.get_mut(key) {
+            Some(r) if r.issue.is_none() => {
+                r.issue_create_id = Some(id);
+                r.updated = iso_utc(now);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Attach the created issue. False when the key is unknown or already has an issue.
@@ -469,6 +509,39 @@ mod tests {
         assert_eq!(s.records["CISA KEV:CVE-1"].updated, "2026-11-03T08:01:00Z");
         assert_eq!(s.pending_issues().len(), 1);
         assert_eq!(s.issues(), vec![iref(1)]);
+    }
+
+    #[test]
+    fn create_ids_are_assigned_once_and_kept() {
+        let t = state::testing::temp_state("triage-create-ids");
+        let mut s = Store::default();
+        s.record_decision(&item("CVE-1"), matched("c"), at(3, 8, 0));
+        s.record_decision(&item("CVE-2"), matched("c"), at(3, 8, 0));
+        s.record_decision(&item("CVE-3"), not_relevant(), at(3, 8, 0));
+        s.record_decision(&item("CVE-4"), matched("c"), at(3, 8, 0));
+        s.set_issue("CISA KEV:CVE-4", iref(4), at(3, 8, 0));
+        let mut n = 0;
+        let mut gen_id = || {
+            n += 1;
+            format!("id-{n}")
+        };
+        assert_eq!(s.assign_create_ids(&mut gen_id), 2, "matched records without an issue only");
+        assert_eq!(s.assign_create_ids(&mut gen_id), 0, "an id, once given, is never replaced");
+        assert_eq!((s.create_id("CISA KEV:CVE-1"), s.create_id("CISA KEV:CVE-2")), (Some("id-1"), Some("id-2")));
+        assert_eq!((s.create_id("CISA KEV:CVE-3"), s.create_id("CISA KEV:CVE-4"), s.create_id("nope")), (None, None, None));
+
+        // Saved with the record; records without one have no such key.
+        s.save();
+        let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(t.dir.join(FILE)).unwrap()).unwrap();
+        assert_eq!(j["CISA KEV:CVE-1"]["issue_create_id"], "id-1");
+        assert!(j["CISA KEV:CVE-3"].get("issue_create_id").is_none());
+        assert_eq!(Store::load().unwrap(), s);
+
+        assert!(s.renew_create_id("CISA KEV:CVE-1", "id-9".into(), at(3, 9, 0)));
+        assert_eq!(s.create_id("CISA KEV:CVE-1"), Some("id-9"));
+        assert!(!s.renew_create_id("CISA KEV:CVE-4", "id-9".into(), at(3, 9, 0)), "not once the issue exists");
+        s.set_issue("CISA KEV:CVE-1", iref(1), at(3, 9, 0));
+        assert_eq!(s.create_id("CISA KEV:CVE-1"), Some("id-9"), "kept after the issue is created");
     }
 
     #[test]

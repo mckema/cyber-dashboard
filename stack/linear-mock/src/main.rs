@@ -1,5 +1,5 @@
 //! linear-mock: a local stand-in for the Linear GraphQL API, for the Docker
-//! Compose lab only. It answers the four GraphQL documents that the
+//! Compose lab only. It answers the five GraphQL documents that the
 //! exploit-watch job's live Linear client sends (triage/tracker.rs,
 //! `LinearTracker`), so that client can be exercised end to end over real HTTP
 //! without a Linear workspace. It is not a Linear emulator: it does not parse
@@ -31,8 +31,12 @@
 //!   query TriageState      variables.team == MOCK_TEAM_ID -> one workflow state
 //!                          {id "state-triage", name "Triage", type "triage"};
 //!                          any other team -> no nodes
-//!   mutation IssueCreate   input {teamId, title, description, stateId}; appends
-//!                          issue mock-<n> / MOCK-<n> in state triage
+//!   mutation IssueCreate   input {id, teamId, title, description, stateId}; appends
+//!                          issue MOCK-<n> in state triage. `id` (optional, as in
+//!                          Linear) becomes the issue id; it must be a UUID v4
+//!                          and not taken. Without it the id is mock-<time>-<n>
+//!   query IssueById        variables.id = an issue id or identifier (MOCK-1) ->
+//!                          issue {id identifier url}
 //!   mutation CommentCreate input {issueId, body}; appends a comment written by
 //!                          the job to that issue
 //!   query IssueStates      variables.ids -> the issues that exist, in file
@@ -45,7 +49,20 @@
 //!                              wrong type
 //!   INVALID_INPUT              IssueCreate with a teamId other than MOCK_TEAM_ID,
 //!                              a stateId other than "state-triage", or an empty
-//!                              title; CommentCreate on an id not in the file
+//!                              title; CommentCreate on an id not in the file.
+//!                              IssueCreate with an `id` that is not a UUID v4:
+//!                              Linear's answer of 2026-11-05 ("Argument
+//!                              Validation Error", userPresentableMessage
+//!                              "id must be a UUID."; Linear refused a v5 UUID)
+//!   INPUT_ERROR                IssueCreate with an `id` an issue already has:
+//!                              Linear's answer of 2026-11-05 (message "conflict on
+//!                              insert of Issue", extensions type "invalid input",
+//!                              statusCode 400, userError, userPresentableMessage
+//!                              "Entity Issue with id <id> already exists.",
+//!                              without `locations`); nothing is written.
+//!                              IssueById on an unknown id: "Entity not found:
+//!                              Issue" (shape of Linear's "Entity not found: Team"
+//!                              answer; the Issue case is not verified)
 //!   MOCK_DATA_INVALID          issues.json cannot be read or does not parse
 //!                              (mock-specific code, not a Linear one)
 //!   MOCK_IO_ERROR              issues.json cannot be written (mock-specific)
@@ -61,7 +78,8 @@
 //!    "next": 3,                                       next MOCK-n number
 //!    "issues": [
 //!     {
-//!      "id": "mock-20261104080000-1",                  creation time digits + number
+//!      "id": "mock-20261104080000-1",                  IssueCreate input.id (UUID v4), or
+//!                                                      creation time digits + number
 //!      "identifier": "MOCK-1",
 //!      "url": "http://linear-mock.invalid/issue/MOCK-1",
 //!      "title": "[CVE-2026-1234] ...",
@@ -339,16 +357,48 @@ impl Reply {
 struct GqlError {
     code: &'static str,
     message: String,
+    /// `path` of Linear's error entry ("issueCreate"); None = no path.
+    path: Option<&'static str>,
+    /// More extensions besides `code` (Linear's user errors carry type, statusCode, …).
+    ext: Map<String, Value>,
 }
 
 impl GqlError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self { code, message: message.into(), path: None, ext: Map::new() }
+    }
+
+    /// A Linear user error: path, extensions {type "invalid input", code, statusCode 400,
+    /// userError true, userPresentableMessage}.
+    fn user(code: &'static str, message: impl Into<String>, path: &'static str, user_message: String) -> Self {
+        let ext = json!({"type": "invalid input", "statusCode": 400, "userError": true,
+                         "userPresentableMessage": user_message});
+        Self { code, message: message.into(), path: Some(path), ext: ext.as_object().cloned().unwrap_or_default() }
+    }
+
+    fn body(&self) -> String {
+        let mut ext = Map::new();
+        ext.insert("code".into(), json!(self.code));
+        ext.extend(self.ext.clone());
+        let mut e = json!({"message": self.message, "extensions": ext});
+        if let Some(p) = self.path {
+            e["path"] = json!([p]);
+        }
+        json!({"errors": [e], "data": null}).to_string()
     }
 }
 
 fn error_body(code: &str, message: &str) -> String {
     json!({"errors": [{"message": message, "extensions": {"code": code}}], "data": null}).to_string()
+}
+
+/// Linear's IsUUID("4") check on IssueCreateInput.id (a v5 UUID was refused on 2026-11-05).
+fn is_uuid_v4(s: &str) -> bool {
+    let b = s.as_bytes();
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| if [8, 13, 18, 23].contains(&i) { c == '-' } else { c.is_ascii_hexdigit() })
+        && b[14] == b'4'
+        && matches!(b[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
 }
 
 /// Linear's answer to a missing or wrong key (tests/fixtures/linear_error_auth.json in the job repo).
@@ -373,14 +423,16 @@ fn auth_error_body() -> String {
 enum Op {
     TriageState,
     IssueCreate,
+    IssueById,
     CommentCreate,
     IssueStates,
 }
 
 impl Op {
-    const ALL: [(Op, &'static str); 4] = [
+    const ALL: [(Op, &'static str); 5] = [
         (Op::TriageState, "query TriageState"),
         (Op::IssueCreate, "mutation IssueCreate"),
+        (Op::IssueById, "query IssueById"),
         (Op::CommentCreate, "mutation CommentCreate"),
         (Op::IssueStates, "query IssueStates"),
     ];
@@ -400,6 +452,7 @@ impl Op {
         match self {
             Op::TriageState => "TriageState",
             Op::IssueCreate => "IssueCreate",
+            Op::IssueById => "IssueById",
             Op::CommentCreate => "CommentCreate",
             Op::IssueStates => "IssueStates",
         }
@@ -472,7 +525,8 @@ fn graphql(auth: Option<&str>, body: &[u8], cfg: &Config, now: &str) -> Reply {
     let vars = req.get("variables").unwrap_or(&null);
     let Some(op) = Op::detect(query) else {
         let head: String = query.trim().lines().next().unwrap_or("").chars().take(60).collect();
-        let message = format!("linear-mock only answers TriageState, IssueCreate, CommentCreate and IssueStates; got {head:?}");
+        let message =
+            format!("linear-mock only answers TriageState, IssueCreate, IssueById, CommentCreate and IssueStates; got {head:?}");
         return Reply {
             status: 200,
             body: error_body("GRAPHQL_VALIDATION_FAILED", &message),
@@ -483,6 +537,7 @@ fn graphql(auth: Option<&str>, body: &[u8], cfg: &Config, now: &str) -> Reply {
     let result = match op {
         Op::TriageState => triage_state(vars, cfg),
         Op::IssueCreate => issue_create(vars, cfg, now),
+        Op::IssueById => issue_by_id(vars, cfg),
         Op::CommentCreate => comment_create(vars, cfg, now),
         Op::IssueStates => issue_states(vars, cfg),
     };
@@ -495,7 +550,7 @@ fn graphql(auth: Option<&str>, body: &[u8], cfg: &Config, now: &str) -> Reply {
         },
         Err(e) => Reply {
             status: 200,
-            body: error_body(e.code, &e.message),
+            body: e.body(),
             json: true,
             log: format!("{} as {} error {}: {}", op.name(), caller.name(), e.code, e.message),
         },
@@ -538,8 +593,27 @@ fn issue_id(now: &str, n: u64) -> String {
     format!("mock-{stamp}-{n}")
 }
 
+/// Linear's answer to an IssueCreateInput.id that is not a UUID v4 (2026-11-05).
+fn id_not_uuid(id: &Value) -> GqlError {
+    let ext = json!({
+        "validationErrors": [{"value": id, "property": "id", "children": [],
+                              "constraints": {"isUuid": "id must be a UUID"}}],
+        "type": "invalid input", "userError": true, "userPresentableMessage": "id must be a UUID.",
+    });
+    GqlError { code: "INVALID_INPUT", message: "Argument Validation Error".into(), path: Some("issueCreate"),
+               ext: ext.as_object().cloned().unwrap_or_default() }
+}
+
 fn issue_create(vars: &Value, cfg: &Config, now: &str) -> OpResult {
     let input = input(vars, "issueCreate")?;
+    // input.id: optional, as in Linear; a UUID v4 that becomes the issue id.
+    let own_id = match input.get("id").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => match v.as_str().filter(|s| is_uuid_v4(s)) {
+            Some(s) => Some(s.to_string()),
+            None => return Err(id_not_uuid(v)),
+        },
+    };
     let team = str_field(input, "teamId");
     if team != cfg.team_id {
         return Err(GqlError::new("INVALID_INPUT", format!("teamId {team:?} does not exist (the mock team is MOCK_TEAM_ID)")));
@@ -555,13 +629,20 @@ fn issue_create(vars: &Value, cfg: &Config, now: &str) -> OpResult {
         return Err(GqlError::new("INVALID_INPUT", "issueCreate needs a non-empty title"));
     }
     let mut f = load(&cfg.data_dir)?;
+    if let Some(id) = &own_id
+        && f.issues.iter().any(|i| i.id.eq_ignore_ascii_case(id))
+    {
+        // Linear, 2026-11-05 (T15): HTTP 200, data null, nothing created, no issue in the answer.
+        return Err(GqlError::user("INPUT_ERROR", "conflict on insert of Issue", "issueCreate",
+                                  format!("Entity Issue with id {id} already exists.")));
+    }
     let mut n = f.next.max(1);
     while f.issues.iter().any(|i| i.id == issue_id(now, n) || i.identifier == format!("MOCK-{n}")) {
         n += 1;
     }
     let identifier = format!("MOCK-{n}");
     let issue = Issue {
-        id: issue_id(now, n),
+        id: own_id.unwrap_or_else(|| issue_id(now, n)),
         identifier: identifier.clone(),
         url: format!("{URL_BASE}{identifier}"),
         title: title.into(),
@@ -581,6 +662,20 @@ fn issue_create(vars: &Value, cfg: &Config, now: &str) -> OpResult {
     f.issues.push(issue);
     save(&cfg.data_dir, &f)?;
     Ok((json!({"issueCreate": {"success": true, "issue": reply}}), identifier))
+}
+
+/// `issue(id:)`: by id or identifier, as Linear accepts both.
+fn issue_by_id(vars: &Value, cfg: &Config) -> OpResult {
+    let id = vars
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| GqlError::new("GRAPHQL_VALIDATION_FAILED", "issue needs variables.id (a string)"))?;
+    let f = load(&cfg.data_dir)?;
+    let Some(i) = f.issues.iter().find(|i| i.id.eq_ignore_ascii_case(id) || i.identifier == id) else {
+        return Err(GqlError::user("INPUT_ERROR", "Entity not found: Issue", "issue",
+                                  "Could not find referenced Issue.".into()));
+    };
+    Ok((json!({"issue": {"id": i.id, "identifier": i.identifier, "url": i.url}}), i.identifier.clone()))
 }
 
 fn comment_create(vars: &Value, cfg: &Config, now: &str) -> OpResult {
@@ -753,7 +848,11 @@ mod tests {
     const APP: &str = "lin_oauth_test";
     const TEAM: &str = "team-1";
 
-    // The four documents exactly as the job sends them (src/triage/tracker.rs, 2026-11-04).
+    // The documents exactly as the job sends them (src/triage/tracker.rs, 2026-11-04;
+    // IssueById 2026-11-05).
+    const Q_ISSUE_BY_ID: &str = "query IssueById($id: String!) {
+  issue(id: $id) { id identifier url }
+}";
     const Q_TRIAGE_STATE: &str = "query TriageState($team: ID!) {
   workflowStates(filter: { team: { id: { eq: $team } }, type: { eq: \"triage\" } }) {
     nodes { id name type }
@@ -1024,6 +1123,77 @@ mod tests {
         }
         assert_eq!(error_code(&gql(&cfg, M_ISSUE_CREATE, json!({}))), "GRAPHQL_VALIDATION_FAILED");
         assert!(!d.file().exists());
+    }
+
+    const UUID: &str = "3d4f6a2e-8b1c-4e7a-9f20-5c6b7a8d9e01";
+
+    fn create_with_id(cfg: &Config, id: Value, title: &str) -> Value {
+        let input = json!({"id": id, "teamId": TEAM, "title": title, "description": "d", "stateId": TRIAGE_STATE_ID});
+        gql(cfg, M_ISSUE_CREATE, json!({"input": input}))
+    }
+
+    #[test]
+    fn issue_create_with_id_stores_it_and_refuses_a_second() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        assert_eq!(create_with_id(&cfg, json!(UUID), "first"), json!({"data": {"issueCreate": {"success": true,
+            "issue": {"id": UUID, "identifier": "MOCK-1", "url": "http://linear-mock.invalid/issue/MOCK-1"}}}}));
+        let before = fs::read(d.file()).unwrap();
+
+        // Same id again (a retry after a lost answer): Linear's T15 answer, nothing written.
+        let (status, v) = post(&cfg, Some(KEY), M_ISSUE_CREATE,
+                               json!({"input": {"id": UUID, "teamId": TEAM, "title": "retry", "stateId": TRIAGE_STATE_ID}}));
+        assert_eq!(status, 200);
+        let t15: Value = serde_json::from_str(&format!(r#"{{"errors":[{{"message":"conflict on insert of Issue",
+            "path":["issueCreate"],"extensions":{{"type":"invalid input","code":"INPUT_ERROR","statusCode":400,
+            "userError":true,"userPresentableMessage":"Entity Issue with id {UUID} already exists."}}}}],"data":null}}"#))
+            .unwrap();
+        assert_eq!(v, t15, "T15 body without `locations`");
+        assert_eq!(fs::read(d.file()).unwrap(), before, "no second issue");
+        let upper = create_with_id(&cfg, json!(UUID.to_ascii_uppercase()), "upper");
+        assert_eq!(error_code(&upper), "INPUT_ERROR", "ids compare case-insensitively");
+
+        // Without an id the mock still makes one up; null counts as no id.
+        let v = create_with_id(&cfg, Value::Null, "second");
+        assert_eq!(v.pointer("/data/issueCreate/issue/id"), Some(&json!(issue_id(NOW, 2))));
+        let f = d.read();
+        assert_eq!((f["issues"][0]["id"].as_str(), f["issues"][0]["title"].as_str()), (Some(UUID), Some("first")));
+        assert_eq!(f["issues"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn issue_create_refuses_an_id_that_is_not_uuid_v4() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        // The v5 id Linear refused on 2026-11-05, other versions, junk.
+        for id in [json!("e8caf09b-8627-59c1-8257-e4112feff854"), json!("3d4f6a2e-8b1c-1e7a-9f20-5c6b7a8d9e01"),
+                   json!("3d4f6a2e-8b1c-4e7a-7f20-5c6b7a8d9e01"), json!("3d4f6a2e8b1c4e7a9f205c6b7a8d9e01"),
+                   json!("not-a-uuid"), json!(""), json!(42)] {
+            let v = create_with_id(&cfg, id.clone(), "t");
+            assert_eq!(error_code(&v), "INVALID_INPUT", "{id}");
+            assert_eq!(v["errors"][0]["message"], "Argument Validation Error");
+            assert_eq!(v["errors"][0]["path"], json!(["issueCreate"]));
+            assert_eq!(v["errors"][0]["extensions"]["userPresentableMessage"], "id must be a UUID.");
+            assert_eq!(v["errors"][0]["extensions"]["validationErrors"][0]["value"], id);
+        }
+        assert!(!d.file().exists());
+        assert!(is_uuid_v4(UUID) && is_uuid_v4(&UUID.to_ascii_uppercase()));
+    }
+
+    #[test]
+    fn issue_by_id_finds_by_id_or_identifier() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        create_with_id(&cfg, json!(UUID), "a");
+        let want = json!({"data": {"issue": {"id": UUID, "identifier": "MOCK-1",
+                                             "url": "http://linear-mock.invalid/issue/MOCK-1"}}});
+        assert_eq!(gql(&cfg, Q_ISSUE_BY_ID, json!({"id": UUID})), want);
+        assert_eq!(gql(&cfg, Q_ISSUE_BY_ID, json!({"id": "MOCK-1"})), want);
+        let v = gql(&cfg, Q_ISSUE_BY_ID, json!({"id": "0f0e0d0c-0b0a-4908-8706-050403020100"}));
+        assert_eq!(error_code(&v), "INPUT_ERROR");
+        assert_eq!(v["errors"][0]["message"], "Entity not found: Issue");
+        assert_eq!(v["errors"][0]["path"], json!(["issue"]));
+        assert_eq!(error_code(&gql(&cfg, Q_ISSUE_BY_ID, json!({}))), "GRAPHQL_VALIDATION_FAILED");
     }
 
     #[test]
