@@ -176,7 +176,7 @@ fn gaps_note(g: Gaps) -> String {
 
 /// The two page tables from the store. "Not relevant by rule" counts the items
 /// of this window, so the number follows the page's other window counts.
-fn view(store: &Store, items: &[Item], now: DateTime<Utc>, mode_note: Option<String>) -> TriageView {
+pub(crate) fn view(store: &Store, items: &[Item], now: DateTime<Utc>, mode_note: Option<String>) -> TriageView {
     let untriaged = store.untriaged(now).into_iter().filter_map(|u| {
         let m = u.record.matched()?;
         let issue = u.record.issue.as_ref();

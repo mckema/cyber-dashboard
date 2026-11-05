@@ -6,14 +6,17 @@
 //!   2. Log in as the local admin.
 //!   3. Turn the GraphQL API on (it is off by default).
 //!   4. Create/refresh group "exploit-watch": read+write pages under CTP/run-books/,
-//!      plus manage:pages on the one page (needed to read it; see step_group).
+//!      plus manage:pages on the one page (needed to read it), plus read+write
+//!      assets in the asset folder "exploit-watch" (see group_update_vars).
+//!   4b. Create the top-level asset folder "exploit-watch" (report PDF).
 //!   5. Create the page CTP/run-books/Cyber-Exploit-Watch from stack/wiki/page/skeleton.html
 //!      with stack/wiki/page/style.css as scriptCss. Done as admin, because the bot key
 //!      deliberately lacks write:styles.
 //!   6. Create API key "exploit-watch" bound to that group, unless .env already holds
 //!      a working one (revoking older "exploit-watch" keys). The key is shown once,
 //!      so it goes straight into .env.
-//!   7. Smoke test: the bot key reads the page with pages.single, as the job does.
+//!   7. Smoke test: the bot key reads the page with pages.single and finds the asset
+//!      folder with assets.folders, as the job does.
 //!
 //! .env (--env-file) gets WIKIJS_API_KEY, WIKI_PAGE_ID and, if generated,
 //! WIKI_ADMIN_PASSWORD (written as soon as each is known; every other line is kept).
@@ -34,6 +37,7 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::{Value, json};
 
+use super::assets::{ASSET_FOLDER, FOLDERS, folder_id};
 use super::{Mode, Wiki, err_chain, head};
 use crate::feeds::common::Fatal;
 
@@ -342,30 +346,13 @@ fn step_group(w: &Wiki, jwt: &str) -> Result<i64, Fatal> {
     };
 
     // Always re-apply, so a hand-edited group is put back to least privilege.
-    //
-    // Why manage:pages: in 2.5.x `pages.single` / `pages.singleByPath` (the only
-    // GraphQL reads that return page content) check manage:pages OR delete:pages on
-    // the page, NOT read:pages. Without it the job's READ_PAGE fails with "You are
-    // not authorized to view this page." manage:pages is the lesser of the two
-    // (delete:pages would let the key delete the page), and it is pinned by an
-    // EXACT rule to the one page. What it adds there: move (destination still needs
-    // write:pages, so only inside CTP/run-books/), convert, restore a version.
     let d = w.gql(
         r#"
       mutation ($id: Int!, $n: String!, $perm: [String]!, $rules: [PageRuleInput]!) {
         groups { update(id: $id, name: $n, redirectOnLogin: "/", permissions: $perm, pageRules: $rules) {
           responseResult { succeeded message } } }
       }"#,
-        json!({
-            "id": gid, "n": GROUP_NAME,
-            "perm": ["read:pages", "write:pages", "manage:pages"],
-            "rules": [
-                {"id": "rb", "deny": false, "match": "START",
-                 "roles": ["read:pages", "write:pages"], "path": RULE_PATH, "locales": [PAGE_LOCALE]},
-                {"id": "ew", "deny": false, "match": "EXACT",
-                 "roles": ["manage:pages"], "path": PAGE_PATH, "locales": [PAGE_LOCALE]},
-            ],
-        }),
+        group_update_vars(gid),
         Some(jwt),
         "groups.update",
     )?;
@@ -373,7 +360,62 @@ fn step_group(w: &Wiki, jwt: &str) -> Result<i64, Fatal> {
     println!(
         "group      read:pages+write:pages START '{RULE_PATH}'; manage:pages EXACT '{PAGE_PATH}'; locale {PAGE_LOCALE}"
     );
+    println!("group      read:assets+write:assets START '{ASSET_FOLDER}/'; read:assets EXACT '{ASSET_FOLDER}'; any locale");
     Ok(gid)
+}
+
+/// Variables of the groups.update call: the bot group's whole permission set.
+///
+/// Why manage:pages: in 2.5.x `pages.single` / `pages.singleByPath` (the only
+/// GraphQL reads that return page content) check manage:pages OR delete:pages on
+/// the page, NOT read:pages. Without it the job's READ_PAGE fails with "You are
+/// not authorized to view this page." manage:pages is the lesser of the two
+/// (delete:pages would let the key delete the page), and it is pinned by an
+/// EXACT rule to the one page. What it adds there: move (destination still needs
+/// write:pages, so only inside CTP/run-books/), convert, restore a version.
+///
+/// Assets (the report PDF): POST /u checks write:assets on "<folder>/<file>" and
+/// `assets.folders` checks read:assets on the bare folder slug, both WITHOUT a
+/// locale, so these rules have `locales: []` (a rule listing "en" never matches
+/// them). START "exploit-watch/" covers the files only; the EXACT rule lets the
+/// job find the folder id. No manage:assets: the key cannot rename or delete.
+pub(crate) fn group_update_vars(gid: i64) -> Value {
+    let folder_files = format!("{ASSET_FOLDER}/");
+    json!({
+        "id": gid, "n": GROUP_NAME,
+        "perm": ["read:pages", "write:pages", "manage:pages", "read:assets", "write:assets"],
+        "rules": [
+            {"id": "rb", "deny": false, "match": "START",
+             "roles": ["read:pages", "write:pages"], "path": RULE_PATH, "locales": [PAGE_LOCALE]},
+            {"id": "ew", "deny": false, "match": "EXACT",
+             "roles": ["manage:pages"], "path": PAGE_PATH, "locales": [PAGE_LOCALE]},
+            {"id": "as", "deny": false, "match": "START",
+             "roles": ["read:assets", "write:assets"], "path": folder_files, "locales": []},
+            {"id": "af", "deny": false, "match": "EXACT",
+             "roles": ["read:assets"], "path": ASSET_FOLDER, "locales": []},
+        ],
+    })
+}
+
+/// Create the top-level asset folder the job uploads into, unless it exists (as admin).
+fn step_asset_folder(w: &Wiki, jwt: &str) -> Result<i64, Fatal> {
+    let list = |label| w.gql(FOLDERS, json!({"p": 0}), Some(jwt), label);
+    if let Some(id) = folder_id(&list("assets.folders")?, ASSET_FOLDER) {
+        println!("assets     folder '{ASSET_FOLDER}' exists, id {id}");
+        return Ok(id);
+    }
+    let d = w.gql(
+        "mutation ($s: String!) { assets { createFolder(parentFolderId: 0, slug: $s, name: $s) {
+           responseResult { succeeded message } } } }",
+        json!({"s": ASSET_FOLDER}),
+        Some(jwt),
+        "assets.createFolder",
+    )?;
+    check(&d["assets"]["createFolder"], "assets.createFolder")?;
+    let id = folder_id(&list("assets.folders")?, ASSET_FOLDER)
+        .ok_or_else(|| Fatal(format!("asset folder '{ASSET_FOLDER}' was created but does not appear in assets.folders")))?;
+    println!("assets     created folder '{ASSET_FOLDER}' id {id}");
+    Ok(id)
 }
 
 /// True only if `key` can do what the job does: pages.single on the page.
@@ -580,6 +622,12 @@ fn step_smoke(w: &Wiki, key: &str, pid: i64) -> Result<(), Fatal> {
         text(p.get("path")).unwrap_or_default(),
         text_len(&p["content"])
     );
+    // Same folder lookup the job does before an asset upload (assets.rs).
+    let d = w.gql(FOLDERS, json!({"p": 0}), Some(key), "bot asset folders (assets.folders)")?;
+    let id = folder_id(&d, ASSET_FOLDER).ok_or_else(|| {
+        Fatal(format!("bot key cannot see asset folder '{ASSET_FOLDER}': check the group's read:assets EXACT rule"))
+    })?;
+    println!("smoke      bot key sees asset folder '{ASSET_FOLDER}' id {id}");
     Ok(())
 }
 
@@ -681,6 +729,7 @@ pub fn main(args: Args) -> Result<i32, Fatal> {
     let jwt = step_login(&w, &email, &password)?;
     step_api_on(&w, &jwt)?;
     let gid = step_group(&w, &jwt)?;
+    step_asset_folder(&w, &jwt)?;
     let pid = step_page(&w, &jwt, &args)?; // before the key: the key check reads this page
     env.save("WIKI_PAGE_ID", &pid.to_string())?;
     let current = env.val("WIKIJS_API_KEY", "");
@@ -848,6 +897,58 @@ mod tests {
              do not match this wiki's admin (the wiki-data volume keeps the account from its first setup)"
         );
         assert_eq!(step_login(&w, "a@b", "p").unwrap(), "J");
+    }
+
+    #[test]
+    fn group_grants_assets_with_locale_less_rules() {
+        let v = group_update_vars(5);
+        assert_eq!((v["id"].as_i64(), v["n"].as_str()), (Some(5), Some(GROUP_NAME)));
+        assert_eq!(v["perm"], json!(["read:pages", "write:pages", "manage:pages", "read:assets", "write:assets"]));
+        let rules = v["rules"].as_array().unwrap();
+        let mut ids: Vec<&str> = rules.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), rules.len(), "rule ids are unique");
+        assert!(rules.iter().all(|r| r["deny"] == false));
+        let by = |id: &str| rules.iter().find(|r| r["id"] == id).unwrap().clone();
+        assert_eq!(by("as"), json!({"id": "as", "deny": false, "match": "START", "path": "exploit-watch/",
+                                    "roles": ["read:assets", "write:assets"], "locales": []}));
+        assert_eq!(by("af"), json!({"id": "af", "deny": false, "match": "EXACT", "path": "exploit-watch",
+                                    "roles": ["read:assets"], "locales": []}));
+        // Page rules unchanged: still scoped to the run-books tree and locale en.
+        assert_eq!(by("rb")["locales"], json!(["en"]));
+        assert_eq!(by("ew")["path"], PAGE_PATH);
+        // No asset management, no admin rights.
+        let s = v.to_string();
+        assert!(!s.contains("manage:assets") && !s.contains("manage:system") && !s.contains("write:styles"));
+    }
+
+    #[test]
+    fn asset_folder_created_once() {
+        let (base, rx) = serve(vec![
+            // 1st run: exists
+            canned(200, r#"{"data":{"assets":{"folders":[{"id":2,"slug":"exploit-watch"}]}}}"#),
+            // 2nd run: missing → create → found
+            canned(200, r#"{"data":{"assets":{"folders":[]}}}"#),
+            canned(200, r#"{"data":{"assets":{"createFolder":{"responseResult":{"succeeded":true,"message":"ok"}}}}}"#),
+            canned(200, r#"{"data":{"assets":{"folders":[{"id":9,"slug":"exploit-watch"}]}}}"#),
+            // 3rd run: missing → create refused
+            canned(200, r#"{"data":{"assets":{"folders":[]}}}"#),
+            canned(200, r#"{"data":{"assets":{"createFolder":{"responseResult":{"succeeded":false,"message":"An asset folder with the same name already exists."}}}}}"#),
+        ]);
+        let w = Wiki::with_client(&base, client());
+        assert_eq!(step_asset_folder(&w, "JWT").unwrap(), 2);
+        assert_eq!(step_asset_folder(&w, "JWT").unwrap(), 9);
+        assert_eq!(
+            step_asset_folder(&w, "JWT").unwrap_err().0,
+            "assets.createFolder refused: An asset folder with the same name already exists."
+        );
+        let reqs: Vec<String> = rx.try_iter().collect();
+        assert_eq!(reqs.len(), 6);
+        assert!(reqs[0].contains("folders(parentFolderId: $p)") && reqs[0].contains(r#""variables":{"p":0}"#));
+        assert!(reqs[2].contains("createFolder(parentFolderId: 0, slug: $s, name: $s)"));
+        assert!(reqs[2].contains(r#""variables":{"s":"exploit-watch"}"#));
+        assert!(reqs.iter().all(|r| r.to_lowercase().contains("authorization: bearer jwt\r\n")));
     }
 
     #[test]

@@ -4,12 +4,16 @@
 //!   exploit-watch bootstrap [--reseed] [--update-css] [--purge-history P7D]
 //!   exploit-watch demo OUT.html [--dark]
 //!   exploit-watch triage --report
+//!   exploit-watch report (--month YYYY-MM | --month-to-date) [--no-pdf]
+//!   exploit-watch serve [--port 8090] [--healthcheck]
 //!
 //! See README.md (Architecture) for how the pieces fit together.
 
 mod feeds;
 mod render;
+mod report;
 mod run;
+mod serve;
 mod triage;
 mod wiki;
 
@@ -34,6 +38,10 @@ enum Command {
     Demo(render::DemoArgs),
     /// Match the cached feed items against the component list and print the counts (no network).
     Triage(triage::report::Args),
+    /// FR-A4 resolution report for a month or month to date: JSON and PDF under state/reports/.
+    Report(report::Args),
+    /// Local lab: refresh tickets and serve the month-to-date report PDF on click.
+    Serve(serve::Args),
 }
 
 fn main() {
@@ -43,6 +51,8 @@ fn main() {
         Command::Bootstrap(a) => wiki::bootstrap::main(a),
         Command::Demo(a) => render::demo(a).map(|_| 0),
         Command::Triage(a) => triage::report::main(a),
+        Command::Report(a) => report::main(a),
+        Command::Serve(a) => serve::main(a),
     };
     match res {
         Ok(code) => std::process::exit(code),

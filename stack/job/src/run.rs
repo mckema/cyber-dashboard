@@ -21,6 +21,8 @@
 //!   LINEAR_API_KEY    live mode only: personal API key (lin_api_…, sent bare) or OAuth access token (sent as Bearer)
 //!   LINEAR_TEAM_ID    live mode only: team whose Triage inbox receives issues
 //!   LINEAR_API_URL    https://api.linear.app/graphql   live mode endpoint (compose lab: the linear-mock service)
+//!   LOCK_WAIT_SECONDS 900                      --every: how long a loop run waits for a held lock
+//!   SERVE_PUBLIC_URL  —                        lab: URL of the `serve` service, linked from the page stamp
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -36,7 +38,7 @@ use sha2::{Digest, Sha256};
 use crate::feeds::common::{Fatal, Item, iso_utc, parse_iso};
 use crate::feeds::{self, Feed, state};
 use crate::render::{self, HealthRow, Regions, thousands};
-use crate::{triage, wiki};
+use crate::{report, triage, wiki};
 
 const WINDOW_DAYS: i64 = 7;
 
@@ -292,10 +294,10 @@ fn without_volatile(html: &str) -> Result<String, Fatal> {
     render::apply_regions(html, &r)
 }
 
-/// sha256 hex of the regions that carry data, plus each feed's status and the Linear
-/// row's status. Stored in state/wiki.json; an equal fingerprint means there is nothing
+/// sha256 hex of the regions that carry data, plus each feed's status, the Linear
+/// row's status and the content sha of the report PDF the page links to. Stored in state/wiki.json; an equal fingerprint means there is nothing
 /// new to write.
-fn fingerprint(regions: &Regions, health: &[HealthRow], tracker: Option<&HealthRow>) -> String {
+fn fingerprint(regions: &Regions, health: &[HealthRow], tracker: Option<&HealthRow>, report_sha: &str) -> String {
     let pick = |v: &[(String, String)]| -> Map<String, Value> {
         v.iter().filter(|(k, _)| !VOLATILE.contains(&k.as_str())).map(|(k, x)| (k.clone(), json!(x))).collect()
     };
@@ -306,6 +308,8 @@ fn fingerprint(regions: &Regions, health: &[HealthRow], tracker: Option<&HealthR
         "health": health.iter().map(|h| json!([h.source, h.status])).collect::<Vec<_>>(),
         // Linear going from ok to error (or back) is news; its counts and message are not.
         "tracker": tracker.map(|t| t.status.clone()),
+        // A new month-to-date PDF on the wiki changes the link (its ?v=), so rewrite.
+        "report": report_sha,
     });
     // serde_json::Map is a BTreeMap (no preserve_order feature), so object keys are serialised sorted.
     let s = serde_json::to_string(&stable).expect("JSON value");
@@ -313,27 +317,6 @@ fn fingerprint(regions: &Regions, health: &[HealthRow], tracker: Option<&HealthR
 }
 
 // ---------------------------------------------------------------- wiki
-
-const READ_PAGE: &str = r#"
-query ($id: Int!) {
-  pages { single(id: $id) { content title description tags { tag } } }
-}
-"#;
-
-// Note: do NOT request `page { ... }` in the mutation response. Page.editor is
-// non-nullable and serialises to null here, which surfaces as a GraphQL error
-// even though the write succeeded. scriptCss is not sent: the job's key has no
-// write:styles, so Wiki.js keeps the hand-written CSS.
-const WRITE_PAGE: &str = r#"
-mutation ($id: Int!, $content: String!, $tags: [String]!, $title: String!, $desc: String!) {
-  pages {
-    update(id: $id, content: $content, tags: $tags, title: $title,
-           description: $desc, isPublished: true) {
-      responseResult { succeeded errorCode message }
-    }
-  }
-}
-"#;
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
@@ -372,9 +355,33 @@ fn run(args: &Args) -> Result<(), Fatal> {
     let writing = !args.dry_run && args.out.is_none();
     let triage = triage::step::step(&to_triage, &cves, now, writing);
 
-    let regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health, triage.tracker.as_ref(),
-                                        &triage.view, start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
-    let fp = fingerprint(&regions, &health, triage.tracker.as_ref());
+    // FR-A4: the month-to-date report PDF, uploaded as a wiki asset when its content
+    // changed (writing runs only; never fails the run).
+    let report_rec = writing.then(|| match report::publish_month_to_date(now) {
+        Ok(g) => {
+            println!("  report: {} (content {}{})", g.label, &g.content_sha[..12],
+                     if g.uploaded { ", uploaded" } else { ", unchanged" });
+            if let Some(e) = &g.upload_error {
+                println!("  report: upload failed: {e}");
+            }
+            json!({"label": g.label, "content_sha": g.content_sha, "data_sha": g.data_sha, "pdf_sha": g.pdf_sha,
+                   "uploaded": g.uploaded, "upload_error": g.upload_error})
+        }
+        Err(e) => {
+            println!("  report: {}", e.0);
+            json!({"error": clip(&e.0, 300)})
+        }
+    });
+    let uploaded = report::uploaded();
+
+    let mut regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health, triage.tracker.as_ref(),
+                                            &triage.view, start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
+    let serve_url = std::env::var("SERVE_PUBLIC_URL").ok();
+    let pdf_href = uploaded.as_ref().map(|(p, sha, _)| format!("{p}?v={}", &sha[..sha.len().min(12)]));
+    let as_of = uploaded.as_ref().map(|(_, _, a)| a.as_str()).unwrap_or("");
+    regions.stamp.push_str(&render::report_links(pdf_href.as_deref(), as_of, serve_url.as_deref()));
+    let report_sha = uploaded.as_ref().map(|(_, sha, _)| sha.as_str()).unwrap_or("");
+    let fp = fingerprint(&regions, &health, triage.tracker.as_ref(), report_sha);
 
     let mut record = Map::new();
     record.insert("run_at".into(), json!(iso_utc(now)));
@@ -391,7 +398,7 @@ fn run(args: &Args) -> Result<(), Fatal> {
         result = "out";
     } else {
         let page_id: i64 = env_num("WIKI_PAGE_ID", 51);
-        let data = wiki::gql_bot(READ_PAGE, json!({"id": page_id}))?;
+        let data = wiki::gql_bot(wiki::READ_PAGE, json!({"id": page_id}))?;
         let page = &data["pages"]["single"];
         let content = s(page, "content");
         let doc = render::apply_regions(content, &regions)?;
@@ -418,7 +425,7 @@ fn run(args: &Args) -> Result<(), Fatal> {
             } else {
                 let tags: Vec<Value> = page["tags"].as_array().map(|a| a.iter().map(|t| t["tag"].clone()).collect())
                     .unwrap_or_default(); // required: the resolver maps over it
-                let res = wiki::gql_bot(WRITE_PAGE, json!({
+                let res = wiki::gql_bot(wiki::WRITE_PAGE, json!({
                     "id": page_id, "content": doc, "tags": tags,
                     "title": s(page, "title"), "desc": s(page, "description"),
                 }))?;
@@ -445,6 +452,9 @@ fn run(args: &Args) -> Result<(), Fatal> {
     };
     record.insert("feeds".into(), Value::Object(feeds_rec));
     record.insert("triage".into(), triage.record);
+    if let Some(r) = report_rec {
+        record.insert("report".into(), r);
+    }
     record.insert("seconds".into(), json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0));
     state::append_run(&Value::Object(record));
     Ok(())
@@ -474,6 +484,32 @@ fn lock_or_skip(args: &Args) -> Result<Option<state::RunLock>, Fatal> {
     }
 }
 
+/// Seconds between two lock attempts of a loop run that found the lock held.
+const LOCK_POLL_SECS: u64 = 60;
+
+/// A loop run that finds the lock held (a manual run, or `serve` refreshing the
+/// tickets) tries again every minute for up to LOCK_WAIT_SECONDS (default 900)
+/// before it gives up and records `locked`, so one click does not cost a 6-hour
+/// cycle. Without a wait it behaves like lock_or_skip.
+fn lock_with_retry(args: &Args) -> Result<Option<state::RunLock>, Fatal> {
+    let wait = env_num("LOCK_WAIT_SECONDS", 900u64);
+    let deadline = Instant::now() + std::time::Duration::from_secs(wait);
+    loop {
+        if Instant::now() >= deadline {
+            return lock_or_skip(args);
+        }
+        match state::lock_run(state::utcnow())? {
+            Ok(lock) => return Ok(Some(lock)),
+            Err(holder) => {
+                println!("lock held ({holder}); trying again in {LOCK_POLL_SECS} s");
+                let _ = std::io::stdout().flush();
+                let left = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(left.min(std::time::Duration::from_secs(LOCK_POLL_SECS)));
+            }
+        }
+    }
+}
+
 /// Every run, with or without --dry-run or --out, writes state (feed caches,
 /// cursors, runs.jsonl), so each one holds the lock; each --every iteration
 /// takes it afresh, so a manual run can slot in between two loop runs.
@@ -491,8 +527,8 @@ pub fn main(args: Args) -> Result<i32, Fatal> {
     };
     loop {
         let started = Instant::now();
-        match lock_or_skip(&args) {
-            Ok(None) => {} // logged and recorded; try again next interval
+        match lock_with_retry(&args) {
+            Ok(None) => {} // waited, logged and recorded; try again next interval
             Err(e) => fatal(e),
             // The guard lives to the end of this arm, so a fatal or crash line is
             // also written under the lock. Unwinding from a panic drops it as well.
@@ -530,15 +566,17 @@ mod tests {
         };
         let health = |status: &str| vec![HealthRow { source: "CISA KEV".into(), status: status.into(), ..Default::default() }];
         let linear = |status: &str, note: &str| HealthRow { source: "Linear".into(), status: status.into(), note: note.into(), ..Default::default() };
-        let a = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None);
+        let a = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "");
         assert_eq!(a.len(), 64);
-        assert_eq!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:33"), &health("ok"), None));
-        assert_ne!(a, fingerprint(&regions("<tr>CVE-2</tr>", "06:03"), &health("ok"), None));
-        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("stale"), None));
+        assert_eq!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:33"), &health("ok"), None, ""));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-2</tr>", "06:03"), &health("ok"), None, ""));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("stale"), None, ""));
         // The Linear row's status counts; its note (counts, error text) does not.
-        let ok = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "1 created")));
-        assert_eq!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "2 updated"))));
-        assert_ne!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("error", "HTTP 500"))));
+        let ok = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "1 created")), "");
+        assert_eq!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "2 updated")), ""));
+        assert_ne!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("error", "HTTP 500")), ""));
+        // A new report PDF on the wiki (its content sha) is news for the page link.
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "abc"));
         // Keys are serialised in sorted order, whatever order the map was built in.
         assert_eq!(serde_json::to_string(&json!({"b": 1, "a": {"z": 0, "y": 0}})).unwrap(), r#"{"a":{"y":0,"z":0},"b":1}"#);
     }

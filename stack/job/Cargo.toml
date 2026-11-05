@@ -16,13 +16,14 @@ clap = { version = "4.6.7", features = ["derive"] }
 csv = "1.4.0"
 hex = "0.4.3"
 regex = "1.13.1"
-reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls", "gzip"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls", "gzip", "multipart"] }
 roxmltree = "0.21.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
+tiny_http = "0.12"
 toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
 zip = { version = "9.2.3", default-features = false, features = ["deflate"] }
 

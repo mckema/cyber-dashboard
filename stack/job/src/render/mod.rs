@@ -42,7 +42,7 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::feeds::common::{Fatal, Item};
+use crate::feeds::common::{Fatal, Item, parse_iso};
 
 pub use demo::{DemoArgs, demo};
 pub use fmt::{esc, ftime, plural, thousands};
@@ -156,9 +156,27 @@ pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) 
     }
     s.push_str(
         " &nbsp;&middot;&nbsp; this wiki strips JavaScript from page content, so the brief is \
-         rebuilt by a scheduled job rather than by a button.",
+         rebuilt by a scheduled job.",
     );
     s
+}
+
+/// Links to the FR-A4 month-to-date report, appended to the stamp: the PDF the
+/// last run uploaded (`pdf_href`, with its "tickets as of" time) and, in the lab,
+/// the `serve` link that reads the tickets back first. "" when there is neither.
+pub fn report_links(pdf_href: Option<&str>, tickets_as_of: &str, serve_url: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(h) = pdf_href.filter(|h| !h.is_empty()) {
+        let when = parse_iso(tickets_as_of).map(|t| format!(", tickets as of {} {} UTC", day(&t, false), hm(&t))).unwrap_or_default();
+        parts.push(format!("<a href=\"{}\">month-to-date report (PDF{when})</a>", esc(h)));
+    }
+    if let Some(u) = serve_url.map(|u| u.trim().trim_end_matches('/')).filter(|u| !u.is_empty()) {
+        parts.push(format!("<a href=\"{}/report/month-to-date.pdf\">refresh tickets and download</a>", esc(u)));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(" &nbsp;&middot;&nbsp; Resolution report (FR-A4): {}", parts.join(" &nbsp;&middot;&nbsp; "))
 }
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
@@ -178,8 +196,6 @@ pub fn build_regions(
     let n_high = kept.iter().filter(|it| sev(it) == "HIGH").count();
     let overdue = kev_overdue(kev, &today);
     let note = triage.mode_note.as_deref();
-    let untriaged_late = triage.untriaged.iter().filter(|r| r.overdue).count();
-    let tickets_late = tickets_past_due(&triage.tickets, &today);
 
     let tbody = [
         build_health_rows(health, tracker),
@@ -194,24 +210,13 @@ pub fn build_regions(
     if overdue > 0 {
         n_kev.push_str(&format!(" &middot; {overdue} past deadline"));
     }
-    let mut s_untriaged = thousands(triage.untriaged.len());
-    if untriaged_late > 0 {
-        s_untriaged.push_str(&format!(" &middot; {} overdue", thousands(untriaged_late)));
-    }
-    let (no_owner, no_due) = tickets_missing(&triage.tickets);
-    let mut n_tickets = plural(triage.tickets.len(), "ticket", None);
-    for (n, what) in [(tickets_late, "past due"), (no_owner, "no owner"), (no_due, "no due date")] {
-        if n > 0 {
-            n_tickets.push_str(&format!(" &middot; {} {what}", thousands(n)));
-        }
-    }
     let text = [
         thousands(kev.len()),
         thousands(n_crit),
         thousands(n_high),
         thousands(dep.len()),
         thousands(adv.len()),
-        s_untriaged,
+        untriaged_summary(triage),
         thousands(triage.auto_not_relevant),
         health_summary(health),
         n_kev,
@@ -224,13 +229,56 @@ pub fn build_regions(
             format!("All {} shown.", thousands(total))
         },
         plural(triage.untriaged.len(), "item", None),
-        n_tickets,
+        tickets_summary(triage, &today),
         format!("{} {} &rarr; {} {} UTC", day(&start, false), hm(&start), day(&end, false), hm(&end)),
     ];
     Regions {
         tbody: TBODY_IDS.iter().map(|s| s.to_string()).zip(tbody).collect(),
         text: TEXT_IDS.iter().map(|s| s.to_string()).zip(text).collect(),
         stamp: build_stamp(now, kev_catalog, health),
+    }
+}
+
+/// s-untriaged: "3", or "3 &middot; 1 overdue".
+fn untriaged_summary(triage: &TriageView) -> String {
+    let mut s = thousands(triage.untriaged.len());
+    let late = triage.untriaged.iter().filter(|r| r.overdue).count();
+    if late > 0 {
+        s.push_str(&format!(" &middot; {} overdue", thousands(late)));
+    }
+    s
+}
+
+/// n-tickets: "2 tickets", plus past due / no owner / no due date counts when non-zero.
+fn tickets_summary(triage: &TriageView, today: &str) -> String {
+    let (no_owner, no_due) = tickets_missing(&triage.tickets);
+    let mut s = plural(triage.tickets.len(), "ticket", None);
+    for (n, what) in [(tickets_past_due(&triage.tickets, today), "past due"), (no_owner, "no owner"), (no_due, "no due date")] {
+        if n > 0 {
+            s.push_str(&format!(" &middot; {} {what}", thousands(n)));
+        }
+    }
+    s
+}
+
+/// Ticket-table ids that `ticket_regions` fills (s-auto is not one: it counts the
+/// items of a run's window, which a partial refresh does not have).
+pub const TICKET_TBODY_IDS: [&str; 2] = ["t-untriaged", "t-tickets"];
+pub const TICKET_TEXT_IDS: [&str; 3] = ["s-untriaged", "n-untriaged", "n-tickets"];
+
+/// The two triage tables and their counters only, exactly as build_regions renders
+/// them for the same view and `now` (end of the window), for `serve`'s partial
+/// re-splice. `stamp` is left empty: the caller puts back the page's own stamp
+/// (stamp_of), since apply_regions always writes it.
+pub fn ticket_regions(view: &TriageView, now: DateTime<Utc>) -> Regions {
+    let today = now.format("%Y-%m-%d").to_string();
+    let note = view.mode_note.as_deref();
+    let tbody = [build_untriaged_rows(&view.untriaged, note), build_ticket_rows(&view.tickets, &today, note)];
+    let text = [untriaged_summary(view), plural(view.untriaged.len(), "item", None), tickets_summary(view, &today)];
+    Regions {
+        tbody: TICKET_TBODY_IDS.iter().map(|s| s.to_string()).zip(tbody).collect(),
+        text: TICKET_TEXT_IDS.iter().map(|s| s.to_string()).zip(text).collect(),
+        stamp: String::new(),
     }
 }
 
@@ -271,6 +319,13 @@ fn find_element(doc: &str, eid: &str, div_only: bool) -> Option<(usize, usize, u
         }
     }
     None
+}
+
+/// The inner HTML of the page's stamp (`rstat`), as last written. A partial
+/// re-splice (serve) passes it back unchanged, since apply_regions always writes
+/// the stamp. None when the page has no stamp anchor.
+pub fn stamp_of(doc: &str) -> Option<String> {
+    find_element(doc, STAMP_ID, true).map(|(_, open_end, close_start, _)| doc[open_end..close_start].to_string())
 }
 
 /// Splice regions into the page HTML. Err names the first missing anchor. Idempotent.
@@ -496,6 +551,19 @@ mod tests {
     }
 
     #[test]
+    fn report_links_in_the_stamp() {
+        assert_eq!(report_links(None, "", None), "");
+        assert_eq!(report_links(None, "", Some("  ")), "");
+        let both = report_links(Some("/exploit-watch/report-month-to-date.pdf?v=abc"), "2026-11-05T07:31:00Z",
+                                Some("http://localhost:8090/"));
+        assert!(both.contains(r#"<a href="/exploit-watch/report-month-to-date.pdf?v=abc">month-to-date report (PDF, tickets as of 5 Nov 07:31 UTC)</a>"#), "{both}");
+        assert!(both.contains(r#"<a href="http://localhost:8090/report/month-to-date.pdf">refresh tickets and download</a>"#), "{both}");
+        assert!(!both.contains("<div"), "the stamp may not hold a div");
+        let evil = report_links(Some(r#"/x?v="><script>"#), "", None);
+        assert!(!evil.contains("<script>"), "{evil}");
+    }
+
+    #[test]
     fn text_regions_have_no_tags() {
         let r = load();
         for (k, v) in &r.text {
@@ -522,6 +590,52 @@ mod tests {
         for id in ["t-untriaged", "t-tickets"] {
             super::test_support::assert_clean(evil.get(id));
         }
+    }
+
+    /// serve's partial refresh renders the triage regions exactly as a full run does,
+    /// and nothing else (no s-auto, no stamp).
+    #[test]
+    fn ticket_regions_match_build_regions() {
+        let t = crate::feeds::common::parse_iso("2026-11-03T02:45:00Z").unwrap();
+        let row = |id: &str, overdue: bool| TriageRow { item_id: id.into(), title: id.into(), overdue, ..Default::default() };
+        let ticket = |id: &str, assignee: &str, due: &str| TicketRow {
+            issue_identifier: id.into(), assignee: assignee.into(), due: due.into(), ..Default::default()
+        };
+        let views = [
+            TriageView::default(),
+            TriageView { mode_note: Some("Linear sync is off.".into()), ..Default::default() },
+            TriageView {
+                untriaged: vec![row("A", true), row("B", false)],
+                tickets: vec![ticket("T-1", "", "2026-11-01"), ticket("T-2", "Ann", ""), ticket("T-3", "Bo", "2026-12-01")],
+                auto_not_relevant: 7,
+                mode_note: None,
+            },
+            evil_triage(),
+        ];
+        for v in &views {
+            let full = build_regions(&[], &[], &[], &[], &[], None, v, t, t, t, "", 300);
+            let part = ticket_regions(v, t);
+            let ids: Vec<&str> = part.tbody.iter().chain(part.text.iter()).map(|(k, _)| k.as_str()).collect();
+            assert_eq!(ids, ["t-untriaged", "t-tickets", "s-untriaged", "n-untriaged", "n-tickets"]);
+            for id in &ids {
+                assert_eq!(part.get(id), full.get(id), "{id}");
+            }
+            assert_eq!(part.stamp, "");
+        }
+        let busy = ticket_regions(&views[2], t);
+        assert_eq!(busy.get("s-untriaged"), "2 &middot; 1 overdue");
+        assert_eq!(busy.get("n-tickets"), "3 tickets &middot; 1 past due &middot; 1 no owner &middot; 1 no due date");
+        // Spliced into the skeleton with the page's stamp put back, the rest of the page is untouched.
+        let page = apply_regions(&skel(), &load()).unwrap();
+        let mut r = busy.clone();
+        r.stamp = stamp_of(&page).unwrap();
+        let out = apply_regions(&page, &r).unwrap();
+        assert_eq!(stamp_of(&out), stamp_of(&page));
+        assert_ne!(out, page);
+        let inner = |d: &str, id: &str| find_element(d, id, false).map(|(_, a, b, _)| d[a..b].to_string()).unwrap();
+        assert_eq!(inner(&out, "s-auto"), inner(&page, "s-auto"));
+        assert_eq!(inner(&out, "s-auto"), "412");
+        assert_eq!(inner(&out, "n-tickets"), busy.get("n-tickets"));
     }
 
     /// The Linear row goes into the health table only: the health count and the

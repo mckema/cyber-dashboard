@@ -13,6 +13,7 @@ Rebuilds the Wiki.js page `CTP/run-books/Cyber-Exploit-Watch` from free public v
 - [How a run works](#how-a-run-works)
 - [Feeds](#feeds)
 - [Triage](#triage)
+- [Resolution report (FR-A4)](#resolution-report-fr-a4)
 - [Operations](#operations)
 - [Configuration](#configuration)
 - [State](#state)
@@ -34,6 +35,8 @@ This repository is a fork of Mark McKee's prototype `mckema/cyber-dashboard` (20
 
 The job also covers the next two MS-30 requirements, FR-A2 (triage every new item: relevant to fairCT or not, with a reason and who decided, within one business day) and FR-A3 (a ticket for each relevant item): it matches items against a component list, files one Linear issue per match and shows the untriaged items and open tickets on the page. See [Triage](#triage).
 
+FR-A4 (an internal resolution report to the fairCT COO, monthly and on demand) is built from the job's append-only triage event log: a PDF for a calendar month, and a month-to-date PDF linked from the page. See [Resolution report (FR-A4)](#resolution-report-fr-a4).
+
 The job only replaces content inside anchored elements of the page (table bodies, counters, a stamp). Prose on the page stays hand-editable.
 
 ## Status and roadmap
@@ -44,7 +47,7 @@ Where each environment stands is in [Deployment](#deployment); decisions behind 
 |---|---|---|
 | Replace the sample component list with a test list from colleagues (Rust and UI libraries), then the list agreed with Germano | FR-A2 | Waiting for the list |
 | Run `live` against a personal Linear Free workspace, then ask Mark McKee for a sandbox team in Ediphy's Linear | FR-A2, FR-A3, FR-A9 | Personal workspace done on 2026-11-04/05 (18 API and UI checks); sandbox team not requested yet |
-| Monthly and on-demand report to the fairCT COO | FR-A4 | Not started |
+| Monthly and on-demand report to the fairCT COO | FR-A4 | Built in the local lab on 2026-11-05: `report --month` command, month-to-date PDF linked from the page and from `report-serve`. Where the COO reads it, and the retention period, not agreed yet |
 | Cloud Run Job, Cloud Scheduler, GCS state, Terraform; write to `wiki2` via IAP | — | Deferred |
 
 ## Getting started
@@ -77,11 +80,13 @@ flowchart LR
   feeds["7 public feeds<br/>CISA KEV · ENISA EUVD · CVE.org · NVD<br/>GitHub Advisory · CERT-EU · NCSC-NL"]:::ext
   wiki["Wiki.js<br/>page CTP/run-books/Cyber-Exploit-Watch"]:::ext
   linear["Linear<br/>Triage inbox of the team"]:::ext
+  coo["fairCT COO"]:::person
 
   feeds -->|"HTTPS: JSON, CSV, RSS"| ew
-  ew -->|"GraphQL pages.update"| wiki
+  ew -->|"GraphQL pages.update,<br/>report PDF as asset"| wiki
   ew -->|"GraphQL: create issue, comment, read state"| linear
   reader -->|reads| wiki
+  coo -->|"downloads the resolution report (FR-A4)"| wiki
   op -->|"bootstrap, run, reseed"| ew
   op -->|"Accept / Decline"| linear
 ```
@@ -95,8 +100,9 @@ flowchart LR
 
   feeds["Public feeds"]:::ext
   subgraph ew["Exploit Watch"]
-    job["job<br/>Rust binary exploit-watch<br/>run --every N"]:::container
-    state[("state/<br/>HTTP cache, cursors, seen.json,<br/>triage.json, runs.jsonl")]:::container
+    job["job<br/>Rust binary exploit-watch + typst CLI<br/>run --every N"]:::container
+    serve["report-serve<br/>same image, serve --port 8090<br/>local lab only"]:::container
+    state[("state/<br/>HTTP cache, cursors, seen.json,<br/>triage.json, triage-events.jsonl,<br/>runs.jsonl, reports/")]:::container
     comps["component list<br/>TOML file"]:::container
   end
   mock["linear-mock<br/>Rust binary, local lab only<br/>state/linear-mock/issues.json"]:::container
@@ -111,7 +117,10 @@ flowchart LR
   comps --> job
   job -->|"GraphQL: issues, comments, states<br/>(compose default)"| mock
   job -.->|"same calls when LINEAR_API_URL<br/>points to api.linear.app"| linear
-  job -->|"GraphQL: read page, update page"| app
+  job -->|"GraphQL: read page, update page;<br/>POST /u: report PDF"| app
+  serve <-->|"under state/run.lock"| state
+  serve -->|"read issue states"| mock
+  serve -->|"ticket tables, report PDF"| app
   app --> db
 ```
 
@@ -122,7 +131,10 @@ flowchart TB
   classDef component fill:#85bbf0,stroke:#5d82a8,color:#000
   classDef ext fill:#999,stroke:#6b6b6b,color:#fff
 
-  main["main.rs<br/>CLI: run · bootstrap · demo · triage"]:::component
+  main["main.rs<br/>CLI: run · bootstrap · demo · triage · report · serve"]:::component
+  rep["report/<br/>FR-A4 report from the event log;<br/>PDF via the typst CLI"]:::component
+  srv["serve.rs<br/>lab HTTP service: refresh and download"]:::component
+  assets["wiki/assets.rs<br/>upload a file (POST /u)"]:::component
   run["run.rs<br/>window, merge, fingerprint, write"]:::component
   tri["triage/<br/>components, matcher, store,<br/>tracker, sync, step"]:::component
   lin["Linear"]:::ext
@@ -134,12 +146,14 @@ flowchart TB
   boot["wiki/bootstrap.rs<br/>admin setup, key, page, CSS"]:::component
   wjs["Wiki.js"]:::ext
 
-  main --> run & boot & render
+  main --> run & boot & render & rep & srv
   run --> feeds --> common --> st
   run --> tri --> st
   tri --> lin
   run --> render
   run --> wiki
+  run --> rep --> assets --> wiki
+  srv --> tri & render & wiki & rep
   boot --> wiki
   wiki --> wjs
 ```
@@ -148,20 +162,22 @@ flowchart TB
 
 ### Deployment
 
-| Environment | Runtime | Wiki | Status (2026-11-04) |
+| Environment | Runtime | Wiki | Status (2026-11-05) |
 |---|---|---|---|
-| Local lab | Docker Compose: `wiki` + `job` + `linear-mock`, loop every 21600 s (6 h); tracker `live` against `linear-mock` | Wiki.js 2.5.317, page id 1 | Running |
+| Local lab | Docker Compose: `wiki` + `job` + `linear-mock` + `report-serve`, loop every 21600 s (6 h); tracker `live` against `linear-mock` | Wiki.js 2.5.317, page id 1 | Running |
 | Production | Cloud Scheduler + Cloud Run Job, state in GCS | `wiki2.internal.ediphy.io` via IAP, page id 51 | Decided, not built |
+| Production, FR-A4 monthly report | A second Cloud Scheduler trigger on the 1st at 06:00 Europe/Amsterdam runs the job with `report --month <previous month>`; report.json, report.pdf and SHA256SUMS go to a GCS bucket with a retention policy and Bucket Lock (WORM, like S3 Object Lock in compliance mode; locked only once the retention period is agreed); the PDF is shared with the COO from a Google Shared Drive as a link, not as an email attachment | — | Proposed by the ISB Vietnam team (2026-11-05), not built; where the COO reads it is not agreed |
+| Production, FR-A4 on demand | The month-to-date PDF uploaded by each run (as in the lab). The "refresh tickets and download" link would need a Cloud Run service behind IAP that verifies the IAP JWT (`x-goog-iap-jwt-assertion`) and logs who asked, shows a confirm page on GET and refreshes on POST (`Sec-Fetch-Site: same-origin`), and takes a GCS lock (object create with `ifGenerationMatch=0` and a lease) instead of `flock` | — | Proposed, not built |
 
 ## How a run works
 
-1. Take the lock `state/run.lock`, so only one run uses `state/` at a time. If another run holds it, stop (see the table below).
+1. Take the lock `state/run.lock`, so only one run uses `state/` at a time. If another run holds it, stop; a loop run waits for it first (see the table below).
 2. Set the window to the last 7 days (UTC).
 3. Call each feed module in order. A module whose `CADENCE` has not elapsed reuses the items of its last successful fetch (`state/items/`).
 4. Merge: CISA KEV and ENISA EUVD rows join by CVE into one "exploited" table; NVD scores fill CVE.org records that have no CNA or CISA-ADP score; CERT-EU and NCSC-NL share one advisory table.
-5. Triage (see [Triage](#triage)): match every item against the component list, record new decisions in `triage.json`, and, on a writing run only, sync the tracker.
+5. Triage (see [Triage](#triage)): match every item against the component list, record new decisions in `triage.json`, and, on a writing run only, sync the tracker. Then, on a writing run, build the month-to-date resolution report and upload its PDF to the wiki when its content changed or the last upload is 24 hours old (see [Resolution report (FR-A4)](#resolution-report-fr-a4)); a report or upload error is recorded and does not stop the run.
 6. Render seven tables (feed health, exploited, advisories, dependencies, CVEs, untriaged, open tickets) and the counters, and splice them into the current page by anchor id. The feed health table ends with a "Linear" row for the tracker (see [Triage](#triage)).
-7. Fingerprint the data, leaving out regions that change every run (health table, health count, window label). Write only when the fingerprint changed, when `HEARTBEAT_HOURS` (24 h) has passed since the last write, or when the page no longer carries the current data (after a reseed or a manual edit).
+7. Fingerprint the data, leaving out regions that change every run (health table, health count, window label), but including each feed's status, the Linear row's status and the content sha of the report PDF the page links to. Write only when the fingerprint changed, when `HEARTBEAT_HOURS` (24 h) has passed since the last write, or when the page no longer carries the current data (after a reseed or a manual edit).
 8. Write with one `pages.update` call. `scriptCss` is never sent by the job.
 9. Record each item's first-seen time in `seen.json` and one line in `runs.jsonl`.
 
@@ -177,7 +193,7 @@ flowchart TB
 | `FATAL` while looping (`--every`) | Logged and recorded as `fatal`; next run proceeds |
 | Component list does not load, or `triage.json` is unreadable | Triage skipped; the triage tables say why; feed tables written as usual |
 | Tracker call fails | An error of one item (`INPUT_ERROR`, unexpected reply) skips that item; any other error stops issue creates and comments for this run. Issue states are read back in both cases, progress so far is saved, errors go to `runs.jsonl` under `triage.errors` and the first one to the Linear row of the health table; page written |
-| Another run holds `state/run.lock` (for example a manual `docker compose run --rm job run` while the loop's run is in progress) | `LOCKED: another run holds …`, one `locked` line in `runs.jsonl`, nothing else written; a single run exits 75, the loop skips that run and tries again at its next interval |
+| Another run holds `state/run.lock` (for example a manual `docker compose run --rm job run` while the loop's run is in progress) | A single run prints `LOCKED: another run holds …`, records one `locked` line in `runs.jsonl`, writes nothing else and exits 75. A loop run (since 2026-11-05) tries again every minute for up to `LOCK_WAIT_SECONDS` (15 minutes), then records `locked` and waits for its next interval |
 
 ## Feeds
 
@@ -237,6 +253,19 @@ flowchart LR
 
 Local test on 2026-11-04 with the sample list over the 7-day window, against `linear-mock`: 3,383 items, 2 matched (`clickhouse` and `vite`, rule `vendor-product`), 3,381 not relevant by rule; two issues filed (`MOCK-1`, `MOCK-2`), one accepted and one declined by editing `state/linear-mock/issues.json`, and the next run showed one open ticket and no untriaged item. With a wrong `LINEAR_API_KEY` the run still wrote the page and recorded the authentication error in `runs.jsonl`.
 
+## Resolution report (FR-A4)
+
+FR-A4 asks for an "internal resolution report to the fairCT COO: items triaged, actions taken, actions open", generated on demand and monthly, with no external sharing. Mark McKee described it on 2026-10-30 as a monthly report covering resolved issues and open ones with plans. Design chosen by the ISB Vietnam team on 2026-11-05: the wiki page stays the dashboard, the monthly report is a PDF, and the on-demand report is a month-to-date PDF linked from the page.
+
+- **Source**: `state/triage-events.jsonl` (see [State](#state)) and `state/runs.jsonl`, not `triage.json`, which forgets after 30 days. Events are placed at the time Linear gives (`triagedAt`, `completedAt`, `canceledAt`), not when the job logged them; repeated event ids count once; a half-written last line is skipped. The report takes no lock.
+- **Period**: a calendar month in Europe/Amsterdam time (`report --month YYYY-MM`), or the current month to now. A period that ends before the event log starts (its first line) is refused; one that starts before it carries a "history covers from" note. In the lab the log starts on 2026-11-05.
+- **Sections** (English, PDF/A-2b, A4): header (period, tickets as of, coverage, component list version and sha256, tracker endpoint, run counts, feed health); intake (items first seen in the period, by source); triage FR-A2 (not relevant by rule, matched, triaged in the period as accepted, declined with or without a reason, untriaged at the end, time to triage in Amsterdam business hours with every item over one business day listed); actions taken (done, with on time against the due date and the median time to close; canceled after acceptance; declined with reason); actions open "with plans" (accepted and not closed at the end of the period, with owner and due date as the plan, Linear status, overdue, age); exceptions (open without owner or due date, declined without a reason, triaged with no actor, tracker errors). Definitions are printed at the end of the PDF.
+- **Marking**: every page carries `TLP:AMBER+STRICT` (internal to fairCT, no further sharing); a report built against `linear-mock` carries `LAB DATA` on every page. Monthly reports say "Monthly report YYYY-MM"; month-to-date ones say "On-demand snapshot – not the official monthly report".
+- **Output**: `state/reports/<YYYY-MM | month-to-date>/` with `report.json`, `report.pdf` and `SHA256SUMS` (`sha256sum -c` format). `data_sha` (printed in the PDF) is the sha256 of `report.json` without `generated_at`; `content_sha` covers only the content sections (components, intake, triage, actions, exceptions), so it does not change with the clock.
+- **On demand, from the page** (option B): each writing run builds the month-to-date report and uploads the PDF as the wiki asset `/exploit-watch/report-month-to-date.pdf` when `content_sha` changed or the last upload is 24 hours old (`state/reports/month-to-date/upload.json`). The page stamp links to it as "month-to-date report (PDF, tickets as of …)", with `?v=<content sha>` so a browser never shows an older copy. Wiki.js serves it with `Content-Disposition: attachment`.
+- **On demand, refreshed on click** (option 3b, local lab only): the stamp also links to `SERVE_PUBLIC_URL/report/month-to-date.pdf`, served by `report-serve` (see [Operations](#operations)). A click reads every issue back from the tracker, rewrites the two ticket tables and their counters on the page (the stamp and the other tables stay as the last run left them; the page is written only when they changed), builds the report with tickets as of the click, uploads it like option B and returns the PDF. Measured on 2026-11-05 against `linear-mock`: 1.5 s; a click during a run waited 12 s for the lock.
+- **Monthly**: `report --month YYYY-MM` by hand in the lab; the production schedule and storage are proposed in [Deployment](#deployment). For MS-30 the PDF is shared with the COO by hand.
+
 ## Operations
 
 ```bash
@@ -252,12 +281,18 @@ docker compose build job                                 # after any change unde
 docker compose run --rm job triage --report              # match counts over state/items/, no network
 docker compose build linear-mock                         # after any change under stack/linear-mock/src/
 docker compose logs linear-mock                          # one line per GraphQL call from the job
+docker compose run --rm job report --month 2026-11       # FR-A4 monthly report -> state/reports/2026-11/
+docker compose run --rm job report --month-to-date       # month to date -> state/reports/month-to-date/ (no upload)
+curl -OJ http://localhost:8090/report/month-to-date.pdf  # what the page's "refresh tickets and download" link does
+docker compose logs report-serve                         # one line per request
 tail -5 state/runs.jsonl
 ```
 
+`report-serve` (local lab only) runs the job image as `exploit-watch serve --port 8090` on `127.0.0.1:8090`: `GET /healthz` answers `ok` (its compose healthcheck is `serve --healthcheck`); `GET /report/month-to-date.pdf` refreshes the tickets and returns the PDF. Within `SERVE_COOLDOWN_SECONDS` (60) of the last refresh it returns the last PDF; it waits up to `SERVE_LOCK_WAIT_SECONDS` (90) for a run that holds `state/run.lock`, and returns the last PDF if the lock stays busy (503 with `Retry-After` when there is none yet). Response headers `X-Report-Refreshed`, `X-Report-Reason` (cooldown, locked, error) and `X-Report-As-Of` say what was served. Each request adds a `mode: "serve"` line to `runs.jsonl`. After a code change, `docker compose build job` and `docker compose up -d` recreate both `job` and `report-serve`. `bootstrap` (since 2026-11-05) also grants the bot key `read:assets` and `write:assets` on the `exploit-watch` asset folder and creates that folder; run it once after upgrading.
+
 `bootstrap` is idempotent: a second run keeps the existing key (`bootstrap ok (.env unchanged)`). After `docker compose down -v` the wiki's admin and key are gone; run `bootstrap` again to recreate them.
 
-Only one `run` uses `state/` at a time. A manual `docker compose run --rm job run` started while the loop's run is in progress prints `LOCKED: …`, records `locked` in `runs.jsonl` and exits 75 without doing anything; run it again once `docker compose logs job` shows the loop's run has finished. If the loop's run starts while a manual run holds the lock, the loop skips that run and tries again at its next interval (6 hours).
+Only one `run` uses `state/` at a time. A manual `docker compose run --rm job run` started while the loop's run is in progress prints `LOCKED: …`, records `locked` in `runs.jsonl` and exits 75 without doing anything; run it again once `docker compose logs job` shows the loop's run has finished. If the loop's run starts while a manual run or a `report-serve` refresh holds the lock, the loop tries again every minute for up to `LOCK_WAIT_SECONDS` (15 minutes) before it skips to its next interval (6 hours).
 
 ## Configuration
 
@@ -282,6 +317,11 @@ Read from `.env` (created by `bootstrap` from `.env.example`) and the environmen
 | `LINEAR_API_URL` | `https://api.linear.app/graphql` (compose: `http://linear-mock:8080/graphql`) | Linear GraphQL endpoint |
 | `LINEAR_API_KEY` | — (compose: `lin_api_mock`) | Live mode only. A Linear personal API key (prefix `lin_api_`, sent as `Authorization: <key>`) or an OAuth access token, e.g. from an OAuth app's `client_credentials` grant (prefix `lin_oauth_`, sent as `Authorization: Bearer <token>`). Never written to logs, errors or the page |
 | `LINEAR_TEAM_ID` | — (compose: `mock-team`) | Live mode only: the team whose Triage inbox receives issues |
+| `LOCK_WAIT_SECONDS` | `900` | Loop (`--every`) only: how long a run waits for `state/run.lock` held by another run |
+| `TYPST_BIN` | `typst` (in the image: `/usr/local/bin/typst`, version 0.15.1) | typst CLI used to render report PDFs |
+| `SERVE_PUBLIC_URL` | — (compose: `http://localhost:8090`) | URL of `report-serve` as the browser sees it; when set, the page stamp links to it |
+| `SERVE_COOLDOWN_SECONDS` | `60` | `report-serve`: no new refresh this soon after the last one |
+| `SERVE_LOCK_WAIT_SECONDS` | `90` | `report-serve`: how long a click waits for a run to release the lock |
 | `MOCK_APP_TOKEN` (`linear-mock` only) | — (compose: `lin_oauth_mock`) | OAuth access token the mock accepts as `Authorization: Bearer <token>` besides `MOCK_API_KEY`; must differ from `MOCK_API_KEY` and must not start with `lin_api_`. Set `LINEAR_API_KEY=lin_oauth_mock` in `.env` to exercise the job's Bearer path against the mock |
 
 Do not put `$` or quotes in `.env` values: Compose reads the file too.
@@ -299,15 +339,16 @@ Do not put `$` or quotes in `.env` values: Compose reads the file too.
 | `wiki.json` | Data fingerprint and time of the last write |
 | `triage.json` | One record per new item: decision, item copy, issue create id (`issue_create_id`), issue and its last read state (`issue_status`: `state` = `triage`, `accepted`, `done`, `declined` or `canceled`, `state_name`, `assignee`, `due`, `reason`, `reason_at`, `actor` = who triaged it, `changed` = when it left Triage, and since 2026-11-05 `created`, `started`, `completed`, `canceled` from Linear). The working set: records are dropped 30 days after first sight once finished |
 | `triage-events.jsonl` | Since 2026-11-05: every change to `triage.json` as one JSON line (`decided`, `issue_created`, `triaged`, `state_changed`, `field_changed`, `pruned`), each with a stable `id`, `key`, `at` (when it happened) and `ts` (when it was logged). Appended by writing runs only and never pruned; the source for the FR-A4 report and the audit trail. The first writing run after the upgrade writes a `baseline` of every record held at that time, dated from the record (the decision at first sight, triage and closing at the times Linear gave, owner, due date and reason at the record's last change), so history before 2026-11-05 covers only records still in `triage.json` then. About 3 MB a month with the sample list (estimate) |
+| `reports/<YYYY-MM \| month-to-date>/` | Since 2026-11-05: FR-A4 report as `report.json` (times in Amsterdam local time, `as_of` in UTC), `report.pdf` and `SHA256SUMS`; `month-to-date/upload.json` records the last PDF uploaded to the wiki (path, `content_sha`, time). See [Resolution report (FR-A4)](#resolution-report-fr-a4) |
 | `linear-mock/issues.json` | Issues held by the `linear-mock` service; editable by hand to simulate triage |
 | `run.lock` | Lock held by the run in progress (advisory `flock`); while held it contains that run's pid, container hostname and start time, otherwise it is empty. Do not delete it |
-| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `locked`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min`, and `triage` (`components` version and `components_sha256` of the list file, `mode`, `endpoint` in live mode, `new_matched`, `new_not_relevant`, `created`, `recovered`, `commented`, `updated`, `pruned`, `missing_owner`, `missing_due`, `missing_reason`, `missing_actor`, `errors`: one line per tracker error of the run) |
+| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `locked`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min`, and `triage` (`components` version and `components_sha256` of the list file, `mode`, `endpoint` in live mode, `new_matched`, `new_not_relevant`, `created`, `recovered`, `commented`, `updated`, `pruned`, `missing_owner`, `missing_due`, `missing_reason`, `missing_actor`, `errors`: one line per tracker error of the run), and on a writing run `report` (`label`, `content_sha`, `data_sha`, `pdf_sha`, `uploaded`, `upload_error`, or `error`). Lines with `mode: "serve"` come from `report-serve`: `result` (`refreshed`, `cooldown`, `locked`, `error`), `seconds`, `updated`, `page_written`, `error` |
 
 Lag is an item's first-seen time minus its first publication time (`published`; a later `updated` time is ignored), in minutes. It is recorded for items new on a run whose publication time has a time of day, and not on a feed's first (baseline) run. It is a metric, not a pass/fail rule (Mark McKee, 2026-11-03).
 
 `missing_owner` and `missing_due` count open tickets without an assignee or a due date; `missing_reason` counts matched items declined without a reason; `missing_actor` counts matched items out of Triage with no name for who triaged them. Since 2026-11-05 a read-back that comes back without `actor` or `changed` for an issue still out of Triage keeps the earlier values. They are counted from `triage.json` on every run, also when no tracker call is made, for the FR-A4 monthly report.
 
-Every `run` takes the lock, including `--dry-run`, `--out` and each `--every` iteration, because all of them write feed caches, cursors and `runs.jsonl`; only the wiki write is skipped. `bootstrap`, `demo` and `triage --report` do not write `state/` and do not take the lock. The lock is released when a run ends in any way, including a panic or `docker compose kill`, so it never needs to be cleared by hand.
+Every `run` takes the lock, including `--dry-run`, `--out` and each `--every` iteration, because all of them write feed caches, cursors and `runs.jsonl`; only the wiki write is skipped. `bootstrap`, `demo` and `triage --report` do not write `state/` and do not take the lock; `report` writes only `state/reports/` and takes no lock; `report-serve` takes the lock for each refresh. The lock is released when a run ends in any way, including a panic or `docker compose kill`, so it never needs to be cleared by hand.
 
 Reset only what you need: deleting `http/` forces full downloads; deleting `cursors/cvelist*` forces a 7-day backfill (about 47 MB); deleting `seen.json` makes the next run a baseline with no lag measured. If a root container created files in `state/`, the job cannot write them; fix with `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/app" debian:bookworm-slim chown -R 1000:1000 /app/state`.
 
@@ -360,6 +401,16 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 - The job does not obtain or refresh OAuth tokens. A `client_credentials` access token lasts 30 days; after that every Linear call fails with `AUTHENTICATION_ERROR` (shown on the Linear row of the health table and in `runs.jsonl`; the run itself does not fail) until `LINEAR_API_KEY` is replaced with a new token.
 - `linear-mock` checks only the header form of the OAuth token; it does not simulate token issuance, expiry, revocation or scopes.
 
+**Resolution report (FR-A4)**
+
+- History starts with the event log. Records still in `triage.json` at that moment enter it as a dated `baseline`, but a record pruned earlier, or a change made between two read-backs (for example accepted and done within one 6-hour cycle), leaves no trace; Linear itself keeps the full history. In the lab the log starts on 2026-11-05, so October 2026 has no report.
+- Owner, due date and status come from the job's read-backs, so a month-end report shows the last values the job read before the end of the month (at most 6 hours old in the loop).
+- The business-hours clock has no holiday calendar, as on the dashboard.
+- Where the COO reads the report, how long reports and the event log are kept, and the marking (TLP:AMBER+STRICT for now) are not agreed with Mark McKee yet. The monthly PDF is not uploaded anywhere by the job.
+- `report-serve` is single-threaded: while a refresh runs, `/healthz` and other clicks wait. Its cooldown is kept in memory and resets on restart. A click that changes the ticket tables writes one more page version (see `--purge-history`). Its GET has side effects and it has no authentication: lab only (see [Deployment](#deployment)).
+- The month-to-date PDF is a wiki asset: anyone who can read the wiki can download it (guests have `read:assets` on the lab wiki), an upload overwrites it with no history, and uploads are limited to 5 MB (Wiki.js `uploads.maxFileSize`). Wiki.js answers `ok` to an upload even when it failed to save, so the job reads the file back and compares it.
+- The job image carries the typst CLI (about 56 MB; the image grew from 141 MB to 223 MB on 2026-11-05).
+
 ## Development
 
 ```text
@@ -368,7 +419,10 @@ stack/wiki/page/            skeleton.html (page content with anchor ids), style.
 stack/job/Cargo.toml        crate exploit-watch (Rust 1.99, edition 2024), with Cargo.lock
 stack/job/src/              the crate's source
 stack/job/tests/fixtures/   trimmed real payloads for unit tests and demo
-stack/job/Dockerfile        build on rust:1.99.1-slim-bookworm, run on debian:bookworm-slim as uid 1000
+stack/job/src/report/       FR-A4 report: event-log reading, sections, report.typ template, PDF via typst
+stack/job/src/serve.rs      report-serve (lab): refresh tickets and download the report on click
+stack/job/Dockerfile        build on rust:1.99.1-slim-bookworm, run on debian:bookworm-slim as uid 1000;
+                            a separate stage downloads typst 0.15.1 (sha256-checked) into the image
 stack/job/Dockerfile.dockerignore   build context: Cargo.toml, Cargo.lock, src/ only
 stack/job/components.sample.toml    sample component list for triage
 stack/linear-mock/          crate linear-mock (local stand-in for the Linear API), with its own Cargo.lock and Dockerfile
@@ -385,6 +439,8 @@ MSYS_NO_PATHCONV=1 docker run --rm -e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTT
 ```
 
 For `linear-mock`, use `-w /src/stack/linear-mock` and a separate target volume (`-v ew-target-mock:/target`). After changing either crate, rebuild its image: `docker compose build job` or `docker compose build linear-mock`.
+
+The test container has no typst, so the test that renders a report PDF is `#[ignore]`d; to run it, mount a typst 0.15.1 binary and set `TYPST_BIN`, then pass `-- --ignored report`. To look at a PDF without a test, run `docker compose run --rm job report --month-to-date` and open `state/reports/month-to-date/report.pdf`.
 
 `exploit-watch demo OUT.html [--dark]` renders the page from `stack/job/tests/fixtures/render_items.json` for visual review.
 
@@ -416,3 +472,8 @@ To add a feed, write a module in `stack/job/src/feeds/` that follows the contrac
 | 2026-11-05 | Read who triaged an issue and when from Linear's `triagedAt` and the history entry next to it, not from the latest state change; map Linear's `duplicate` state to declined with reason "Marked as duplicate" when no comment gives one; read the 50 newest history entries and comments per issue | ISB Vietnam team | Decided, applied |
 | 2026-11-05 | Issue creation is idempotent: the job saves a random UUID v4 per record in `triage.json` before the first attempt and sends it as `IssueCreateInput.id`; Linear's "conflict on insert of Issue" answer means the issue exists, and it is read back by id. A name-based (v5) id was refused by Linear, so the id cannot be derived from the item key | ISB Vietnam team | Decided, applied |
 | 2026-11-05 | Flag accepted issues without an owner or due date and declines without a reason as warnings on the page and in `runs.jsonl`; no enforcement in Linear until the mandatory rules are agreed with Mark McKee | ISB Vietnam team | Decided, applied |
+| 2026-11-05 | Tell a decline from a cancel after acceptance by `canceledAt − triagedAt` over 5 seconds (a Decline on the Linear test workspace set them 3–4 ms apart), confirmed by the history entry that left Triage; take the decline reason only from comments written after the triage | ISB Vietnam team | Decided, applied |
+| 2026-11-05 | Keep the store's history in an append-only `state/triage-events.jsonl` (never pruned), with the component list's sha256 on every decision, as the source for FR-A4 and the audit trail | ISB Vietnam team | Decided, applied |
+| 2026-11-05 | FR-A4: the wiki page stays the dashboard (no report on it); the monthly report is a PDF (Shared Drive for reading, GCS with Bucket Lock as evidence, both proposed for production); on demand, a month-to-date PDF uploaded as a wiki asset by each run (option B) and, in the lab, a `report-serve` link that refreshes the tickets first (option 3b), both to be shown to Mark McKee | ISB Vietnam team (Henry) | Decided, built in the lab |
+| 2026-11-05 | Render report PDFs with the typst CLI (PDF/A-2b, embedded fonts) in the job image, rather than a headless browser or a PDF library linked into the binary | ISB Vietnam team | Decided, applied |
+| 2026-11-05 | Upload the month-to-date PDF only when its content sections changed or the last upload is 24 hours old, because its data sha changes with the clock on every run | ISB Vietnam team | Decided, applied |

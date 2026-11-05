@@ -6,18 +6,41 @@
 //! is HTTP 500 with a message. Proxy settings come from HTTP(S)_PROXY / NO_PROXY
 //! (inside compose the wiki is http://wiki:3000 and NO_PROXY lists `wiki`).
 
+pub mod assets;
 pub mod bootstrap;
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, PROXY_AUTHORIZATION};
 use serde_json::{Value, json};
 
 use crate::feeds::common::{self, Fatal};
 
 pub const DEFAULT_BASE: &str = "https://wiki2.internal.ediphy.io";
+
+/// Read the page the job owns (bot key). Used by `run` and `serve`.
+pub(crate) const READ_PAGE: &str = r#"
+query ($id: Int!) {
+  pages { single(id: $id) { content title description tags { tag } } }
+}
+"#;
+
+// Note: do NOT request `page { ... }` in the mutation response. Page.editor is
+// non-nullable and serialises to null here, which surfaces as a GraphQL error
+// even though the write succeeded. scriptCss is not sent: the job's key has no
+// write:styles, so Wiki.js keeps the hand-written CSS.
+pub(crate) const WRITE_PAGE: &str = r#"
+mutation ($id: Int!, $content: String!, $tags: [String]!, $title: String!, $desc: String!) {
+  pages {
+    update(id: $id, content: $content, tags: $tags, title: $title,
+           description: $desc, isPublished: true) {
+      responseResult { succeeded errorCode message }
+    }
+  }
+}
+"#;
 /// Per-request timeout of the bootstrap client.
 pub const ADMIN_TIMEOUT_SECS: u64 = 30;
 
@@ -70,6 +93,27 @@ pub fn gql_bot(query: &str, variables: Value) -> Result<Value, Fatal> {
     gql_bot_with(common::client(), &bot_base(), &key, &iap, query, variables)
 }
 
+/// The job's auth on any Wiki.js request (GraphQL, asset upload and read-back):
+/// `Authorization: Bearer <key>`, plus the IAP token as Proxy-Authorization when set.
+pub(crate) fn bot_auth(req: RequestBuilder, key: &str, iap: &str) -> RequestBuilder {
+    let req = req.header(AUTHORIZATION, format!("Bearer {key}"));
+    if iap.is_empty() {
+        return req;
+    }
+    // IAP consumes Authorization and never forwards it, so the IAP token rides
+    // on Proxy-Authorization and Authorization is left for Wiki.js.
+    req.header(PROXY_AUTHORIZATION, format!("Bearer {iap}"))
+}
+
+pub(crate) const SIGNIN: &str = "redirected to Google sign-in: the IAP token is missing, expired, \
+                                 or the service account lacks roles/iap.httpsResourceAccessor";
+
+/// True when the reply is IAP's Google sign-in (redirect, or its HTML page) instead of Wiki.js.
+pub(crate) fn is_signin(status: u16, final_url: &str, text: &str) -> bool {
+    status == 301 || status == 302 || final_url.contains("accounts.google.com")
+        || head(text, 600).contains("accounts.google.com")
+}
+
 /// gql_bot with explicit inputs (tests, or callers with their own client).
 pub fn gql_bot_with(client: &Client, base: &str, key: &str, iap: &str, query: &str, variables: Value)
     -> Result<Value, Fatal> {
@@ -79,25 +123,15 @@ pub fn gql_bot_with(client: &Client, base: &str, key: &str, iap: &str, query: &s
     let base = base.trim_end_matches('/');
     let vars = if variables.is_null() { json!({}) } else { variables };
     let body = serde_json::to_vec(&json!({"query": query, "variables": vars})).expect("JSON body");
-    let mut req = client
-        .post(format!("{base}/graphql"))
-        .header(CONTENT_TYPE, "application/json")
-        .header(AUTHORIZATION, format!("Bearer {key}"));
-    if !iap.is_empty() {
-        // IAP consumes Authorization and never forwards it, so the IAP token rides
-        // on Proxy-Authorization and Authorization is left for Wiki.js.
-        req = req.header(PROXY_AUTHORIZATION, format!("Bearer {iap}"));
-    }
+    let req = bot_auth(client.post(format!("{base}/graphql")).header(CONTENT_TYPE, "application/json"), key, iap);
     let r = req.body(body).send().map_err(|e| Fatal(format!("cannot reach Wiki.js at {base}: {}", err_chain(&e))))?;
     let status = r.status().as_u16();
     let final_url = r.url().to_string();
     let bytes = r.bytes().map_err(|e| Fatal(format!("cannot reach Wiki.js at {base}: {}", err_chain(&e))))?;
     let text = String::from_utf8_lossy(&bytes);
 
-    if status == 301 || status == 302 || final_url.contains("accounts.google.com")
-        || head(&text, 600).contains("accounts.google.com") {
-        return Err(Fatal("redirected to Google sign-in: the IAP token is missing, expired, \
-                          or the service account lacks roles/iap.httpsResourceAccessor".into()));
+    if is_signin(status, &final_url, &text) {
+        return Err(Fatal(SIGNIN.into()));
     }
     if !(200..400).contains(&status) {
         return Err(Fatal(format!("GraphQL HTTP {status}: {}", head(&text, 300))));

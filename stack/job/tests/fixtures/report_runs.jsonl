@@ -1,0 +1,7 @@
+{"run_at":"2026-10-31T10:00:00Z","mode":"write","result":"written","feeds":{"CISA KEV":{"status":"ok"}},"triage":{"mode":"live","endpoint":"http://linear-mock:8080/graphql"}}
+{"run_at":"2026-11-10T10:00:00Z","mode":"write","result":"written","feeds":{"CISA KEV":{"status":"ok"},"NVD":{"status":"cached"}},"triage":{"mode":"live","endpoint":"http://linear-mock:8080/graphql"}}
+{"run_at":"2026-11-15T10:00:00Z","mode":"write","result":"unchanged","feeds":{"CISA KEV":{"status":"error"}},"triage":{"mode":"live","endpoint":"http://linear-mock:8080/graphql","errors":["read issue states: Linear: network error"]}}
+{"run_at":"2026-11-16T10:00:00Z","result":"fatal","error":"CISA KEV: network error"}
+{"run_at":"2026-11-20T10:00:00Z","mode":"dry-run","result":"would-write","feeds":{"CISA KEV":{"status":"ok"}}}
+{"run_at":"2026-11-28T10:00:00Z","mode":"write","result":"locked","error":"another run holds state/run.lock"}
+{"run_at":"2026-11-29T10:00:00Z","mode":"write","result":"written","feeds":{"CISA KEV":{"status":"ok"}},"triage":{"mode":"live","endpoint":"http://linear-mock:8080/graphql"}}

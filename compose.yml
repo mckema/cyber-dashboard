@@ -52,10 +52,11 @@ services:
         HTTPS_PROXY: ${HTTPS_PROXY:-}
         NO_PROXY: wiki,localhost,127.0.0.1
     image: exploit-watch-job
-    env_file:
+    # report-serve reuses env_file, environment and volumes through these anchors.
+    env_file: &job-env-file
       - path: .env
         required: false   # `exploit-watch bootstrap` creates it on first run
-    environment:
+    environment: &job-env
       # Containers have no Internet without the proxy (DNS fails). NO_PROXY keeps
       # Wiki.js and linear-mock traffic on the compose network instead of going
       # via the proxy.
@@ -75,7 +76,10 @@ services:
       LINEAR_API_URL: ${LINEAR_API_URL:-http://linear-mock:8080/graphql}
       LINEAR_API_KEY: ${LINEAR_API_KEY:-lin_api_mock}
       LINEAR_TEAM_ID: ${LINEAR_TEAM_ID:-mock-team}
-    volumes:
+      # Address of the report-serve service as the browser sees it; the page's
+      # "Refresh & download" link points there.
+      SERVE_PUBLIC_URL: ${SERVE_PUBLIC_URL:-http://localhost:8090}
+    volumes: &job-volumes
       # Repo bind mount for state/, stack/wiki/page/, .env, the component list and
       # stack/job/tests/fixtures (demo). The working directory /app is the repo root,
       # so runtime paths are relative to it. The binary is in the image: code
@@ -88,6 +92,42 @@ services:
         condition: service_healthy
       linear-mock:
         condition: service_healthy
+    restart: unless-stopped
+
+  report-serve:
+    # Local lab only: the "Refresh & download" link on the page. GET
+    # /report/month-to-date.pdf reads Linear back, updates the two ticket tables
+    # on the page and returns a fresh month-to-date report PDF (FR-A4). Same image,
+    # environment and state/ as the job; it takes state/run.lock like a run does.
+    # No build section: the image is built by the job service
+    # (`docker compose build job`).
+    image: exploit-watch-job
+    env_file: *job-env-file
+    environment:
+      <<: *job-env
+      # No new refresh this soon after the last one (seconds).
+      SERVE_COOLDOWN_SECONDS: ${SERVE_COOLDOWN_SECONDS:-60}
+      # How long a click waits for a run holding state/run.lock (seconds).
+      SERVE_LOCK_WAIT_SECONDS: ${SERVE_LOCK_WAIT_SECONDS:-90}
+    volumes: *job-volumes
+    command: ["serve", "--port", "8090"]
+    ports:
+      - "127.0.0.1:8090:8090"
+    healthcheck:
+      # The runtime image has no curl or wget; the binary checks its own /healthz.
+      # Single-threaded: during a refresh (up to ~2 min) the check waits and may fail.
+      test: ["CMD", "exploit-watch", "serve", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      wiki:
+        condition: service_healthy
+      linear-mock:
+        condition: service_healthy
+    # PID 1 signal handling, so `docker compose stop` does not wait 10 s.
+    init: true
     restart: unless-stopped
 
   linear-mock:
