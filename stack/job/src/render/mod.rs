@@ -49,7 +49,7 @@ pub use fmt::{esc, ftime, plural, thousands};
 use fmt::{day, hm};
 use tables::{
     build_adv_rows, build_cve_rows, build_dep_rows, build_health_rows, build_kev_rows, build_ticket_rows,
-    build_untriaged_rows, cve_keep, health_summary, kev_overdue, sev, tickets_missing, tickets_past_due,
+    build_untriaged_rows, cve_keep, feed_status, health_summary, kev_overdue, sev, tickets_missing, tickets_past_due,
 };
 
 pub const TBODY_IDS: [&str; 7] = ["t-health", "t-kev", "t-adv", "t-dep", "t-nvd", "t-untriaged", "t-tickets"];
@@ -145,38 +145,74 @@ impl Regions {
 
 // ---------------------------------------------------------------- whole page
 
-/// Inner HTML of <div id="rstat">. Contains <b>; never a <div>.
+/// One labelled value of the status strip: small caps label, value, optional note.
+fn status_item(label: &str, value: &str, note: &str, extra_class: &str) -> String {
+    let note = if note.is_empty() { String::new() } else { format!("<span class=\"rsub\">{note}</span>") };
+    format!("<span class=\"rkv{extra_class}\"><span class=\"rk\">{label}</span><span class=\"rv\">{value}</span>{note}</span>")
+}
+
+/// Inner HTML of <div id="rstat">: a status strip of labelled values (feeds with a
+/// coloured dot, last update, KEV catalog) in <span class="rmeta">; report_links()
+/// may append the report card after it. Spans only, never a <div>.
 pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) -> String {
-    let mut s = format!("Generated <b>{}, {} UTC</b>", day(&now, true), hm(&now));
-    if !kev_catalog.is_empty() {
-        s.push_str(&format!(" &nbsp;&middot;&nbsp; CISA KEV catalog <b>{}</b>", esc(kev_catalog)));
-    }
+    let mut s = String::from("<span class=\"rmeta\">");
     if !health.is_empty() {
-        s.push_str(&format!(" &nbsp;&middot;&nbsp; feeds: {}", health_summary(health)));
+        let (cls, head) = feed_status(health);
+        let summary = health_summary(health);
+        let detail = summary.split_once(" &middot; ").map_or("", |(_, rest)| rest);
+        s.push_str(&status_item("Feeds", &format!("<span class=\"rdot\"></span>{head}"), detail,
+                                &format!(" rst-{cls}")));
     }
-    s.push_str(
-        " &nbsp;&middot;&nbsp; this wiki strips JavaScript from page content, so the brief is \
-         rebuilt by a scheduled job.",
-    );
+    s.push_str(&status_item("Updated", &format!("{}, {} UTC", day(&now, true), hm(&now)), "by the scheduled job", ""));
+    if !kev_catalog.is_empty() {
+        s.push_str(&status_item("CISA KEV catalog", &esc(kev_catalog), "", ""));
+    }
+    s.push_str("</span>");
     s
 }
 
-/// Links to the FR-A4 month-to-date report, appended to the stamp: the PDF the
-/// last run uploaded (`pdf_href`, with its "tickets as of" time) and, in the lab,
-/// the `serve` link that reads the tickets back first. "" when there is neither.
+/// Display name of the FR-A4 report (MS-30 is the "Cyber threat dashboard").
+pub const REPORT_NAME: &str = "Cyber threat report";
+
+/// The FR-A4 report card, appended to the stamp: name and month, what it covers
+/// (FR-A4's own words), the "data as of" time of the PDF the last run uploaded,
+/// a primary button to download it (`pdf_href`) and, in the lab, a secondary
+/// button to the `serve` link that reads the tickets back first. Plain links
+/// styled as buttons (the wiki strips scripts). "" when there is neither.
 pub fn report_links(pdf_href: Option<&str>, tickets_as_of: &str, serve_url: Option<&str>) -> String {
-    let mut parts = Vec::new();
+    let mut buttons = Vec::new();
     if let Some(h) = pdf_href.filter(|h| !h.is_empty()) {
-        let when = parse_iso(tickets_as_of).map(|t| format!(", tickets as of {} {} UTC", day(&t, false), hm(&t))).unwrap_or_default();
-        parts.push(format!("<a href=\"{}\">month-to-date report (PDF{when})</a>", esc(h)));
+        buttons.push(format!(
+            "<a class=\"rbtn\" href=\"{}\" title=\"This month so far, as of the time shown (updated by the scheduled job)\">\
+             &darr;&nbsp; Download report (PDF)</a>",
+            esc(h)
+        ));
     }
     if let Some(u) = serve_url.map(|u| u.trim().trim_end_matches('/')).filter(|u| !u.is_empty()) {
-        parts.push(format!("<a href=\"{}/report/month-to-date.pdf\">refresh tickets and download</a>", esc(u)));
+        buttons.push(format!(
+            "<a class=\"rbtn rbtn-2\" href=\"{}/report/month-to-date.pdf\" title=\"Reads the tickets back from \
+             Linear first (a few seconds), updates the ticket tables below, then downloads the report\">\
+             &#8635;&nbsp; Refresh data &amp; download</a>",
+            esc(u)
+        ));
     }
-    if parts.is_empty() {
+    if buttons.is_empty() {
         return String::new();
     }
-    format!(" &nbsp;&middot;&nbsp; Resolution report (FR-A4): {}", parts.join(" &nbsp;&middot;&nbsp; "))
+    let t = parse_iso(tickets_as_of);
+    let month = t
+        .map(|t| format!(" &mdash; {} so far", crate::triage::store::to_amsterdam(t).format("%B %Y")))
+        .unwrap_or_default();
+    let as_of = t
+        .map(|t| format!("<span class=\"rreport-a\">Data as of <b>{} {} UTC</b></span>", day(&t, false), hm(&t)))
+        .unwrap_or_default();
+    format!(
+        "<span class=\"rreport\"><span class=\"rreport-txt\">\
+         <span class=\"rreport-t\"><b>{REPORT_NAME}</b>{month}</span>\
+         <span class=\"rreport-d\">Items triaged, actions taken and actions open, with owner and due date. \
+         Internal to fairCT.</span>{as_of}</span><span class=\"rbtns\">{}</span></span>",
+        buttons.join("")
+    )
 }
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
@@ -556,11 +592,30 @@ mod tests {
         assert_eq!(report_links(None, "", Some("  ")), "");
         let both = report_links(Some("/exploit-watch/report-month-to-date.pdf?v=abc"), "2026-11-05T07:31:00Z",
                                 Some("http://localhost:8090/"));
-        assert!(both.contains(r#"<a href="/exploit-watch/report-month-to-date.pdf?v=abc">month-to-date report (PDF, tickets as of 5 Nov 07:31 UTC)</a>"#), "{both}");
-        assert!(both.contains(r#"<a href="http://localhost:8090/report/month-to-date.pdf">refresh tickets and download</a>"#), "{both}");
+        assert!(both.starts_with(r#"<span class="rreport">"#), "{both}");
+        assert!(both.contains("<b>Cyber threat report</b> &mdash; November 2026 so far"), "{both}");
+        assert!(both.contains("Data as of <b>5 Nov 07:31 UTC</b>"), "{both}");
+        assert!(both.contains(r#"<a class="rbtn" href="/exploit-watch/report-month-to-date.pdf?v=abc""#), "{both}");
+        assert!(both.contains(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/report/month-to-date.pdf""#), "{both}");
+        assert!(both.contains("Download report (PDF)</a>") && both.contains("Refresh data &amp; download</a>"), "{both}");
         assert!(!both.contains("<div"), "the stamp may not hold a div");
+        let only_serve = report_links(None, "", Some("http://x"));
+        assert!(only_serve.contains("rbtn-2") && !only_serve.contains("Data as of"), "{only_serve}");
         let evil = report_links(Some(r#"/x?v="><script>"#), "", None);
         assert!(!evil.contains("<script>"), "{evil}");
+    }
+
+    #[test]
+    fn stamp_status_strip() {
+        let row = |status: &str| HealthRow { source: "X".into(), status: status.into(), ..Default::default() };
+        let now = parse_iso("2026-11-05T08:23:00Z").unwrap();
+        let ok = build_stamp(now, "2026.11.04", &[row("ok"), row("cached"), row("not-modified")]);
+        assert!(ok.contains(r#"<span class="rkv rst-ok"><span class="rk">Feeds</span><span class="rv"><span class="rdot"></span>All 3 feeds current</span><span class="rsub">2 ok &middot; 1 cached</span>"#), "{ok}");
+        assert!(ok.contains(r#"<span class="rk">Updated</span><span class="rv">5 Nov 2026, 08:23 UTC</span>"#), "{ok}");
+        assert!(ok.contains(r#"<span class="rk">CISA KEV catalog</span><span class="rv">2026.11.04</span>"#), "{ok}");
+        assert!(!ok.contains("<div"));
+        assert!(build_stamp(now, "", &[row("ok"), row("stale")]).contains("rst-warn\"><span class=\"rk\">Feeds</span><span class=\"rv\"><span class=\"rdot\"></span>1 feed stale"));
+        assert!(build_stamp(now, "", &[row("error"), row("error"), row("stale")]).contains("2 feeds failing"));
     }
 
     #[test]
@@ -570,7 +625,7 @@ mod tests {
             assert!(!v.contains('<'), "{k}");
         }
         assert!(!r.stamp.contains("<div"));
-        assert!(r.stamp.contains("<b>"));
+        assert!(r.stamp.contains(r#"<span class="rv">"#), "the stamp carries inline markup");
     }
 
     #[test]
@@ -704,6 +759,7 @@ mod tests {
         let t = evil_triage();
         evil.push_str(&build_untriaged_rows(&t.untriaged, None));
         evil.push_str(&build_ticket_rows(&t.tickets, "2026-11-03", None));
+        evil.push_str(&report_links(Some("/x.pdf?v=1"), "2026-11-05T07:57:00Z", Some("http://localhost:8090")));
         let css = read(STYLE_PATH);
         let fallback = ["sm", "score-other", "pi-L", "pi-X", "sv-MEDIUM", "sv-LOW"];
         for c in re(r#"class="([^"]*)""#).captures_iter(&(page + &evil)) {

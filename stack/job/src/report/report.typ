@@ -56,7 +56,7 @@
 }
 
 // ------------------------------------------------------------------ title
-#text(size: 17pt, weight: "bold")[Exploit Watch – resolution report]
+#text(size: 17pt, weight: "bold")[Cyber threat report]
 #v(-6pt)
 #text(size: 12pt)[#d.label]
 
