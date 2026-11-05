@@ -155,14 +155,15 @@ flowchart TB
 
 ## How a run works
 
-1. Set the window to the last 7 days (UTC).
-2. Call each feed module in order. A module whose `CADENCE` has not elapsed reuses the items of its last successful fetch (`state/items/`).
-3. Merge: CISA KEV and ENISA EUVD rows join by CVE into one "exploited" table; NVD scores fill CVE.org records that have no CNA or CISA-ADP score; CERT-EU and NCSC-NL share one advisory table.
-4. Triage (see [Triage](#triage)): match every item against the component list, record new decisions in `triage.json`, and, on a writing run only, sync the tracker.
-5. Render seven tables (feed health, exploited, advisories, dependencies, CVEs, untriaged, open tickets) and the counters, and splice them into the current page by anchor id.
-6. Fingerprint the data, leaving out regions that change every run (health table, health count, window label). Write only when the fingerprint changed, when `HEARTBEAT_HOURS` (24 h) has passed since the last write, or when the page no longer carries the current data (after a reseed or a manual edit).
-7. Write with one `pages.update` call. `scriptCss` is never sent by the job.
-8. Record each item's first-seen time in `seen.json` and one line in `runs.jsonl`.
+1. Take the lock `state/run.lock`, so only one run uses `state/` at a time. If another run holds it, stop (see the table below).
+2. Set the window to the last 7 days (UTC).
+3. Call each feed module in order. A module whose `CADENCE` has not elapsed reuses the items of its last successful fetch (`state/items/`).
+4. Merge: CISA KEV and ENISA EUVD rows join by CVE into one "exploited" table; NVD scores fill CVE.org records that have no CNA or CISA-ADP score; CERT-EU and NCSC-NL share one advisory table.
+5. Triage (see [Triage](#triage)): match every item against the component list, record new decisions in `triage.json`, and, on a writing run only, sync the tracker.
+6. Render seven tables (feed health, exploited, advisories, dependencies, CVEs, untriaged, open tickets) and the counters, and splice them into the current page by anchor id.
+7. Fingerprint the data, leaving out regions that change every run (health table, health count, window label). Write only when the fingerprint changed, when `HEARTBEAT_HOURS` (24 h) has passed since the last write, or when the page no longer carries the current data (after a reseed or a manual edit).
+8. Write with one `pages.update` call. `scriptCss` is never sent by the job.
+9. Record each item's first-seen time in `seen.json` and one line in `runs.jsonl`.
 
 | Condition | Result |
 |---|---|
@@ -176,6 +177,7 @@ flowchart TB
 | `FATAL` while looping (`--every`) | Logged and recorded as `fatal`; next run proceeds |
 | Component list does not load, or `triage.json` is unreadable | Triage skipped; the triage tables say why; feed tables written as usual |
 | Tracker call fails | Tracker calls stop for this run, progress so far is saved, error in `runs.jsonl` under `triage.errors`; page written |
+| Another run holds `state/run.lock` (for example a manual `docker compose run --rm job run` while the loop's run is in progress) | `LOCKED: another run holds …`, one `locked` line in `runs.jsonl`, nothing else written; a single run exits 75, the loop skips that run and tries again at its next interval |
 
 ## Feeds
 
@@ -250,6 +252,8 @@ tail -5 state/runs.jsonl
 
 `bootstrap` is idempotent: a second run keeps the existing key (`bootstrap ok (.env unchanged)`). After `docker compose down -v` the wiki's admin and key are gone; run `bootstrap` again to recreate them.
 
+Only one `run` uses `state/` at a time. A manual `docker compose run --rm job run` started while the loop's run is in progress prints `LOCKED: …`, records `locked` in `runs.jsonl` and exits 75 without doing anything; run it again once `docker compose logs job` shows the loop's run has finished. If the loop's run starts while a manual run holds the lock, the loop skips that run and tries again at its next interval (6 hours).
+
 ## Configuration
 
 Read from `.env` (created by `bootstrap` from `.env.example`) and the environment. Compose overrides `WIKI_BASE` and `STATE_DIR` for the job, and supplies `LINEAR_*` defaults that point at `linear-mock` when `.env` leaves them empty.
@@ -288,15 +292,22 @@ Do not put `$` or quotes in `.env` values: Compose reads the file too.
 | `wiki.json` | Data fingerprint and time of the last write |
 | `triage.json` | One record per new item: decision, item copy, issue and its state |
 | `linear-mock/issues.json` | Issues held by the `linear-mock` service; editable by hand to simulate triage |
-| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min`, and `triage` (`mode`, `endpoint` in live mode, `new_matched`, `new_not_relevant`, `created`, `commented`, `updated`, `pruned`, `errors`) |
+| `run.lock` | Lock held by the run in progress (advisory `flock`); while held it contains that run's pid, container hostname and start time, otherwise it is empty. Do not delete it |
+| `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `locked`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min`, and `triage` (`mode`, `endpoint` in live mode, `new_matched`, `new_not_relevant`, `created`, `commented`, `updated`, `pruned`, `errors`) |
 
 Lag is an item's first-seen time minus its first publication time (`published`; a later `updated` time is ignored), in minutes. It is recorded for items new on a run whose publication time has a time of day, and not on a feed's first (baseline) run. It is a metric, not a pass/fail rule (Mark McKee, 2026-11-03).
+
+Every `run` takes the lock, including `--dry-run`, `--out` and each `--every` iteration, because all of them write feed caches, cursors and `runs.jsonl`; only the wiki write is skipped. `bootstrap`, `demo` and `triage --report` do not write `state/` and do not take the lock. The lock is released when a run ends in any way, including a panic or `docker compose kill`, so it never needs to be cleared by hand.
 
 Reset only what you need: deleting `http/` forces full downloads; deleting `cursors/cvelist*` forces a 7-day backfill (about 47 MB); deleting `seen.json` makes the next run a baseline with no lag measured. If a root container created files in `state/`, the job cannot write them; fix with `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/app" debian:bookworm-slim chown -R 1000:1000 /app/state`.
 
 ## Known limitations
 
 Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
+
+**Job**
+
+- The run lock is an advisory `flock` on `state/run.lock`. It works across containers on one Docker host, including Docker Desktop's Windows bind mount (verified 2026-11-04), but not across hosts or on object storage; the production design (Cloud Run Job, state in GCS) needs a different lock, for example a GCS object created with an `ifGenerationMatch=0` precondition (not built).
 
 **Wiki.js**
 
@@ -377,3 +388,4 @@ To add a feed, write a module in `stack/job/src/feeds/` that follows the contrac
 | 2026-11-04 | One folder per compose service under `stack/` (`wiki`, `job`, `linear-mock`); the job stays one process (feeds, triage, render, write), matching one Cloud Run Job in production | ISB Vietnam team | Decided, applied |
 | 2026-11-04 | Local triage tests go through a `linear-mock` service over HTTP; the file-based `fake` tracker is removed and `LINEAR_MODE` is `off` or `live` (compose: `live` against `linear-mock`) | ISB Vietnam team | Decided, applied |
 | 2026-11-04 | Verify `live` against a personal Linear Free workspace before asking Mark McKee for a sandbox team in Ediphy's Linear | ISB Vietnam team | Decided |
+| 2026-11-04 | One run at a time per `state/` directory: every `run` (also `--dry-run`, `--out` and each `--every` iteration) takes an advisory `flock` on `state/run.lock`; a run that finds it held records `locked` and exits 75, and the loop skips to its next interval. Chosen over a lock file with a stale timeout because the kernel releases a `flock` on any exit; verified across two containers on Docker Desktop's Windows bind mount. Follows two overlapping runs on 2026-11-04 that broke an atomic write of `triage.json` | ISB Vietnam team | Decided, applied |

@@ -4,6 +4,7 @@
 //! triage/step.rs), rebuilds the table bodies and the counters on the page, and
 //! writes the result back through the Wiki.js GraphQL API. Only the anchored
 //! regions are replaced; prose, callouts and source cards stay hand-editable.
+//! One run at a time per STATE_DIR: a run holds state/run.lock (see main below).
 //!
 //! Environment:
 //!   WIKI_BASE         https://wiki2.internal.ediphy.io   (compose: http://wiki:3000)
@@ -371,10 +372,9 @@ fn run(args: &Args) -> Result<(), Fatal> {
                                         &triage.view, start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
     let fp = fingerprint(&regions, &health);
 
-    let mode = if args.dry_run { "dry-run" } else if args.out.is_some() { "out" } else { "write" };
     let mut record = Map::new();
     record.insert("run_at".into(), json!(iso_utc(now)));
-    record.insert("mode".into(), json!(mode));
+    record.insert("mode".into(), json!(mode(args)));
     let last: Value = state::load_json("wiki.json").unwrap_or(json!({}));
     let result;
 
@@ -446,25 +446,62 @@ fn run(args: &Args) -> Result<(), Fatal> {
     Ok(())
 }
 
+/// Exit code of a single run that found another run in progress (sysexits
+/// EX_TEMPFAIL): nothing was done, try again later. A failed run exits 1.
+pub const EXIT_LOCKED: i32 = 75;
+
+fn mode(args: &Args) -> &'static str {
+    if args.dry_run { "dry-run" } else if args.out.is_some() { "out" } else { "write" }
+}
+
+/// Take the state lock for one run. When another run holds it, print who,
+/// append a `locked` line to runs.jsonl (the only write) and return None.
+fn lock_or_skip(args: &Args) -> Result<Option<state::RunLock>, Fatal> {
+    let now = state::utcnow();
+    match state::lock_run(now)? {
+        Ok(lock) => Ok(Some(lock)),
+        Err(holder) => {
+            let msg = format!("another run holds {}/run.lock ({holder}); this run did nothing",
+                              state::dir().display());
+            eprintln!("LOCKED: {msg}");
+            state::append_run(&json!({"run_at": iso_utc(now), "mode": mode(args), "result": "locked", "error": clip(&msg, 300)}));
+            Ok(None)
+        }
+    }
+}
+
+/// Every run, with or without --dry-run or --out, writes state (feed caches,
+/// cursors, runs.jsonl), so each one holds the lock; each --every iteration
+/// takes it afresh, so a manual run can slot in between two loop runs.
 pub fn main(args: Args) -> Result<i32, Fatal> {
     let Some(every) = args.every else {
+        let Some(_lock) = lock_or_skip(&args)? else {
+            return Ok(EXIT_LOCKED);
+        };
         run(&args)?;
         return Ok(0);
     };
+    let fatal = |e: Fatal| {
+        eprintln!("FATAL: {e}");
+        state::append_run(&json!({"run_at": iso_utc(state::utcnow()), "result": "fatal", "error": e.0}));
+    };
     loop {
         let started = Instant::now();
-        match catch_unwind(AssertUnwindSafe(|| run(&args))) {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                eprintln!("FATAL: {e}");
-                state::append_run(&json!({"run_at": iso_utc(state::utcnow()), "result": "fatal", "error": e.0}));
-            }
-            Err(p) => {
-                // Keep the loop alive; the log shows what happened.
-                let msg = panic_text(p);
-                eprintln!("CRASH: {msg}");
-                state::append_run(&json!({"run_at": iso_utc(state::utcnow()), "result": "crash", "error": clip(&msg, 300)}));
-            }
+        match lock_or_skip(&args) {
+            Ok(None) => {} // logged and recorded; try again next interval
+            Err(e) => fatal(e),
+            // The guard lives to the end of this arm, so a fatal or crash line is
+            // also written under the lock. Unwinding from a panic drops it as well.
+            Ok(Some(_lock)) => match catch_unwind(AssertUnwindSafe(|| run(&args))) {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => fatal(e),
+                Err(p) => {
+                    // Keep the loop alive; the log shows what happened.
+                    let msg = panic_text(p);
+                    eprintln!("CRASH: {msg}");
+                    state::append_run(&json!({"run_at": iso_utc(state::utcnow()), "result": "crash", "error": clip(&msg, 300)}));
+                }
+            },
         }
         let _ = std::io::stdout().flush();
         let left = every.saturating_sub(started.elapsed().as_secs());
@@ -578,6 +615,22 @@ mod tests {
         assert_eq!(lag_summary(&[40.0, 10.0, 20.0, 35.0]), (Some(40.0), Some(27.5)));
         let rec = json!({"lag_max_min": lag_summary(&[]).0});
         assert_eq!(rec.to_string(), r#"{"lag_max_min":null}"#);
+    }
+
+    #[test]
+    fn busy_lock_records_locked_and_writes_nothing_else() {
+        let t = state::testing::temp_state("run-locked");
+        let _held = state::lock_run(state::utcnow()).unwrap().ok().unwrap();
+        let args = Args { dry_run: true, out: None, every: None };
+        assert_eq!(main(args).unwrap(), EXIT_LOCKED);
+        let runs = std::fs::read_to_string(t.dir.join("runs.jsonl")).unwrap();
+        let rec: Value = serde_json::from_str(runs.trim()).unwrap();
+        assert_eq!((rec["result"].as_str(), rec["mode"].as_str()), (Some("locked"), Some("dry-run")));
+        assert!(s(&rec, "error").contains("\"pid\":"), "{rec}");
+        let mut names: Vec<String> = std::fs::read_dir(&t.dir).unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["run.lock", "runs.jsonl"]);
     }
 
     #[test]
