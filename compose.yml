@@ -69,6 +69,8 @@ services:
       # default is LINEAR_MODE=off). To use a real Linear workspace, set
       # LINEAR_API_URL=https://api.linear.app/graphql, LINEAR_API_KEY and
       # LINEAR_TEAM_ID in .env; these lines only supply the defaults.
+      # LINEAR_API_KEY is a personal API key (lin_api_…, sent bare) or an OAuth
+      # access token (sent as "Bearer <token>").
       LINEAR_MODE: ${LINEAR_MODE:-live}
       LINEAR_API_URL: ${LINEAR_API_URL:-http://linear-mock:8080/graphql}
       LINEAR_API_KEY: ${LINEAR_API_KEY:-lin_api_mock}
@@ -101,7 +103,11 @@ services:
         HTTPS_PROXY: ${HTTPS_PROXY:-}
     image: exploit-watch-linear-mock
     environment:
+      # Personal API key, sent bare by the job (LINEAR_API_KEY default above).
       MOCK_API_KEY: lin_api_mock
+      # OAuth app access token, accepted as "Bearer lin_oauth_mock". Set
+      # LINEAR_API_KEY=lin_oauth_mock in .env to try the job's Bearer path.
+      MOCK_APP_TOKEN: lin_oauth_mock
       MOCK_TEAM_ID: mock-team
       MOCK_DATA_DIR: /data
     volumes:

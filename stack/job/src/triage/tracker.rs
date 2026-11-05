@@ -28,15 +28,25 @@
 //! Linear API (https://linear.app/developers/graphql, schema
 //! github.com/linear/linear packages/sdk/src/schema.graphql, read 2026-11-03):
 //! endpoint https://api.linear.app/graphql, personal API key in
-//! `Authorization: <key>` (no "Bearer"), errors in a GraphQL `errors` array even
+//! `Authorization: <key>` (no "Bearer"), OAuth access token in
+//! `Authorization: Bearer <token>`, errors in a GraphQL `errors` array even
 //! with HTTP 200, rate limit = HTTP 429 + extensions.code "RATELIMITED" with
 //! X-RateLimit-* headers (https://linear.app/developers/rate-limiting).
 //! Workflow state types: triage, backlog, unstarted, started, completed,
 //! canceled, duplicate. Linear has no "decline reason" field; the reason is the
 //! latest comment that the job did not write itself.
+//!
+//! Credential: LINEAR_API_KEY holds either a personal API key or an OAuth access
+//! token (e.g. from an OAuth app's client_credentials grant, actor=app). The
+//! prefix picks the header (auth_value): a value starting with
+//! PERSONAL_KEY_PREFIX ("lin_api_") is sent bare, anything else as
+//! "Bearer <value>". The job does not obtain or refresh OAuth tokens: when one
+//! expires, calls fail with AUTHENTICATION_ERROR until LINEAR_API_KEY is replaced.
+//! The credential never appears in errors, logs or the health note; the header
+//! value is marked sensitive.
 
 use chrono::{DateTime, Utc};
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -47,6 +57,8 @@ use crate::feeds::state;
 
 /// Default GraphQL endpoint of the live tracker; LINEAR_API_URL overrides it.
 pub const ENDPOINT: &str = "https://api.linear.app/graphql";
+/// Linear personal API keys start with this; they go in Authorization without "Bearer".
+pub const PERSONAL_KEY_PREFIX: &str = "lin_api_";
 #[cfg(test)]
 pub const FAKE_FILE: &str = "fake-linear.json";
 /// Comments the job writes start with this, so they are never read back as a decline reason.
@@ -481,29 +493,48 @@ pub trait Transport: std::any::Any {
     fn post(&mut self, body: &Value) -> Result<HttpReply, String>;
 }
 
-/// The real transport: shared client (proxy from HTTP(S)_PROXY), personal API key.
+/// Authorization header value for the LINEAR_API_KEY credential: a personal API
+/// key (starts with PERSONAL_KEY_PREFIX) bare, as Linear requires; anything else
+/// is taken as an OAuth access token and sent as "Bearer <token>".
+pub fn auth_value(credential: &str) -> String {
+    if credential.starts_with(PERSONAL_KEY_PREFIX) {
+        credential.to_string()
+    } else {
+        format!("Bearer {credential}")
+    }
+}
+
+/// The real transport: shared client (proxy from HTTP(S)_PROXY), Authorization
+/// from auth_value(). No Debug: it holds the credential.
 pub struct HttpTransport {
     pub endpoint: String,
-    key: String,
+    auth: HeaderValue,
 }
 
 impl HttpTransport {
-    pub fn new(endpoint: &str, key: &str) -> Self {
-        Self { endpoint: endpoint.into(), key: key.into() }
+    /// Config error (without the value) when the credential cannot go in an HTTP header.
+    pub fn new(endpoint: &str, credential: &str) -> Result<Self, TrackerError> {
+        let mut auth = HeaderValue::from_str(&auth_value(credential)).map_err(|_| {
+            TrackerError::Config("LINEAR_API_KEY has characters that are not allowed in an HTTP header".into())
+        })?;
+        auth.set_sensitive(true);
+        Ok(Self { endpoint: endpoint.into(), auth })
+    }
+
+    /// The request post() sends (tests build it without sending).
+    fn request(&self, body: &Value) -> reqwest::blocking::RequestBuilder {
+        common::client()
+            .post(&self.endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, self.auth.clone())
+            .header(USER_AGENT, common::user_agent())
+            .body(serde_json::to_vec(body).expect("JSON body"))
     }
 }
 
 impl Transport for HttpTransport {
     fn post(&mut self, body: &Value) -> Result<HttpReply, String> {
-        let r = common::client()
-            .post(&self.endpoint)
-            .header(CONTENT_TYPE, "application/json")
-            // Personal API key: the bare key, no "Bearer" (that is for OAuth tokens).
-            .header(AUTHORIZATION, &self.key)
-            .header(USER_AGENT, common::user_agent())
-            .body(serde_json::to_vec(body).expect("JSON body"))
-            .send()
-            .map_err(|e| err_chain(&e))?;
+        let r = self.request(body).send().map_err(|e| err_chain(&e))?;
         let status = r.status().as_u16();
         let headers = r
             .headers()
@@ -632,14 +663,15 @@ impl LinearTracker {
         Self::from_vars(&|k| std::env::var(k).ok())
     }
 
-    /// LINEAR_API_KEY, LINEAR_TEAM_ID (both required) and LINEAR_API_URL (optional,
-    /// default ENDPOINT; the compose lab sets it to the linear-mock service).
+    /// LINEAR_API_KEY (personal API key or OAuth access token, see auth_value),
+    /// LINEAR_TEAM_ID (both required) and LINEAR_API_URL (optional, default
+    /// ENDPOINT; the compose lab sets it to the linear-mock service).
     pub fn from_vars(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, TrackerError> {
         let var = |k: &str| get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         let key = var("LINEAR_API_KEY").ok_or_else(|| TrackerError::Config("LINEAR_MODE=live needs LINEAR_API_KEY".into()))?;
         let team = var("LINEAR_TEAM_ID").ok_or_else(|| TrackerError::Config("LINEAR_MODE=live needs LINEAR_TEAM_ID".into()))?;
         let url = var("LINEAR_API_URL").unwrap_or_else(|| ENDPOINT.to_string());
-        Ok(Self::new(Box::new(HttpTransport::new(&url, &key)), &team))
+        Ok(Self::new(Box::new(HttpTransport::new(&url, &key)?), &team))
     }
 
     /// One GraphQL call; returns `data`. `label` names the operation in errors.
@@ -666,9 +698,9 @@ impl LinearTracker {
         }
         if let Some(mut m) = message {
             if codes.iter().any(|c| c.contains("AUTHENTICATION")) || r.status == 401 {
-                m.push_str(" (LINEAR_API_KEY missing, wrong or revoked)");
+                m.push_str(" (LINEAR_API_KEY missing, wrong, revoked or an expired OAuth token)");
             } else if codes.iter().any(|c| c == "FORBIDDEN") || r.status == 403 {
-                m.push_str(" (the key's user cannot access LINEAR_TEAM_ID)");
+                m.push_str(" (the key's user or OAuth app cannot access LINEAR_TEAM_ID, or lacks a scope)");
             }
             return Err(TrackerError::GraphQl { message: format!("{label}: {m}"), codes });
         }
@@ -958,6 +990,50 @@ mod tests {
         assert_eq!(endpoint(Some(" http://linear-mock:8080/graphql ")), "http://linear-mock:8080/graphql");
     }
 
+    #[test]
+    fn auth_header_from_credential_prefix() {
+        assert_eq!(auth_value("lin_api_abc123"), "lin_api_abc123", "personal API key: bare");
+        assert_eq!(auth_value("lin_oauth_abc123"), "Bearer lin_oauth_abc123", "OAuth access token: Bearer");
+        assert_eq!(auth_value("abc123"), "Bearer abc123", "unknown prefix: treated as an OAuth token");
+        assert_eq!(auth_value("LIN_API_abc"), "Bearer LIN_API_abc", "the prefix is case-sensitive");
+    }
+
+    /// The header the real transport would send, built from the environment as the job does.
+    #[test]
+    fn auth_header_sent_by_http_transport() {
+        let header = |key: &str| {
+            let l = LinearTracker::from_vars(&|k| match k {
+                "LINEAR_API_KEY" => Some(key.into()),
+                "LINEAR_TEAM_ID" => Some("t".into()),
+                "LINEAR_API_URL" => Some("http://linear-mock:8080/graphql".into()),
+                _ => None,
+            })
+            .unwrap();
+            let any: &dyn std::any::Any = &*l.transport;
+            let t = any.downcast_ref::<HttpTransport>().expect("HttpTransport");
+            let req = t.request(&json!({"query": "q"})).build().unwrap();
+            let v = req.headers().get(AUTHORIZATION).expect("Authorization header").clone();
+            assert!(v.is_sensitive(), "the credential must be marked sensitive");
+            assert_eq!(format!("{v:?}"), "Sensitive", "Debug output must not show the credential");
+            v.to_str().unwrap().to_string()
+        };
+        assert_eq!(header(" lin_api_mock "), "lin_api_mock");
+        assert_eq!(header("lin_oauth_mock"), "Bearer lin_oauth_mock");
+    }
+
+    #[test]
+    fn credential_that_cannot_be_a_header_is_a_config_error_without_the_value() {
+        let e = LinearTracker::from_vars(&|k| match k {
+            "LINEAR_API_KEY" => Some("lin_oauth_se\u{7}cret".into()),
+            "LINEAR_TEAM_ID" => Some("t".into()),
+            _ => None,
+        })
+        .err()
+        .unwrap();
+        assert!(matches!(&e, TrackerError::Config(m) if m.contains("LINEAR_API_KEY")), "{e:?}");
+        assert!(!e.to_string().contains("lin_oauth") && !e.to_string().contains("cret"), "{e}");
+    }
+
     // ------------------------------------------------ Linear (canned replies)
 
     /// Serves canned replies in order and records the request bodies.
@@ -1088,7 +1164,7 @@ mod tests {
                                    requests 0/2500 (reset 2026-11-03T08:00:00Z), retry after 30 s");
         let e = q(&mut l);
         assert!(matches!(&e, TrackerError::GraphQl { codes, .. } if codes == &["AUTHENTICATION_ERROR"]), "{e:?}");
-        assert!(e.to_string().ends_with("(LINEAR_API_KEY missing, wrong or revoked)"), "{e}");
+        assert!(e.to_string().ends_with("(LINEAR_API_KEY missing, wrong, revoked or an expired OAuth token)"), "{e}");
         assert_eq!(q(&mut l).to_string(), "Linear: GraphQL errors: viewer: Entity not found: Issue");
         assert_eq!(q(&mut l), TrackerError::Http { status: 502, body: "viewer: <html>Bad Gateway</html>".into() });
         assert_eq!(q(&mut l), TrackerError::Reply("viewer: non-JSON body: not json".into()));

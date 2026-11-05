@@ -275,7 +275,9 @@ Read from `.env` (created by `bootstrap` from `.env.example`) and the environmen
 | `COMPONENTS_FILE` | `stack/job/components.sample.toml` | Component list for the matcher |
 | `LINEAR_MODE` | `off` (compose: `live`) | Tracker: `off` or `live` |
 | `LINEAR_API_URL` | `https://api.linear.app/graphql` (compose: `http://linear-mock:8080/graphql`) | Linear GraphQL endpoint |
-| `LINEAR_API_KEY`, `LINEAR_TEAM_ID` | — (compose: `lin_api_mock`, `mock-team`) | Live mode only: personal API key and the team whose Triage inbox receives issues |
+| `LINEAR_API_KEY` | — (compose: `lin_api_mock`) | Live mode only. A Linear personal API key (prefix `lin_api_`, sent as `Authorization: <key>`) or an OAuth access token, e.g. from an OAuth app's `client_credentials` grant (prefix `lin_oauth_`, sent as `Authorization: Bearer <token>`). Never written to logs, errors or the health note |
+| `LINEAR_TEAM_ID` | — (compose: `mock-team`) | Live mode only: the team whose Triage inbox receives issues |
+| `MOCK_APP_TOKEN` (`linear-mock` only) | — (compose: `lin_oauth_mock`) | OAuth access token the mock accepts as `Authorization: Bearer <token>` besides `MOCK_API_KEY`; must differ from `MOCK_API_KEY` and must not start with `lin_api_`. Set `LINEAR_API_KEY=lin_oauth_mock` in `.env` to exercise the job's Bearer path against the mock |
 
 Do not put `$` or quotes in `.env` values: Compose reads the file too.
 
@@ -337,6 +339,8 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 - Linear behaviour not covered by its documentation (auth error codes, order of nested history and comments) is assumed; see `stack/job/src/triage/tracker.rs`. `linear-mock` is built from the same documentation, so a passing local run does not prove the real API behaves the same way.
 - Issue references in `state/triage.json` belong to one tracker. Before pointing `LINEAR_API_URL` at another endpoint (mock to real Linear or back), or when resetting `state/linear-mock/`, move `state/triage.json` aside too. Otherwise a comment on an issue the endpoint does not have fails, and because a run's tracker sync stops at its first error, no issue state is read back until that item leaves the 7-day window.
 - A hand edit to `state/linear-mock/issues.json` reaches the page on the next writing run: within 6 hours in the loop, or now with `docker compose run --rm job run`. Put a decline reason in `reason`; `comments` holds the job's own comments.
+- The job does not obtain or refresh OAuth tokens. A `client_credentials` access token lasts 30 days; after that every Linear call fails with `AUTHENTICATION_ERROR` (shown in the health note, the run itself does not fail) until `LINEAR_API_KEY` is replaced with a new token.
+- `linear-mock` checks only the header form of the OAuth token; it does not simulate token issuance, expiry, revocation or scopes.
 
 ## Development
 
@@ -389,3 +393,4 @@ To add a feed, write a module in `stack/job/src/feeds/` that follows the contrac
 | 2026-11-04 | Local triage tests go through a `linear-mock` service over HTTP; the file-based `fake` tracker is removed and `LINEAR_MODE` is `off` or `live` (compose: `live` against `linear-mock`) | ISB Vietnam team | Decided, applied |
 | 2026-11-04 | Verify `live` against a personal Linear Free workspace before asking Mark McKee for a sandbox team in Ediphy's Linear | ISB Vietnam team | Decided |
 | 2026-11-04 | One run at a time per `state/` directory: every `run` (also `--dry-run`, `--out` and each `--every` iteration) takes an advisory `flock` on `state/run.lock`; a run that finds it held records `locked` and exits 75, and the loop skips to its next interval. Chosen over a lock file with a stale timeout because the kernel releases a `flock` on any exit; verified across two containers on Docker Desktop's Windows bind mount. Follows two overlapping runs on 2026-11-04 that broke an atomic write of `triage.json` | ISB Vietnam team | Decided, applied |
+| 2026-11-04 | `LINEAR_API_KEY` may hold a personal API key or an OAuth access token; the job sends a value starting with `lin_api_` bare and any other value as `Bearer <value>`, with no separate override variable; `linear-mock` also accepts `Bearer <MOCK_APP_TOKEN>`. An OAuth app token (prefix `lin_oauth_`) was verified against a real Linear workspace on 2026-11-04 | ISB Vietnam team | Decided, applied |

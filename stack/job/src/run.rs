@@ -18,7 +18,8 @@
 //!   NVD_API_KEY       optional, raises the NVD rate limit
 //!   COMPONENTS_FILE   stack/job/components.sample.toml   component list for the matcher
 //!   LINEAR_MODE       off                      off | live
-//!   LINEAR_API_KEY, LINEAR_TEAM_ID             live mode only
+//!   LINEAR_API_KEY    live mode only: personal API key (lin_api_…, sent bare) or OAuth access token (sent as Bearer)
+//!   LINEAR_TEAM_ID    live mode only: team whose Triage inbox receives issues
 //!   LINEAR_API_URL    https://api.linear.app/graphql   live mode endpoint (compose lab: the linear-mock service)
 
 use std::collections::HashMap;

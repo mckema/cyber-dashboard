@@ -11,10 +11,20 @@
 //!   POST /graphql   JSON {"query": "...", "variables": {...}}
 //!   anything else   404
 //!
-//! Auth: the `Authorization` header must equal MOCK_API_KEY exactly (the bare
-//! key, as Linear expects for personal API keys; "Bearer <key>" is rejected).
-//! Otherwise HTTP 401 with Linear's error body (extensions.code
-//! AUTHENTICATION_ERROR).
+//! Auth: two credentials, mirroring Linear's two header forms.
+//!
+//!   personal API key  `Authorization: <MOCK_API_KEY>`, the bare key (as Linear
+//!                     expects for personal API keys); "Bearer <key>" is rejected
+//!   OAuth app token   `Authorization: Bearer <MOCK_APP_TOKEN>` (scheme word in
+//!                     any case, one space), only when MOCK_APP_TOKEN is set; the
+//!                     bare token is rejected
+//!
+//! Anything else is HTTP 401 with Linear's error body (extensions.code
+//! AUTHENTICATION_ERROR). Both credentials can do everything; the log line says
+//! which one a request used ("as user" / "as app"). Token issuance, expiry,
+//! revocation and scopes are not simulated, and the data is the same whichever
+//! credential wrote it: comments still show as written by "exploit-watch bot",
+//! and no history node or botActor is produced for what the app created.
 //!
 //! Operations (dispatch on the trimmed start of `query`):
 //!
@@ -91,21 +101,26 @@
 //!
 //! Environment:
 //!
-//!   MOCK_API_KEY   required; the value clients must send in Authorization
-//!   MOCK_TEAM_ID   required; the only team id that exists
-//!   MOCK_DATA_DIR  default /data
-//!   PORT           default 8080; the server listens on 0.0.0.0
+//!   MOCK_API_KEY    required; the personal API key clients send bare in Authorization
+//!   MOCK_APP_TOKEN  optional; an OAuth access token clients send as "Bearer <token>".
+//!                   Must differ from MOCK_API_KEY and must not start with
+//!                   "lin_api_" (the job sends such values bare, as personal keys)
+//!   MOCK_TEAM_ID    required; the only team id that exists
+//!   MOCK_DATA_DIR   default /data
+//!   PORT            default 8080; the server listens on 0.0.0.0
 //!
 //! `linear-mock healthcheck` GETs http://127.0.0.1:$PORT/health and exits 0 when
 //! it answers 200, 1 otherwise (the runtime image has no curl or wget).
 //!
 //! Logging: one line per request on stdout (time, method, path, operation,
-//! result, HTTP status). The API key is never logged.
+//! credential kind, result, HTTP status). The API key and the app token are
+//! never logged.
 //!
 //! Not simulated: rate limits (HTTP 429 / RATELIMITED, X-RateLimit-* headers),
 //! pagination (`first` and nested `first` are ignored, all matches are
 //! returned), archived issues, any other query or mutation, other workflow
-//! states or teams, comment authors other than the two above, OAuth tokens.
+//! states or teams, comment authors other than the two above, the OAuth flow
+//! itself (token endpoint, expiry, refresh, scopes, app attribution).
 //! Requests are served one at a time.
 
 use std::fs;
@@ -123,6 +138,8 @@ const TRIAGE_STATE_ID: &str = "state-triage";
 const BOT_USER: &str = "exploit-watch bot";
 const DEFAULT_ACTOR: &str = "mock user";
 const URL_BASE: &str = "http://linear-mock.invalid/issue/";
+/// Prefix of Linear personal API keys; the job sends values with it bare.
+const PERSONAL_KEY_PREFIX: &str = "lin_api_";
 /// Larger request bodies get 413.
 const MAX_BODY: u64 = 1 << 20;
 
@@ -131,15 +148,30 @@ const MAX_BODY: u64 = 1 << 20;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub api_key: String,
+    /// MOCK_APP_TOKEN: OAuth access token accepted as "Bearer <token>"; None = only the API key.
+    pub app_token: Option<String>,
     pub team_id: String,
     pub data_dir: PathBuf,
 }
 
 impl Config {
+    /// Errors name the variable, never its value.
     fn from_vars(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
         let required = |k: &str| get(k).filter(|v| !v.is_empty()).ok_or_else(|| format!("{k} is required"));
+        let api_key = required("MOCK_API_KEY")?;
+        let app_token = get("MOCK_APP_TOKEN").filter(|v| !v.is_empty());
+        if let Some(t) = &app_token {
+            if *t == api_key {
+                return Err("MOCK_APP_TOKEN must differ from MOCK_API_KEY".into());
+            }
+            if t.starts_with(PERSONAL_KEY_PREFIX) {
+                return Err(format!("MOCK_APP_TOKEN must not start with {PERSONAL_KEY_PREFIX:?}: the job sends such \
+                                    values bare, as personal API keys, never as \"Bearer <token>\""));
+            }
+        }
         Ok(Self {
-            api_key: required("MOCK_API_KEY")?,
+            api_key,
+            app_token,
             team_id: required("MOCK_TEAM_ID")?,
             data_dir: get("MOCK_DATA_DIR").filter(|v| !v.is_empty()).unwrap_or_else(|| "/data".into()).into(),
         })
@@ -368,11 +400,46 @@ pub fn handle(method: &str, url: &str, auth: Option<&str>, body: &[u8], cfg: &Co
     }
 }
 
-fn graphql(auth: Option<&str>, body: &[u8], cfg: &Config, now: &str) -> Reply {
-    if auth != Some(cfg.api_key.as_str()) {
-        let why = if auth.is_some() { "wrong Authorization" } else { "no Authorization" };
-        return Reply { status: 401, body: auth_error_body(), json: true, log: format!("rejected: {why}") };
+/// Which credential a request used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    /// The bare personal API key (MOCK_API_KEY).
+    User,
+    /// "Bearer <MOCK_APP_TOKEN>" (OAuth app, actor=app).
+    App,
+}
+
+impl Caller {
+    fn name(self) -> &'static str {
+        match self {
+            Caller::User => "user",
+            Caller::App => "app",
+        }
     }
+}
+
+/// The Authorization header -> Caller, or why it is rejected (a log text that never holds a credential).
+fn authenticate(auth: Option<&str>, cfg: &Config) -> Result<Caller, &'static str> {
+    let Some(auth) = auth else {
+        return Err("no Authorization");
+    };
+    let bearer = auth.split_once(' ').filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer")).map(|(_, rest)| rest);
+    let app = cfg.app_token.as_deref();
+    match (bearer, app) {
+        _ if auth == cfg.api_key => Ok(Caller::User),
+        (Some(t), Some(app)) if t == app => Ok(Caller::App),
+        (Some(t), _) if t == cfg.api_key => Err("personal API key sent as Bearer"),
+        (None, Some(app)) if auth == app => Err("app token sent without Bearer"),
+        (Some(_), None) => Err("Bearer token, but MOCK_APP_TOKEN is not set"),
+        _ => Err("wrong Authorization"),
+    }
+}
+
+fn graphql(auth: Option<&str>, body: &[u8], cfg: &Config, now: &str) -> Reply {
+    let caller = match authenticate(auth, cfg) {
+        Ok(c) => c,
+        Err(why) => return Reply { status: 401, body: auth_error_body(), json: true, log: format!("rejected: {why}") },
+    };
     let req: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => {
@@ -408,13 +475,13 @@ fn graphql(auth: Option<&str>, body: &[u8], cfg: &Config, now: &str) -> Reply {
             status: 200,
             body: json!({"data": data}).to_string(),
             json: true,
-            log: format!("{} ok: {detail}", op.name()),
+            log: format!("{} as {} ok: {detail}", op.name(), caller.name()),
         },
         Err(e) => Reply {
             status: 200,
             body: error_body(e.code, &e.message),
             json: true,
-            log: format!("{} error {}: {}", op.name(), e.code, e.message),
+            log: format!("{} as {} error {}: {}", op.name(), caller.name(), e.code, e.message),
         },
     }
 }
@@ -653,6 +720,7 @@ mod tests {
 
     const NOW: &str = "2026-11-04T08:00:00Z";
     const KEY: &str = "lin_api_test";
+    const APP: &str = "lin_oauth_test";
     const TEAM: &str = "team-1";
 
     // The four documents exactly as the job sends them (src/triage/tracker.rs, 2026-11-04).
@@ -701,7 +769,7 @@ mod tests {
             Self(p)
         }
         fn cfg(&self) -> Config {
-            Config { api_key: KEY.into(), team_id: TEAM.into(), data_dir: self.0.clone() }
+            Config { api_key: KEY.into(), app_token: Some(APP.into()), team_id: TEAM.into(), data_dir: self.0.clone() }
         }
         fn file(&self) -> PathBuf {
             self.0.join(DATA_FILE)
@@ -721,7 +789,7 @@ mod tests {
         let body = json!({"query": query, "variables": vars}).to_string();
         let r = handle("POST", "/graphql", auth, body.as_bytes(), cfg, NOW);
         assert!(r.json);
-        assert!(!r.log.contains(KEY), "log must not hold the key: {}", r.log);
+        assert!(!r.log.contains(KEY) && !r.log.contains(APP), "log must not hold a credential: {}", r.log);
         (r.status, serde_json::from_str(&r.body).unwrap())
     }
 
@@ -768,14 +836,60 @@ mod tests {
                                      "userError": true,
                                      "userPresentableMessage": "You need to authenticate to access this operation."}}],
           "data": null}"#).unwrap();
-        let bearer = format!("Bearer {KEY}");
-        for auth in [None, Some("wrong"), Some(bearer.as_str()), Some("")] {
+        let bearer_key = format!("Bearer {KEY}");
+        let bearer_two_spaces = format!("Bearer  {APP}");
+        let bearer_other = "Bearer lin_oauth_other".to_string();
+        let rejected = [None, Some("wrong"), Some(bearer_key.as_str()), Some(""), Some(APP),
+                        Some(bearer_two_spaces.as_str()), Some(bearer_other.as_str()), Some("Bearer ")];
+        for auth in rejected {
             let (status, v) = post(&cfg, auth, M_ISSUE_CREATE,
                                    json!({"input": {"teamId": TEAM, "title": "t", "stateId": TRIAGE_STATE_ID}}));
             assert_eq!(status, 401, "{auth:?}");
             assert_eq!(v, fixture);
         }
+        // Without MOCK_APP_TOKEN no Bearer value is accepted.
+        let no_app = Config { app_token: None, ..cfg.clone() };
+        assert_eq!(post(&no_app, Some(&format!("Bearer {APP}")), Q_TRIAGE_STATE, json!({"team": TEAM})).0, 401);
         assert!(!d.file().exists(), "a rejected call must not write");
+    }
+
+    #[test]
+    fn auth_rejection_reasons_never_hold_a_credential() {
+        let cfg = TestDir::new().cfg();
+        let why = |auth: Option<&str>| authenticate(auth, &cfg).unwrap_err();
+        assert_eq!(why(None), "no Authorization");
+        assert_eq!(why(Some(&format!("Bearer {KEY}"))), "personal API key sent as Bearer");
+        assert_eq!(why(Some(APP)), "app token sent without Bearer");
+        assert_eq!(why(Some("lin_api_other")), "wrong Authorization");
+        let no_app = Config { app_token: None, ..cfg.clone() };
+        assert_eq!(authenticate(Some(&format!("Bearer {APP}")), &no_app), Err("Bearer token, but MOCK_APP_TOKEN is not set"));
+    }
+
+    #[test]
+    fn app_token_as_bearer_is_accepted() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        assert_eq!(authenticate(Some(KEY), &cfg), Ok(Caller::User));
+        for auth in [format!("Bearer {APP}"), format!("bearer {APP}"), format!("BEARER {APP}")] {
+            assert_eq!(authenticate(Some(&auth), &cfg), Ok(Caller::App), "{auth}");
+        }
+        let bearer = format!("Bearer {APP}");
+        let (status, v) = post(&cfg, Some(&bearer), M_ISSUE_CREATE,
+                               json!({"input": {"teamId": TEAM, "title": "by app", "stateId": TRIAGE_STATE_ID}}));
+        assert_eq!(status, 200);
+        assert_eq!(v.pointer("/data/issueCreate/issue/identifier"), Some(&json!("MOCK-1")));
+        let id1 = issue_id(NOW, 1);
+        let (status, _) = post(&cfg, Some(&bearer), M_COMMENT_CREATE,
+                               json!({"input": {"issueId": id1, "body": "**exploit-watch**: c"}}));
+        assert_eq!(status, 200);
+        // The API key reads what the app wrote: one store, whichever credential wrote it.
+        let nodes = states(&cfg, &[id1.as_str()]);
+        assert_eq!(nodes[0]["comments"]["nodes"][0]["user"], json!({"name": "exploit-watch bot"}));
+        let body = json!({"query": Q_TRIAGE_STATE, "variables": {"team": TEAM}}).to_string();
+        let r = handle("POST", "/graphql", Some(&bearer), body.as_bytes(), &cfg, NOW);
+        assert!(r.log.starts_with("TriageState as app ok"), "{}", r.log);
+        let r = handle("POST", "/graphql", Some(KEY), body.as_bytes(), &cfg, NOW);
+        assert!(r.log.starts_with("TriageState as user ok"), "{}", r.log);
     }
 
     #[test]
@@ -1096,6 +1210,21 @@ mod tests {
         assert_eq!((c.api_key.as_str(), c.team_id.as_str(), c.data_dir), ("k", "t", PathBuf::from("/data")));
         assert!(Config::from_vars(&vars(&[("MOCK_TEAM_ID", "t")])).unwrap_err().contains("MOCK_API_KEY"));
         assert!(Config::from_vars(&vars(&[("MOCK_API_KEY", "k"), ("MOCK_TEAM_ID", "")])).is_err());
+        assert_eq!(c.app_token, None, "MOCK_APP_TOKEN is optional");
+        let app = |token: &str| {
+            Config::from_vars(&|k: &str| match k {
+                "MOCK_API_KEY" => Some("lin_api_k".into()),
+                "MOCK_TEAM_ID" => Some("t".into()),
+                "MOCK_APP_TOKEN" => Some(token.into()),
+                _ => None,
+            })
+        };
+        assert_eq!(app("").unwrap().app_token, None, "empty means unset");
+        assert_eq!(app("lin_oauth_a").unwrap().app_token.as_deref(), Some("lin_oauth_a"));
+        let same = app("lin_api_k").unwrap_err();
+        assert!(same.contains("must differ") && !same.contains("lin_api_k"), "{same}");
+        let personal = app("lin_api_other").unwrap_err();
+        assert!(personal.contains("must not start with") && !personal.contains("other"), "{personal}");
         assert_eq!(port_from(&vars(&[])), Ok(8080));
         assert_eq!(port_from(&vars(&[("PORT", "9000")])), Ok(9000));
         assert!(port_from(&vars(&[("PORT", "x")])).is_err());
@@ -1118,7 +1247,7 @@ mod tests {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let worker = std::thread::spawn(move || {
-            for _ in 0..3 {
+            for _ in 0..5 {
                 serve_one(server.recv().unwrap(), &cfg);
             }
         });
@@ -1136,7 +1265,15 @@ mod tests {
                                          Content-Length: {}\r\n\r\n{body}", body.len()));
         assert!(denied.contains(" 401 "), "{denied}");
         assert!(denied.contains("AUTHENTICATION_ERROR"), "{denied}");
+
+        let app = raw(port, &format!("POST /graphql HTTP/1.0\r\nAuthorization: Bearer {APP}\r\n\
+                                      Content-Length: {}\r\n\r\n{body}", body.len()));
+        assert!(app.starts_with("HTTP/1.0 200") || app.starts_with("HTTP/1.1 200"), "{app}");
+        assert!(app.contains(r#""identifier":"MOCK-2""#), "{app}");
+        let bare_app = raw(port, &format!("POST /graphql HTTP/1.0\r\nAuthorization: {APP}\r\n\
+                                           Content-Length: {}\r\n\r\n{body}", body.len()));
+        assert!(bare_app.contains(" 401 "), "{bare_app}");
         worker.join().unwrap();
-        assert_eq!(d.read()["issues"].as_array().unwrap().len(), 1);
+        assert_eq!(d.read()["issues"].as_array().unwrap().len(), 2);
     }
 }
