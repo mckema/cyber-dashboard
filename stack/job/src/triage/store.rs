@@ -30,7 +30,8 @@
 //! (Ediphy), Monday to Friday, no holiday calendar: business_time() / is_overdue().
 //!
 //! Everything here is pure except load()/save(); the clock is a parameter.
-//! Records are kept 30 days (like seen.json) unless their ticket is still open.
+//! Records are kept 30 days (like seen.json) unless their ticket is still open or
+//! their triage is incomplete (declined without a reason).
 
 use std::collections::BTreeMap;
 
@@ -86,15 +87,36 @@ impl Record {
     pub fn url(&self) -> &str {
         &self.item.url
     }
+
+    /// Declined in the tracker with no reason. FR-A2 asks for one, so the triage is
+    /// not complete; Linear does not require it, so this is a warning only.
+    pub fn declined_without_reason(&self) -> bool {
+        self.issue_status.as_ref().is_some_and(|s| s.state == IssueState::Declined && s.reason.trim().is_empty())
+    }
 }
 
-/// A matched item nobody has triaged yet (no issue, or the issue is still in Triage).
+/// A matched item whose triage is not complete: no issue, the issue is still in
+/// Triage, or it was declined without a reason.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Untriaged<'a> {
     pub key: &'a str,
     pub record: &'a Record,
     /// More than one business day since first_seen: shown red.
     pub overdue: bool,
+    /// Declined in the tracker, but no reason was given (Record::declined_without_reason).
+    pub no_reason: bool,
+}
+
+/// Triage the tracker let through incomplete (FR-A2/A3). Warnings only: nothing is
+/// blocked and nothing is written back to the tracker.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Gaps {
+    /// Open tickets (Store::open_tickets) with no assignee.
+    pub missing_owner: usize,
+    /// Open tickets with no due date.
+    pub missing_due: usize,
+    /// Matched records declined without a reason.
+    pub missing_reason: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -313,13 +335,19 @@ impl Store {
         n
     }
 
-    /// Matched items not yet triaged, oldest first.
+    /// Matched items not yet triaged, oldest first. An item declined without a reason
+    /// counts as not triaged (FR-A2 asks for a reason); it leaves once one is added.
     pub fn untriaged(&self, now: DateTime<Utc>) -> Vec<Untriaged<'_>> {
         let mut v: Vec<Untriaged> = self
             .records
             .iter()
-            .filter(|(_, r)| r.matched().is_some() && matches!(r.state(), None | Some(IssueState::Triage)))
-            .map(|(k, r)| Untriaged { key: k, record: r, overdue: is_overdue(&r.first_seen, now) })
+            .filter(|(_, r)| {
+                r.matched().is_some()
+                    && (matches!(r.state(), None | Some(IssueState::Triage)) || r.declined_without_reason())
+            })
+            .map(|(k, r)| Untriaged {
+                key: k, record: r, overdue: is_overdue(&r.first_seen, now), no_reason: r.declined_without_reason(),
+            })
             .collect();
         v.sort_by(|a, b| a.record.first_seen.cmp(&b.record.first_seen).then(a.key.cmp(b.key)));
         v
@@ -341,14 +369,27 @@ impl Store {
         v
     }
 
+    /// Open tickets without an owner or a due date, and declines without a reason.
+    pub fn gaps(&self) -> Gaps {
+        let blank = |r: &Record, f: fn(&IssueStatus) -> &str| r.issue_status.as_ref().is_none_or(|s| f(s).trim().is_empty());
+        let open = self.open_tickets();
+        Gaps {
+            missing_owner: open.iter().filter(|(_, r)| blank(r, |s| s.assignee.as_str())).count(),
+            missing_due: open.iter().filter(|(_, r)| blank(r, |s| s.due.as_str())).count(),
+            missing_reason: self.records.values().filter(|r| r.matched().is_some() && r.declined_without_reason()).count(),
+        }
+    }
+
     /// Drop records first seen more than KEEP_DAYS ago that need nothing more:
-    /// not relevant by rule, or the issue is done/declined. Matched records whose
-    /// issue is missing, untriaged or open stay. Returns how many were dropped.
+    /// not relevant by rule, or the issue is done/declined with a reason. Matched
+    /// records whose issue is missing, untriaged, open or declined without a reason
+    /// stay. Returns how many were dropped.
     pub fn prune(&mut self, now: DateTime<Utc>) -> usize {
         let cutoff = iso_utc(now - Duration::days(KEEP_DAYS));
         let before = self.records.len();
         self.records.retain(|_, r| {
-            let finished = r.matched().is_none() || r.state().is_some_and(IssueState::is_closed);
+            let finished = r.matched().is_none()
+                || (r.state().is_some_and(IssueState::is_closed) && !r.declined_without_reason());
             !(finished && r.first_seen < cutoff)
         });
         before - self.records.len()
@@ -394,9 +435,17 @@ mod tests {
         IssueRef { id: format!("uuid-{n}"), identifier: format!("CTP-{n}"), url: format!("https://linear.app/x/issue/CTP-{n}") }
     }
 
+    /// A complete triage: an owner, and for a decline a reason.
     fn status(state: IssueState, due: &str) -> IssueStatus {
-        IssueStatus { state, state_name: String::new(), assignee: "Henry".into(), due: due.into(), reason: String::new(),
+        let reason = if state == IssueState::Declined { "not shipped" } else { "" };
+        IssueStatus { state, state_name: String::new(), assignee: "Henry".into(), due: due.into(), reason: reason.into(),
                       actor: String::new(), changed: String::new() }
+    }
+
+    fn with(mut st: IssueStatus, assignee: &str, reason: &str) -> IssueStatus {
+        st.assignee = assignee.into();
+        st.reason = reason.into();
+        st
     }
 
     #[test]
@@ -609,6 +658,68 @@ mod tests {
 
         let open: Vec<&str> = s.open_tickets().into_iter().map(|(k, _)| k).collect();
         assert_eq!(open, ["CISA KEV:CVE-4", "CISA KEV:CVE-3", "CISA KEV:CVE-2"]);
+        assert_eq!(s.gaps(), Gaps { missing_owner: 0, missing_due: 1, missing_reason: 0 });
+    }
+
+    /// FR-A2 asks for a reason on every decline; Linear does not. A decline without one
+    /// stays in the untriaged table (red after one business day from first_seen) until a
+    /// reason is read back, and is not pruned meanwhile. A duplicate has its own reason.
+    #[test]
+    fn declined_without_reason_stays_untriaged() {
+        let mut s = Store::default();
+        for (i, d) in [(1, 2), (2, 5), (3, 2), (4, 2)] {
+            s.record_decision(&item(&format!("CVE-{i}")), matched("c"), at(d, 8, 0));
+            s.set_issue(&format!("CISA KEV:CVE-{i}"), iref(i), at(d, 8, 0));
+        }
+        let declined = |reason: &str| with(status(IssueState::Declined, ""), "", reason);
+        let st = vec![
+            (iref(1), declined("")),
+            (iref(2), declined(" \n ")), // whitespace is no reason
+            (iref(3), declined(crate::triage::tracker::DUPLICATE_REASON)),
+            (iref(4), declined("not shipped")),
+        ];
+        s.apply_statuses(&st, at(5, 10, 0));
+        assert!(s.records["CISA KEV:CVE-1"].declined_without_reason());
+        assert!(!s.records["CISA KEV:CVE-3"].declined_without_reason());
+
+        let rows: Vec<(&str, bool, bool)> = s.untriaged(at(5, 10, 0)).iter().map(|u| (u.key, u.overdue, u.no_reason)).collect();
+        assert_eq!(rows, [("CISA KEV:CVE-1", true, true), ("CISA KEV:CVE-2", false, true)]);
+        assert!(s.open_tickets().is_empty());
+        assert_eq!(s.gaps(), Gaps { missing_owner: 0, missing_due: 0, missing_reason: 2 });
+
+        // 30 days on: the complete declines go, the incomplete ones stay.
+        assert_eq!(s.prune(at(30, 12, 0) + Duration::days(5)), 2);
+        let left: Vec<&str> = s.records.keys().map(String::as_str).collect();
+        assert_eq!(left, ["CISA KEV:CVE-1", "CISA KEV:CVE-2"]);
+
+        // A reason added later (a comment in Linear) is read back: triage complete.
+        s.apply_statuses(&[(iref(1), declined("vendor build only"))], at(6, 9, 0));
+        let keys: Vec<&str> = s.untriaged(at(6, 9, 0)).iter().map(|u| u.key).collect();
+        assert_eq!(keys, ["CISA KEV:CVE-2"]);
+        assert_eq!(s.gaps().missing_reason, 1);
+    }
+
+    /// FR-A3 asks for an owner and a due date on every ticket. Only open tickets count;
+    /// a blank or whitespace value is missing.
+    #[test]
+    fn gaps_count_open_tickets_without_owner_or_due() {
+        let mut s = Store::default();
+        for i in 1..=6 {
+            s.record_decision(&item(&format!("CVE-{i}")), matched("c"), at(3, 8, i));
+            s.set_issue(&format!("CISA KEV:CVE-{i}"), iref(i), at(3, 8, i));
+        }
+        let st = vec![
+            (iref(1), with(status(IssueState::Accepted, ""), "", "")),
+            (iref(2), with(status(IssueState::Accepted, "2026-11-10"), " ", "")),
+            (iref(3), status(IssueState::Accepted, " ")),
+            (iref(4), status(IssueState::Accepted, "2026-11-12")),
+            (iref(5), with(status(IssueState::Done, ""), "", "")),
+            (iref(6), with(status(IssueState::Triage, ""), "", "")),
+        ];
+        s.apply_statuses(&st, at(4, 9, 0));
+        assert_eq!(s.open_tickets().len(), 4);
+        assert_eq!(s.gaps(), Gaps { missing_owner: 2, missing_due: 2, missing_reason: 0 });
+        assert_eq!(Store::default().gaps(), Gaps::default());
     }
 
     #[test]

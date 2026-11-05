@@ -90,7 +90,11 @@
     "component": "tokio", "rule": "package", "first_seen": "2026-10-30T09:12:00Z", "issue_identifier": "FAKE-3", "issue_url": "https://linear.invalid/fake/issue/FAKE-3", "overdue": true},
    {"item_id": "CVE-2026-111530", "item_url": "https://www.cve.org/CVERecord?id=CVE-2026-111530",
     "title": "A heap buffer overflow in the nginx HTTP/3 module may allow a remote attacker to crash a worker process.",
-    "component": "nginx", "rule": "vendor-product", "first_seen": "2026-11-02T14:20:00Z", "issue_identifier": "FAKE-5", "issue_url": "https://linear.invalid/fake/issue/FAKE-5", "overdue": false}
+    "component": "nginx", "rule": "vendor-product", "first_seen": "2026-11-02T14:20:00Z", "issue_identifier": "FAKE-5", "issue_url": "https://linear.invalid/fake/issue/FAKE-5", "overdue": false},
+   {"item_id": "GHSA-9f4c-x2pq-7m8w", "item_url": "https://github.com/advisories/GHSA-9f4c-x2pq-7m8w",
+    "title": "vite: dev server file system allow-list can be bypassed with a crafted path",
+    "component": "vite", "rule": "package", "first_seen": "2026-10-29T16:05:00Z", "issue_identifier": "FAKE-4", "issue_url": "https://linear.invalid/fake/issue/FAKE-4", "overdue": true,
+    "note": "declined in Linear without a reason"}
   ],
   "tickets": [
    {"issue_identifier": "FAKE-2", "issue_url": "https://linear.invalid/fake/issue/FAKE-2", "item_id": "CVE-2026-109902",
@@ -98,7 +102,10 @@
     "component": "kubernetes", "assignee": "", "due": "2026-11-14", "state_name": "Todo"},
    {"issue_identifier": "FAKE-1", "issue_url": "https://linear.invalid/fake/issue/FAKE-1", "item_id": "GHSA-r7m4-2x9c-hq5p",
     "title": "hyper: HTTP/2 CONTINUATION frames are not limited, allowing memory exhaustion",
-    "component": "hyper", "assignee": "Minh Pham", "due": "2026-10-31", "state_name": "In Progress"}
+    "component": "hyper", "assignee": "Minh Pham", "due": "2026-10-31", "state_name": "In Progress"},
+   {"issue_identifier": "FAKE-6", "issue_url": "https://linear.invalid/fake/issue/FAKE-6", "item_id": "CVE-2026-110471",
+    "title": "ClickHouse server may crash on a crafted query using the url table function.",
+    "component": "clickhouse", "assignee": "Lan Nguyen", "due": "", "state_name": "Backlog"}
   ]
  }
 }

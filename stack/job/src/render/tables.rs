@@ -444,15 +444,22 @@ fn item_cell(id: &str, url: &str, title: &str) -> String {
 }
 
 /// Issue cell: the identifier linked to the issue (plain text without an http(s) URL),
-/// or "pending" before the issue exists.
-fn issue_cell(identifier: &str, url: &str) -> String {
-    if identifier.is_empty() {
-        r#"<td class="id"><span class="pend">pending</span></td>"#.into()
+/// or "pending" before the issue exists; a non-empty note goes underneath.
+fn issue_cell(identifier: &str, url: &str, note: &str) -> String {
+    let id = if identifier.is_empty() {
+        r#"<span class="pend">pending</span>"#.into()
     } else if href(url, "") == "#" {
-        format!(r#"<td class="id"><span class="mono">{}</span></td>"#, esc(identifier))
+        format!(r#"<span class="mono">{}</span>"#, esc(identifier))
     } else {
-        format!(r#"<td class="id">{}</td>"#, link(url, identifier, ""))
-    }
+        link(url, identifier, "")
+    };
+    let note = if note.trim().is_empty() { String::new() } else { format!(r#"<span class="sub">{}</span>"#, esc(note.trim())) };
+    format!(r#"<td class="id">{id}{note}</td>"#)
+}
+
+/// A required ticket field Linear left empty: shown red ("due past", the overdue look).
+fn missing_cell(what: &str) -> String {
+    format!(r#"<td class="due past">{what}</td>"#)
 }
 
 /// Matched items not yet accepted or declined, oldest first. 4 columns.
@@ -481,7 +488,7 @@ pub fn build_untriaged_rows(rows: &[TriageRow], mode_note: Option<&str>) -> Stri
             if r.overdue { " past" } else { "" },
             fwhen(&r.first_seen, false),
             if r.overdue { r#"<span class="sub">overdue</span>"# } else { "" },
-            issue_cell(&r.issue_identifier, &r.issue_url),
+            issue_cell(&r.issue_identifier, &r.issue_url, &r.note),
         ));
     }
     out
@@ -489,10 +496,17 @@ pub fn build_untriaged_rows(rows: &[TriageRow], mode_note: Option<&str>) -> Stri
 
 /// Tickets whose due date is before today ("YYYY-MM-DD", UTC).
 pub fn tickets_past_due(rows: &[TicketRow], today: &str) -> usize {
-    rows.iter().filter(|r| !r.due.is_empty() && r.due.as_str() < today).count()
+    rows.iter().filter(|r| !r.due.trim().is_empty() && r.due.trim() < today).count()
+}
+
+/// Tickets without an owner, and without a due date: (no owner, no due date).
+pub fn tickets_missing(rows: &[TicketRow]) -> (usize, usize) {
+    let n = |f: fn(&TicketRow) -> &str| rows.iter().filter(|r| f(r).trim().is_empty()).count();
+    (n(|r| r.assignee.as_str()), n(|r| r.due.as_str()))
 }
 
 /// Accepted issues that are not closed: earliest due date first, no due date last. 6 columns.
+/// A missing owner or due date is shown red ("no owner", "no due date").
 pub fn build_ticket_rows(rows: &[TicketRow], today: &str, mode_note: Option<&str>) -> String {
     if rows.is_empty() {
         return empty(6, mode_note.unwrap_or("No open tickets."));
@@ -507,21 +521,33 @@ pub fn build_ticket_rows(rows: &[TicketRow], today: &str, mode_note: Option<&str
     let mut out = String::new();
     for r in v {
         let past = !r.due.is_empty() && r.due.as_str() < today;
+        let owner = if r.assignee.trim().is_empty() {
+            missing_cell("no owner")
+        } else {
+            format!("<td>{}</td>", esc(&r.assignee))
+        };
+        let due = if r.due.trim().is_empty() {
+            missing_cell("no due date")
+        } else {
+            format!(
+                r#"<td class="due{}">{}{}</td>"#,
+                if past { " past" } else { "" },
+                fdate(&r.due, false),
+                if past { r#"<span class="sub">overdue</span>"# } else { "" },
+            )
+        };
         out.push_str(&format!(
             concat!(
                 r#"<tr>{}{}"#,
                 r#"<td>{}</td>"#,
-                r#"<td>{}</td>"#,
-                r#"<td class="due{}">{}{}</td>"#,
+                r#"{}{}"#,
                 r#"<td>{}</td></tr>"#,
             ),
-            issue_cell(&r.issue_identifier, &r.issue_url),
+            issue_cell(&r.issue_identifier, &r.issue_url, ""),
             item_cell(&r.item_id, "", &r.title),
             or_mdash(if r.component.is_empty() { String::new() } else { format!(r#"<span class="tgt">{}</span>"#, esc(&r.component)) }),
-            or_mdash(esc(&r.assignee)),
-            if past { " past" } else { "" },
-            fdate(&r.due, false),
-            if past { r#"<span class="sub">overdue</span>"# } else { "" },
+            owner,
+            due,
             or_mdash(esc(&r.state_name)),
         ));
     }
@@ -667,7 +693,7 @@ mod tests {
             item_id: id.into(), item_url: String::new(), title: "t".into(), component: "tokio".into(),
             rule: "package".into(), first_seen: first_seen.into(), issue_identifier: issue.into(),
             issue_url: if issue.is_empty() { String::new() } else { format!("https://linear.invalid/fake/issue/{issue}") },
-            overdue,
+            overdue, note: String::new(),
         }
     }
 
@@ -675,7 +701,7 @@ mod tests {
         TicketRow {
             issue_identifier: id.into(), issue_url: format!("https://linear.invalid/fake/issue/{id}"),
             item_id: "GHSA-xxxx-yyyy-zzzz".into(), title: "t".into(), component: "hyper".into(),
-            assignee: String::new(), due: due.into(), state_name: "Todo".into(),
+            assignee: "Minh Pham".into(), due: due.into(), state_name: "Todo".into(),
         }
     }
 
@@ -718,11 +744,49 @@ mod tests {
         let out = build_ticket_rows(&rows, "2026-11-03", None);
         let order: Vec<usize> = ["FAKE-1", "FAKE-4", "FAKE-2", "FAKE-9"].iter().map(|i| out.find(i).unwrap()).collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "earliest due first, no due date last: {out}");
-        assert_eq!(out.matches(r#"class="due past""#).count(), 1); // due today is not past
+        // Red: the past due date and the missing one; due today is not past.
+        assert_eq!(out.matches(r#"class="due past""#).count(), 2);
         assert!(out.contains(r#"<td class="due past">31 Oct<span class="sub">overdue</span></td>"#));
+        assert!(out.contains(r#"<td class="due">3 Nov</td>"#));
+        assert!(out.contains(r#"<td>Minh Pham</td><td class="due past">no due date</td>"#));
         assert_eq!(tickets_past_due(&rows, "2026-11-03"), 1);
         assert_eq!(tickets_past_due(&rows, "2026-11-15"), 3);
-        assert!(out.contains("<td>&mdash;</td>")); // no assignee
+        assert_eq!(tickets_missing(&rows), (0, 1));
+    }
+
+    /// FR-A3 wants an owner and a due date on every ticket; Linear does not enforce
+    /// either, so a missing one is a red cell (warning only) and is counted.
+    #[test]
+    fn tickets_missing_owner_or_due_are_red() {
+        let mut no_owner = ticket("FAKE-7", "2026-11-20");
+        no_owner.assignee = " ".into();
+        let mut neither = ticket("FAKE-8", "");
+        neither.assignee = String::new();
+        let rows = [no_owner, neither, ticket("FAKE-5", " ")];
+        let out = build_ticket_rows(&rows, "2026-11-03", None);
+        assert_eq!(out.matches(r#"<td class="due past">no owner</td>"#).count(), 2, "{out}");
+        assert_eq!(out.matches(r#"<td class="due past">no due date</td>"#).count(), 2, "{out}");
+        assert!(out.contains(r#"<td class="due past">no owner</td><td class="due">20 Nov</td>"#));
+        assert!(!out.contains("&mdash;"), "a missing owner or due date is never a plain dash: {out}");
+        assert_eq!(tickets_missing(&rows), (2, 2));
+        assert_eq!(tickets_past_due(&rows, "2026-11-03"), 0, "a blank due date is not past due");
+        assert_eq!(out.matches("<td").count(), 18, "6 cells per row");
+    }
+
+    /// An issue declined without a reason stays in the untriaged table with a note under the issue.
+    #[test]
+    fn untriaged_note_under_issue() {
+        let mut r = trow("GHSA-2", "2026-10-29T10:00:00Z", "FAKE-4", true);
+        r.note = "declined in Linear without a reason".into();
+        let out = build_untriaged_rows(&[r], None);
+        assert!(out.ends_with(concat!(
+            r#"<td class="id"><a href="https://linear.invalid/fake/issue/FAKE-4" target="_blank" rel="noopener">FAKE-4</a>"#,
+            r#"<span class="sub">declined in Linear without a reason</span></td></tr>"#,
+        )), "{out}");
+        assert!(out.starts_with(r#"<tr class="overdue">"#));
+        // No note: the cell is the identifier only.
+        let out = build_untriaged_rows(&[trow("GHSA-3", "2026-10-29T10:00:00Z", "", false)], None);
+        assert!(out.ends_with(r#"<td class="id"><span class="pend">pending</span></td></tr>"#), "{out}");
     }
 
     #[test]

@@ -70,7 +70,7 @@
 
 <section class="block" id="untriaged">
 <div class="shead"><h2>Matched to a fairCT component, waiting for triage</h2><span class="count" id="n-untriaged">0 items</span></div>
-<p class="snote">FR-A2 and FR-A3 ask for every new item to be checked against fairCT&rsquo;s components and for relevant ones to be tracked to a fix. An item is <em>matched</em> when it names a listed component by package, CPE product or vendor and product name, either itself or through the CVE record of one of its CVEs; the rule that matched is shown under the component. A match makes the item a candidate only: affected versions are not checked. Each matched item gets one Linear issue in the Triage inbox, and triage happens in Linear: <b>Accept</b> turns the issue into a ticket with an owner and a due date, listed in the next table; <b>Decline</b> marks the item not relevant, with the reason recorded on the issue. Items that match no component are marked not relevant by rule and get no issue. A row turns red when the item has waited more than one business day; <em>pending</em> means the issue is not created yet.</p>
+<p class="snote">FR-A2 and FR-A3 ask for every new item to be checked against fairCT&rsquo;s components and for relevant ones to be tracked to a fix. An item is <em>matched</em> when it names a listed component by package, CPE product or vendor and product name, either itself or through the CVE record of one of its CVEs; the rule that matched is shown under the component. A match makes the item a candidate only: affected versions are not checked. Each matched item gets one Linear issue in the Triage inbox, and triage happens in Linear: <b>Accept</b> turns the issue into a ticket with an owner and a due date, listed in the next table; <b>Decline</b> marks the item not relevant, with the reason recorded on the issue. Items that match no component are marked not relevant by rule and get no issue. A row turns red when the item has waited more than one business day; <em>pending</em> means the issue is not created yet. An issue declined without a reason stays in this table, with a note, until a reason is added as a comment in Linear.</p>
 <div class="callout note"><b>Sample component list.</b> Matching currently uses a sample list of Rust and UI libraries, container images and infrastructure, not fairCT&rsquo;s agreed component list, so the matches and counts in this section are for testing the workflow only.</div>
 <p class="snote cap">Waiting for triage <b id="s-untriaged">0</b> &nbsp;&middot;&nbsp; Marked not relevant by rule in this window <b id="s-auto">0</b></p>
 <div class="scroller"><table>
@@ -81,7 +81,7 @@
 
 <section class="block" id="tickets">
 <div class="shead"><h2>Open tickets</h2><span class="count" id="n-tickets">0 tickets</span></div>
-<p class="snote">Issues accepted in Linear and not yet closed, earliest due date first. The owner and the due date are set in Linear when the issue is accepted; a due date before today is shown in red.</p>
+<p class="snote">Issues accepted in Linear and not yet closed, earliest due date first. The owner and the due date are set in Linear when the issue is accepted; a due date before today, a missing owner and a missing due date are shown in red.</p>
 <div class="scroller"><table>
 <thead><tr><th>Issue</th><th>Item</th><th>Component</th><th>Assignee</th><th>Due</th><th>State</th></tr></thead>
 <tbody id="t-tickets"><tr><td colspan="6" class="empty">Not generated yet.</td></tr></tbody>

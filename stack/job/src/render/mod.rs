@@ -49,7 +49,7 @@ pub use fmt::{esc, ftime, plural, thousands};
 use fmt::{day, hm};
 use tables::{
     build_adv_rows, build_cve_rows, build_dep_rows, build_health_rows, build_kev_rows, build_ticket_rows,
-    build_untriaged_rows, cve_keep, health_summary, kev_overdue, sev, tickets_past_due,
+    build_untriaged_rows, cve_keep, health_summary, kev_overdue, sev, tickets_missing, tickets_past_due,
 };
 
 pub const TBODY_IDS: [&str; 7] = ["t-health", "t-kev", "t-adv", "t-dep", "t-nvd", "t-untriaged", "t-tickets"];
@@ -76,9 +76,11 @@ pub struct HealthRow {
     pub note: String,
 }
 
-/// One row of the untriaged table: a matched item whose issue is neither accepted nor declined.
+/// One row of the untriaged table: a matched item whose triage is not complete (the issue is
+/// neither accepted nor declined, or was declined without a reason).
 /// first_seen: ISO 8601 UTC. issue_identifier "" means the issue is not created yet ("pending").
 /// overdue: set by the caller when the item has waited more than one business day.
+/// note: shown under the issue, e.g. "declined in Linear without a reason"; "" for none.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TriageRow {
@@ -91,10 +93,12 @@ pub struct TriageRow {
     pub issue_identifier: String,
     pub issue_url: String,
     pub overdue: bool,
+    pub note: String,
 }
 
 /// One row of the open tickets table: an accepted issue that is not closed.
-/// due: YYYY-MM-DD or "" (no due date set).
+/// due: YYYY-MM-DD or "" (no due date set). An empty assignee or due date is shown
+/// in red as "no owner" / "no due date" (FR-A3 asks for both; Linear does not).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TicketRow {
@@ -190,9 +194,12 @@ pub fn build_regions(
     if untriaged_late > 0 {
         s_untriaged.push_str(&format!(" &middot; {} overdue", thousands(untriaged_late)));
     }
+    let (no_owner, no_due) = tickets_missing(&triage.tickets);
     let mut n_tickets = plural(triage.tickets.len(), "ticket", None);
-    if tickets_late > 0 {
-        n_tickets.push_str(&format!(" &middot; {} past due", thousands(tickets_late)));
+    for (n, what) in [(tickets_late, "past due"), (no_owner, "no owner"), (no_due, "no due date")] {
+        if n > 0 {
+            n_tickets.push_str(&format!(" &middot; {} {what}", thousands(n)));
+        }
     }
     let text = [
         thousands(kev.len()),
@@ -339,7 +346,7 @@ mod test_support {
             untriaged: vec![TriageRow {
                 item_id: EVIL.into(), item_url: "javascript:alert(3)".into(), title: EVIL.into(),
                 component: EVIL.into(), rule: EVIL.into(), first_seen: EVIL.into(),
-                issue_identifier: EVIL.into(), issue_url: "javascript:alert(4)".into(), overdue: true,
+                issue_identifier: EVIL.into(), issue_url: "javascript:alert(4)".into(), overdue: true, note: EVIL.into(),
             }],
             tickets: vec![TicketRow {
                 issue_identifier: EVIL.into(), issue_url: "javascript:alert(5)".into(), item_id: EVIL.into(),
@@ -523,10 +530,10 @@ mod tests {
         assert_eq!(r.get("n-cvecap"), "All 4 shown.");
         assert_eq!(r.get("n-kev"), "3 entries &middot; 1 past deadline");
         assert_eq!(r.get("winlabel"), "27 Oct 02:45 &rarr; 3 Nov 02:45 UTC");
-        assert_eq!(r.get("s-untriaged"), "3 &middot; 1 overdue");
+        assert_eq!(r.get("s-untriaged"), "4 &middot; 2 overdue");
         assert_eq!(r.get("s-auto"), "412");
-        assert_eq!(r.get("n-untriaged"), "3 items");
-        assert_eq!(r.get("n-tickets"), "2 tickets &middot; 1 past due");
+        assert_eq!(r.get("n-untriaged"), "4 items");
+        assert_eq!(r.get("n-tickets"), "3 tickets &middot; 1 past due &middot; 1 no owner &middot; 1 no due date");
     }
 
     #[test]
@@ -540,6 +547,9 @@ mod tests {
         assert!(once.contains("NCSC-2026-0464"));
         assert!(once.contains("FAKE-3"));
         assert!(once.contains(r#"<tr class="overdue">"#));
+        assert!(once.contains(r#"<span class="sub">declined in Linear without a reason</span>"#));
+        assert!(once.contains(r#"<td class="due past">no owner</td>"#));
+        assert!(once.contains(r#"<td class="due past">no due date</td>"#));
         assert_eq!(once.matches("<div").count(), once.matches("</div>").count());
         assert!(!once.contains("style="));
     }
