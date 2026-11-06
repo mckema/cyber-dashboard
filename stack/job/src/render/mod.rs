@@ -23,11 +23,10 @@
 //!
 //! The Linear section (first on the page, above the "Threat feeds — last 7 days"
 //! group) has the "Sync with Linear" link with the tickets' "as of" time in its heading
-//! (`l-refresh`, changes every run) and opens with four tiles (`l-kpis`, since
-//! 2026-11-06): two "now" tiles counted from the triage view, so they always equal
-//! the two tables below them, and two "this month" tiles from the month-to-date
-//! report (report.json), so they equal the PDF. One number per concept, each label
-//! with its scope (now / this month / last 7 days).
+//! (`l-refresh`, changes every run) and opens with two "now" tiles (`l-kpis`, since
+//! 2026-11-06) counted from the triage view, so they always equal the two tables below
+//! them; the month figures are in the report PDF only. One number per concept, each
+//! label with its scope (now / last 7 days).
 //!
 //! The triage tables take a TriageView, built by the caller from the triage
 //! store and the tracker; render does not depend on the triage module's types.
@@ -290,7 +289,7 @@ pub fn report_links(monthly: Option<&MonthlyLink>, mtd_href: Option<&str>, ticke
 /// One tile of the Linear section: label, scope, number, detail line. With `href` the
 /// whole tile links to the table it counts, else it is a plain span. `state` (class
 /// kpi-<state>): "bad" overdue or missing items (red), "ok" nothing pending (green),
-/// "open" pending but nothing late, "info" a month figure, "none" no figures yet.
+/// "open" pending but nothing late.
 fn kpi_tile(label: &str, scope: &str, n: &str, detail: &str, state: &str, href: Option<&str>) -> String {
     let inner = format!(
         "<span class=\"kpi-h\"><span class=\"kpi-l\">{label}</span><span class=\"kpi-sc\">{scope}</span></span>\
@@ -311,30 +310,16 @@ fn kpi_detail(parts: &[(usize, &str, &str)], none: &str) -> (String, bool) {
     if bad.is_empty() { (none.to_string(), false) } else { (bad.join(" &middot; "), true) }
 }
 
-/// The scope of the month tiles: the Amsterdam month of the report's tickets-as-of
-/// time ("November"); "month to date" without a usable as_of. Not the day: l-kpis is
-/// part of the page fingerprint, and a daily change would write a page version a day.
-fn month_scope(r: &Value) -> String {
-    r.get("as_of").and_then(Value::as_str).and_then(parse_iso)
-        .map(|t| crate::triage::store::to_amsterdam(t).format("%B").to_string())
-        .unwrap_or_else(|| "month to date".into())
-}
-
-/// "4 of 6 (67%)…", the value of the report's "assessed" KPI (assessed within 1 business day).
-static KPI_WITHIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(\d+) of \d+").unwrap());
-
-/// The four tiles of the Linear section (`l-kpis`), one number per concept:
-///   Waiting for triage  now: the rows of the untriaged table (store view: no decision
-///                       in Linear yet, or declined without a reason); overdue = waiting
+/// The two tiles of the Linear section (`l-kpis`), one number per concept, both "now":
+///   Waiting for triage  the rows of the untriaged table (store view: no decision in
+///                       Linear yet, or declined without a reason); overdue = waiting
 ///                       more than 1 business day; need a reason = declined without one
-///   Open tickets        now: the rows of the open-tickets table; overdue = due date
-///                       before `today`; no owner; no due date
-///   Triaged this month  report funnel.assessed (the PDF's "assessed"); the detail is the
-///                       x of the "assessed" KPI ("x of y (z%)", within 1 business day)
-///   Closed this month   report outcomes.fixed_count + closed_without_fix
-/// The "now" tiles use the same view and `today` as the tables, so they always agree
-/// with them. Without a report (no `funnel`), the month tiles show "&mdash;".
-pub fn linear_kpis(view: &TriageView, today: &str, report: Option<&Value>) -> String {
+///   Open tickets        the rows of the open-tickets table; overdue = due date before
+///                       `today`; no owner; no due date
+/// They use the same view and `today` as the tables, so they always agree with them.
+/// The month figures ("triaged / closed this month") were dropped from the page on
+/// 2026-11-06 (Henry): they are in the report PDF.
+pub fn linear_kpis(view: &TriageView, today: &str) -> String {
     let state = |n: usize, bad: bool| if bad { "bad" } else if n == 0 { "ok" } else { "open" };
     let u = &view.untriaged;
     let late = u.iter().filter(|r| r.overdue).count();
@@ -350,33 +335,6 @@ pub fn linear_kpis(view: &TriageView, today: &str, report: Option<&Value>) -> St
         if t.is_empty() { "none open" } else { "none overdue" },
     );
     s.push_str(&kpi_tile("Open tickets", "now", &thousands(t.len()), &d, state(t.len(), bad), Some("#tickets")));
-    let Some(r) = report.filter(|r| r.get("funnel").is_some()) else {
-        for label in ["Triaged this month", "Closed this month"] {
-            s.push_str(&kpi_tile(label, "month to date", "&mdash;", "no month-to-date report yet", "none", None));
-        }
-        return s;
-    };
-    let n = |p: &str| r.pointer(p).and_then(Value::as_u64).unwrap_or(0) as usize;
-    let len = |p: &str| r.pointer(p).and_then(Value::as_array).map_or(0, Vec::len);
-    let scope = month_scope(r);
-    let assessed = n("/funnel/assessed");
-    let within = r.get("kpis").and_then(Value::as_array)
-        .and_then(|ks| ks.iter().find(|k| k.get("key").and_then(Value::as_str) == Some("assessed")))
-        .and_then(|k| k.get("value")).and_then(Value::as_str)
-        .and_then(|v| KPI_WITHIN.captures(v)).and_then(|c| c[1].parse::<usize>().ok());
-    let d = match (assessed, within) {
-        (0, _) => "none yet".to_string(),
-        (_, Some(x)) => format!("{} within 1 business day", thousands(x)),
-        (_, None) => String::new(),
-    };
-    s.push_str(&kpi_tile("Triaged this month", &scope, &thousands(assessed), &d, "info", None));
-    let (fixed, without) = (n("/outcomes/fixed_count"), len("/outcomes/closed_without_fix"));
-    let d = if fixed + without == 0 {
-        "none yet".to_string()
-    } else {
-        format!("{} fixed &middot; {} without fix", thousands(fixed), thousands(without))
-    };
-    s.push_str(&kpi_tile("Closed this month", &scope, &thousands(fixed + without), &d, "info", None));
     s
 }
 
@@ -408,7 +366,7 @@ pub fn linear_regions(view: &TriageView, now: DateTime<Utc>, report: Option<&Val
                       -> Vec<(String, String)> {
     let today = now.format("%Y-%m-%d").to_string();
     HTML_IDS.iter().map(|s| s.to_string())
-        .zip([linear_kpis(view, &today, report), linear_refresh(report, serve_url)]).collect()
+        .zip([linear_kpis(view, &today), linear_refresh(report, serve_url)]).collect()
 }
 
 /// The `f-status` region: since 2026-11-06 the "Updated" line sits at the top of
@@ -903,57 +861,25 @@ mod tests {
     }
 
     #[test]
-    fn month_tiles_from_the_report() {
-        let r = report_fixture();
-        let s = linear_kpis(&TriageView::default(), "2026-11-06", Some(&r));
-        assert_eq!(tile(&s, "Triaged this month"), t4("kpi-info", "November", "5", "4 within 1 business day"));
-        assert_eq!(tile(&s, "Closed this month"), t4("kpi-info", "November", "3", "2 fixed &middot; 1 without fix"));
-        // funnel.waiting (9) and open_actions (8, 7 overdue) count other sets than the tables: not shown.
-        assert!(!s.contains('9') && !s.contains('8') && !s.contains('7'), "{s}");
-        // An empty view: both "now" tiles green, and links to their tables; the month tiles are not links.
+    fn only_now_tiles() {
+        // Since 2026-11-06 the Linear section shows the two "now" tiles only; the month
+        // figures are in the report PDF.
+        let s = linear_kpis(&TriageView::default(), "2026-11-06");
         assert_eq!(tile(&s, "Waiting for triage"), t4("kpi-ok", "now", "0", "none waiting"));
         assert_eq!(tile(&s, "Open tickets"), t4("kpi-ok", "now", "0", "none open"));
         assert!(s.starts_with(r##"<a class="kpi kpi-ok" href="#untriaged">"##), "{s}");
         assert!(s.contains(r##"<a class="kpi kpi-ok" href="#tickets">"##), "{s}");
-        assert_eq!(s.matches(r#"<span class="kpi kpi-info">"#).count(), 2, "{s}");
-        assert!(!s.contains("<div"), "an html region holds no div: {s}");
-        // Nothing triaged or closed yet.
-        let mut calm = r.clone();
-        calm["funnel"]["assessed"] = serde_json::json!(0);
-        calm["outcomes"] = serde_json::json!({"fixed_count": 0, "closed_without_fix": []});
-        let s = linear_kpis(&TriageView::default(), "2026-11-06", Some(&calm));
-        assert_eq!(tile(&s, "Triaged this month"), t4("kpi-info", "November", "0", "none yet"));
-        assert_eq!(tile(&s, "Closed this month"), t4("kpi-info", "November", "0", "none yet"));
-        // A KPI value without "x of y": the number stays, the detail is left out.
-        let mut odd = r.clone();
-        odd["kpis"] = serde_json::json!([{"key": "assessed", "value": "—; 1 without a reason"}]);
-        assert_eq!(tile(&linear_kpis(&TriageView::default(), "2026-11-06", Some(&odd)), "Triaged this month").3, "");
-        // Scope: the Amsterdam month of as_of (00:30 on 1 Nov there); no as_of.
-        let mut first = r.clone();
-        first["as_of"] = serde_json::json!("2026-10-31T23:30:00Z");
-        assert_eq!(tile(&linear_kpis(&TriageView::default(), "2026-11-01", Some(&first)), "Closed this month").1, "November");
-        first.as_object_mut().unwrap().remove("as_of");
-        assert_eq!(tile(&linear_kpis(&TriageView::default(), "2026-11-01", Some(&first)), "Closed this month").1, "month to date");
-    }
-
-    #[test]
-    fn month_tiles_without_a_report() {
-        for rep in [None, Some(serde_json::json!({"error": "x"}))] {
-            let s = linear_kpis(&TriageView::default(), "2026-11-06", rep.as_ref());
-            for label in ["Triaged this month", "Closed this month"] {
-                assert_eq!(tile(&s, label), t4("kpi-none", "month to date", "&mdash;", "no month-to-date report yet"));
-            }
-            assert_eq!(tile(&s, "Waiting for triage").2, "0");
-        }
-        // A run without a report (dry run with none on disk) renders the same tiles.
+        assert_eq!(s.matches(r#"class="kpi "#).count(), 2, "{s}");
+        assert!(!s.contains("this month") && !s.contains("kpi-info") && !s.contains("<div"), "{s}");
+        // A run with or without a report renders the same tiles.
         let t = parse_iso("2026-11-03T02:45:00Z").unwrap();
         let r = build_regions(&[], &[], &[], &[], &[], None, &TriageView::default(), t, t, t, 300);
-        assert_eq!(r.get("l-kpis"), linear_kpis(&TriageView::default(), "2026-11-03", None));
+        assert_eq!(r.get("l-kpis"), linear_kpis(&TriageView::default(), "2026-11-03"));
         assert_eq!(r.get("l-refresh"), "");
     }
 
     /// The "now" tiles count exactly the rows of the two tables, in the words of
-    /// their counters; the month tiles come from the fixture's report part.
+    /// their counters.
     #[test]
     fn now_tiles_equal_the_tables() {
         let r = load();
@@ -971,8 +897,6 @@ mod tests {
         assert_eq!(d, concat!(r#"<span class="kpi-late">1 overdue</span> &middot; <span class="kpi-late">1 no owner</span>"#,
                               r#" &middot; <span class="kpi-late">1 no due date</span>"#));
         assert_eq!(r.get("n-tickets"), "3 tickets &middot; 1 overdue &middot; 1 no owner &middot; 1 no due date");
-        assert_eq!(tile(k, "Triaged this month"), t4("kpi-info", "November", "13", "11 within 1 business day"));
-        assert_eq!(tile(k, "Closed this month"), t4("kpi-info", "November", "2", "1 fixed &middot; 1 without fix"));
         // Pending but nothing late or missing: neutral.
         let calm = TriageView {
             untriaged: vec![TriageRow { item_id: "A".into(), ..Default::default() }],
@@ -980,7 +904,7 @@ mod tests {
                                       ..Default::default() }],
             ..Default::default()
         };
-        let s = linear_kpis(&calm, "2026-11-06", None);
+        let s = linear_kpis(&calm, "2026-11-06");
         assert_eq!(tile(&s, "Waiting for triage"), t4("kpi-open", "now", "1", "none overdue"));
         assert_eq!(tile(&s, "Open tickets"), t4("kpi-open", "now", "1", "none overdue"));
         // Hostile text in the view and the report never reaches the tiles unescaped.
@@ -1264,10 +1188,10 @@ mod tests {
             evil.push_str(&h.1);
         }
         // Every tile state: ok and none (empty view, no report), open (pending, nothing late).
-        evil.push_str(&linear_kpis(&TriageView::default(), "2026-11-06", None));
+        evil.push_str(&linear_kpis(&TriageView::default(), "2026-11-06"));
         let open = TriageView { untriaged: vec![TriageRow::default()], ..Default::default() };
-        evil.push_str(&linear_kpis(&open, "2026-11-06", None));
-        for state in ["bad", "ok", "open", "info", "none"] {
+        evil.push_str(&linear_kpis(&open, "2026-11-06"));
+        for state in ["bad", "ok", "open"] {
             let c = format!("kpi kpi-{state}");
             assert!(evil.contains(&c) || page.contains(&c), "{state}");
         }

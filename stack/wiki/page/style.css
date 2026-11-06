@@ -186,9 +186,9 @@
 
 /* added 2026-11-06: the four Linear tiles (#l-kpis): cards with a status bar on the
    left, unlike the flat feed tiles. kpi-bad overdue or missing items (red), kpi-ok
-   nothing pending (green), kpi-open pending but nothing late, kpi-info a month
-   figure, kpi-none no figures yet. The "now" tiles link to their table. */
-#ew .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:0 0 4px}
+   nothing pending (green), kpi-open pending but nothing late. Two "now" tiles only
+   since 2026-11-06 (no month figures); each links to its table. */
+#ew .kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 0 4px}
 #ew .kpi{display:flex;flex-direction:column;gap:6px;min-width:0;padding:14px 16px 14px 18px;background:var(--surface);border:1px solid var(--rule);border-left:4px solid var(--rule);border-radius:8px;box-shadow:var(--shadow);color:var(--ink);transition:border-color .15s,background-color .15s}
 #ew a.kpi{color:var(--ink);text-decoration:none;cursor:pointer}
 #ew a.kpi:hover{background:var(--surface-2);text-decoration:none}
@@ -205,10 +205,7 @@
 #ew .kpi.kpi-ok{border-left-color:var(--accent)}
 #ew .kpi.kpi-ok .kpi-n{color:var(--accent)}
 #ew .kpi.kpi-open{border-left-color:var(--ink-2)}
-#ew .kpi.kpi-info{border-left-color:var(--accent-soft)}
-#ew .kpi.kpi-none .kpi-n{color:var(--muted)}
-@media (max-width:900px){#ew .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media (max-width:480px){#ew .kpis{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:640px){#ew .kpis{grid-template-columns:minmax(0,1fr)}}
 
 /* added 2026-11-06: long tables scroll inside their frame (about 12 rows) with the
    header row kept in view; the count line above each table says how many rows there are */

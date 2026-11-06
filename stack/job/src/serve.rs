@@ -67,12 +67,13 @@ pub struct Args {
 pub const HEALTH_PATH: &str = "/healthz";
 pub const REPORT_PATH: &str = "/report/month-to-date.pdf";
 pub const REFRESH_PATH: &str = "/refresh";
-/// File name the browser saves the PDF as: "cyber-threat-report-<YYYY-MM>-to-date.pdf"
-/// for the Amsterdam month of the tickets' "as of" time (Henry, 2026-11-06), or without
-/// the month when that time is unknown.
+/// File name the browser saves the PDF as: "cyber-threat-report-<YYYY-MM-DD-HHMM>.pdf",
+/// the tickets' "as of" time in Amsterdam time, so each export names when its data is
+/// from (Henry, 2026-11-06); the monthly report is "cyber-threat-report-<YYYY-MM>.pdf".
+/// "cyber-threat-report-to-date.pdf" when that time is unknown.
 pub fn download_name(as_of: &str) -> String {
     match crate::feeds::common::parse_iso(as_of) {
-        Some(t) => format!("cyber-threat-report-{}-to-date.pdf", crate::triage::store::to_amsterdam(t).format("%Y-%m")),
+        Some(t) => format!("cyber-threat-report-{}.pdf", crate::triage::store::to_amsterdam(t).format("%Y-%m-%d-%H%M")),
         None => "cyber-threat-report-to-date.pdf".into(),
     }
 }
@@ -633,7 +634,7 @@ mod tests {
         assert_eq!(r.body, b"%PDF-new");
         assert_eq!(r.header("content-type"), Some("application/pdf"));
         assert_eq!(r.header("Content-Disposition"),
-                   Some(r#"attachment; filename="cyber-threat-report-2026-11-to-date.pdf""#));
+                   Some(r#"attachment; filename="cyber-threat-report-2026-11-05-1100.pdf""#));
         assert_eq!(r.header("Cache-Control"), Some("no-store"));
         assert_eq!(r.header("X-Report-Refreshed"), Some("true"));
         assert_eq!(r.header("X-Report-Reason"), None);
