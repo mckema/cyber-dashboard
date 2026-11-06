@@ -17,7 +17,7 @@
 # deliberately not declared with ARG, which keeps them out of `docker history` and
 # the image.
 
-FROM rust:1.99.1-slim-bookworm AS build
+FROM rust:1.99.1-slim-trixie AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked \
  && cp target/release/exploit-watch /usr/local/bin/exploit-watch
 
-FROM debian:bookworm-slim AS typst
+FROM debian:trixie-slim AS typst
 ARG TYPST_VERSION=0.15.1
 ARG TYPST_SHA256=a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c
 # apt and curl only honour the lowercase proxy variables.
@@ -40,7 +40,7 @@ RUN https_proxy="$HTTPS_PROXY" curl -fsSL -o /tmp/typst.tar.xz \
  && install -m 0755 /tmp/typst-x86_64-unknown-linux-musl/typst /usr/local/bin/typst \
  && /usr/local/bin/typst --version
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 # ca-certificates: TLS roots for the feeds; apt only honours the lowercase proxy variables.
 RUN http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" apt-get update \
  && http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" apt-get install -y --no-install-recommends ca-certificates \

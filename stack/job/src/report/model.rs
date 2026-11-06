@@ -9,6 +9,9 @@ use serde_json::Value;
 
 use crate::feeds::common::parse_iso;
 
+/// Key prefix of the events the monthly close appends (close.rs); skipped here.
+pub const REPORT_KEY_PREFIX: &str = "report:";
+
 /// One event of the log, with its time parsed.
 #[derive(Debug, Clone)]
 pub struct Ev {
@@ -72,6 +75,10 @@ pub fn read_events(raw: &str) -> Result<Log, String> {
         };
         let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let (kind, key) = (s("event"), s("key"));
+        // The monthly close's own events (report_frozen, …) are about a report, not an item.
+        if key.starts_with(REPORT_KEY_PREFIX) {
+            continue;
+        }
         let id = v.get("id").and_then(Value::as_str).map(String::from);
         parsed.push((i, Ev { kind, key, at, seq: i, v }, id));
     }

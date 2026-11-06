@@ -1,5 +1,5 @@
 //! linear-mock: a local stand-in for the Linear GraphQL API, for the Docker
-//! Compose lab only. It answers the five GraphQL documents that the
+//! Compose lab only. It answers the six GraphQL documents that the
 //! exploit-watch job's live Linear client sends (triage/tracker.rs,
 //! `LinearTracker`), so that client can be exercised end to end over real HTTP
 //! without a Linear workspace. It is not a Linear emulator: it does not parse
@@ -31,8 +31,16 @@
 //!   query TriageState      variables.team == MOCK_TEAM_ID -> one workflow state
 //!                          {id "state-triage", name "Triage", type "triage"};
 //!                          any other team -> no nodes
-//!   mutation IssueCreate   input {id, teamId, title, description, stateId}; appends
-//!                          issue MOCK-<n> in state triage. `id` (optional, as in
+//!   query StateByType      variables {team, type} (since 2026-11-06, the job's
+//!                          create_task): type "triage" -> the triage state,
+//!                          "unstarted" -> {id "state-todo", name "Todo", type
+//!                          "unstarted", position 1}; other types or teams -> no nodes
+//!   mutation IssueCreate   input {id, teamId, title, description, stateId,
+//!                          assigneeId, dueDate}; appends issue MOCK-<n>, in state
+//!                          triage (stateId "state-triage" or none) or todo
+//!                          (stateId "state-todo": a task such as the monthly review
+//!                          reminder; assigneeId is kept as `assignee`, dueDate as
+//!                          `due`, both only when given). `id` (optional, as in
 //!                          Linear) becomes the issue id; it must be a UUID v4
 //!                          and not taken. Without it the id is mock-<time>-<n>
 //!   query IssueById        variables.id = an issue id or identifier (MOCK-1) ->
@@ -48,7 +56,7 @@
 //!   GRAPHQL_VALIDATION_FAILED  unknown operation, or variables missing or of the
 //!                              wrong type
 //!   INVALID_INPUT              IssueCreate with a teamId other than MOCK_TEAM_ID,
-//!                              a stateId other than "state-triage", or an empty
+//!                              a stateId other than "state-triage" or "state-todo", or an empty
 //!                              title; CommentCreate on an id not in the file.
 //!                              IssueCreate with an `id` that is not a UUID v4:
 //!                              Linear's answer of 2026-11-05 ("Argument
@@ -92,6 +100,7 @@
 //!      "created": "2026-11-04T08:00:00Z",
 //!      "state": "triage",      edit: triage | accepted | done | declined | duplicate
 //!                                    | accepted-canceled (accepted, later canceled)
+//!                                    | todo (created into Todo by a task, never triaged)
 //!                                    (completed, canceled, cancelled also read;
 //!                                    canceled = declined, a Decline from Triage)
 //!      "assignee": "",         edit: owner name, "" = unassigned
@@ -119,14 +128,14 @@
 //! How IssueStates maps an issue to Linear's shape, following what a real
 //! Linear workspace returned on 2026-11-04/05:
 //!
-//!   state      triage -> triage "Triage", accepted -> unstarted "Todo",
+//!   state      triage -> triage "Triage", accepted and todo -> unstarted "Todo",
 //!              done -> completed "Done", declined -> canceled "Canceled",
 //!              accepted-canceled -> canceled "Canceled", duplicate ->
 //!              duplicate "Duplicate" (Linear's own state type for Mark as
 //!              duplicate, not canceled)
 //!   assignee   "" -> null, else {name}; due "" -> dueDate null
-//!   triagedAt  state triage: null; otherwise changed or created (Linear sets
-//!              it on any move out of Triage)
+//!   triagedAt  state triage or todo: null; otherwise changed or created (Linear
+//!              sets it on any move out of Triage; a task never was in Triage)
 //!   createdAt  created ("" -> null)
 //!   startedAt  always null (the mock has no started state)
 //!   completedAt  done: completed or triagedAt; otherwise null
@@ -134,7 +143,7 @@
 //!              3-4 ms of triagedAt on a Decline, 2026-11-05); accepted-canceled:
 //!              canceled or 1 hour after triagedAt (real Linear: ~20 h later on
 //!              TRI-1); otherwise null
-//!   history    state triage: no nodes; otherwise the entry that left Triage,
+//!   history    state triage or todo: no nodes; otherwise the entry that left Triage,
 //!              {createdAt: changed or created, actor {name: actor or
 //!              "mock user"}, botActor null, fromState {type "triage"},
 //!              toState {type, name}}; for duplicate fromState and toState
@@ -190,6 +199,8 @@ use serde_json::{Map, Value, json};
 
 const DATA_FILE: &str = "issues.json";
 const TRIAGE_STATE_ID: &str = "state-triage";
+/// The team's unstarted state (Todo), for tasks such as the monthly review reminder.
+const TODO_STATE_ID: &str = "state-todo";
 const BOT_USER: &str = "exploit-watch bot";
 const DEFAULT_ACTOR: &str = "mock user";
 const URL_BASE: &str = "http://linear-mock.invalid/issue/";
@@ -324,6 +335,9 @@ enum MockState {
     /// Accepted (to Backlog), later canceled.
     #[serde(rename = "accepted-canceled")]
     AcceptedCanceled,
+    /// Created straight into Todo (StateByType "unstarted"), never in Triage: a task such as the
+    /// monthly review reminder. Not triaged, so no triagedAt and no history.
+    Todo,
 }
 
 impl MockState {
@@ -331,6 +345,7 @@ impl MockState {
     fn linear(self) -> (&'static str, &'static str) {
         match self {
             Self::Triage => ("triage", "Triage"),
+            Self::Todo => ("unstarted", "Todo"),
             Self::Accepted => ("unstarted", "Todo"),
             Self::Done => ("completed", "Done"),
             Self::Declined | Self::AcceptedCanceled => ("canceled", "Canceled"),
@@ -460,6 +475,7 @@ fn auth_error_body() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     TriageState,
+    StateByType,
     IssueCreate,
     IssueById,
     CommentCreate,
@@ -467,8 +483,9 @@ enum Op {
 }
 
 impl Op {
-    const ALL: [(Op, &'static str); 5] = [
+    const ALL: [(Op, &'static str); 6] = [
         (Op::TriageState, "query TriageState"),
+        (Op::StateByType, "query StateByType"),
         (Op::IssueCreate, "mutation IssueCreate"),
         (Op::IssueById, "query IssueById"),
         (Op::CommentCreate, "mutation CommentCreate"),
@@ -489,6 +506,7 @@ impl Op {
     fn name(self) -> &'static str {
         match self {
             Op::TriageState => "TriageState",
+            Op::StateByType => "StateByType",
             Op::IssueCreate => "IssueCreate",
             Op::IssueById => "IssueById",
             Op::CommentCreate => "CommentCreate",
@@ -564,7 +582,7 @@ fn graphql(auth: Option<&str>, body: &[u8], cfg: &Config, now: &str) -> Reply {
     let Some(op) = Op::detect(query) else {
         let head: String = query.trim().lines().next().unwrap_or("").chars().take(60).collect();
         let message =
-            format!("linear-mock only answers TriageState, IssueCreate, IssueById, CommentCreate and IssueStates; got {head:?}");
+            format!("linear-mock only answers TriageState, StateByType, IssueCreate, IssueById, CommentCreate and IssueStates; got {head:?}");
         return Reply {
             status: 200,
             body: error_body("GRAPHQL_VALIDATION_FAILED", &message),
@@ -574,6 +592,7 @@ fn graphql(auth: Option<&str>, body: &[u8], cfg: &Config, now: &str) -> Reply {
     };
     let result = match op {
         Op::TriageState => triage_state(vars, cfg),
+        Op::StateByType => state_by_type(vars, cfg),
         Op::IssueCreate => issue_create(vars, cfg, now),
         Op::IssueById => issue_by_id(vars, cfg),
         Op::CommentCreate => comment_create(vars, cfg, now),
@@ -623,6 +642,24 @@ fn triage_state(vars: &Value, cfg: &Config) -> OpResult {
     Ok((json!({"workflowStates": {"nodes": nodes}}), detail))
 }
 
+/// `workflowStates` filtered by team and type (the job's create_task lookup): the
+/// triage state for "triage", Todo ("state-todo", position 1) for "unstarted";
+/// any other type or team -> no nodes.
+fn state_by_type(vars: &Value, cfg: &Config) -> OpResult {
+    let team = str_field(vars, "team");
+    let Some(kind) = vars.get("type").and_then(Value::as_str) else {
+        return Err(GqlError::new("GRAPHQL_VALIDATION_FAILED", "StateByType needs variables.type (a string)"));
+    };
+    let nodes = match kind {
+        _ if team != cfg.team_id => vec![],
+        "triage" => vec![json!({"id": TRIAGE_STATE_ID, "name": "Triage", "type": "triage", "position": 0})],
+        "unstarted" => vec![json!({"id": TODO_STATE_ID, "name": "Todo", "type": "unstarted", "position": 1})],
+        _ => vec![],
+    };
+    let detail = format!("team {team:?}, type {kind:?}, {} state(s)", nodes.len());
+    Ok((json!({"workflowStates": {"nodes": nodes}}), detail))
+}
+
 /// Issue id: "mock-<creation time digits>-<n>". The time part keeps ids unique when
 /// issues.json is deleted or an older copy is saved over it and numbering restarts,
 /// so a job that still holds an old id never gets another item's issue.
@@ -656,12 +693,19 @@ fn issue_create(vars: &Value, cfg: &Config, now: &str) -> OpResult {
     if team != cfg.team_id {
         return Err(GqlError::new("INVALID_INPUT", format!("teamId {team:?} does not exist (the mock team is MOCK_TEAM_ID)")));
     }
-    if let Some(state) = input.get("stateId").filter(|v| !v.is_null())
-        && state.as_str() != Some(TRIAGE_STATE_ID)
-    {
-        return Err(GqlError::new("INVALID_INPUT",
-                                 format!("stateId {state} does not exist (the only state is {TRIAGE_STATE_ID:?}, from TriageState)")));
-    }
+    // No stateId: Triage (Linear would pick the team's default state). state-todo: a task, straight into Todo.
+    let state = match input.get("stateId").filter(|v| !v.is_null()) {
+        None => MockState::Triage,
+        Some(s) if s.as_str() == Some(TRIAGE_STATE_ID) => MockState::Triage,
+        Some(s) if s.as_str() == Some(TODO_STATE_ID) => MockState::Todo,
+        Some(s) => {
+            return Err(GqlError::new("INVALID_INPUT", format!(
+                "stateId {s} does not exist (the states are {TRIAGE_STATE_ID:?} and {TODO_STATE_ID:?}, from TriageState or StateByType)")));
+        }
+    };
+    // assigneeId (a Linear user id; the mock has no users and keeps it as the assignee) and dueDate, when given.
+    let assignee = nonempty(str_field(input, "assigneeId")).unwrap_or("").to_string();
+    let due = nonempty(str_field(input, "dueDate")).unwrap_or("").to_string();
     let title = str_field(input, "title");
     if title.trim().is_empty() {
         return Err(GqlError::new("INVALID_INPUT", "issueCreate needs a non-empty title"));
@@ -691,9 +735,9 @@ fn issue_create(vars: &Value, cfg: &Config, now: &str) -> OpResult {
         title: title.into(),
         description: str_field(input, "description").into(),
         created: now.into(),
-        state: MockState::Triage,
-        assignee: String::new(),
-        due: String::new(),
+        state,
+        assignee,
+        due,
         reason: String::new(),
         actor: String::new(),
         changed: String::new(),
@@ -779,7 +823,7 @@ fn issue_node(i: &Issue) -> Value {
         json!({"createdAt": at, "actor": {"name": who}, "botActor": null, "fromState": from, "toState": to})
     };
     let mut history: Vec<Value> = match i.state {
-        MockState::Triage => vec![],
+        MockState::Triage | MockState::Todo => vec![],
         // Mark as duplicate: Linear's entry holds the relation only, no states.
         MockState::Duplicate => vec![entry(when, Value::Null, Value::Null)],
         // Accept to Backlog, later Cancel: two entries, like TRI-1 on real Linear (2026-11-05).
@@ -808,7 +852,7 @@ fn issue_node(i: &Issue) -> Value {
         "state": {"type": state_type, "name": state_name},
         "assignee": nonempty(&i.assignee).map(|a| json!({"name": a})),
         "dueDate": nonempty(&i.due),
-        "triagedAt": (i.state != MockState::Triage).then_some(when),
+        "triagedAt": (!matches!(i.state, MockState::Triage | MockState::Todo)).then_some(when),
         "createdAt": nonempty(&i.created),
         "startedAt": null,
         "completedAt": completed,
@@ -1706,5 +1750,71 @@ mod tests {
         assert!(bare_app.contains(" 401 "), "{bare_app}");
         worker.join().unwrap();
         assert_eq!(d.read()["issues"].as_array().unwrap().len(), 2);
+    }
+
+    // ------------------------------------------------ tasks (create_task, 2026-11-06)
+
+    /// The document exactly as the job's create_task sends it (src/triage/tracker.rs, 2026-11-06).
+    const Q_STATE_BY_TYPE: &str = "query StateByType($team: ID!, $type: String!) {
+  workflowStates(filter: { team: { id: { eq: $team } }, type: { eq: $type } }) {
+    nodes { id name type position }
+  }
+}";
+
+    #[test]
+    fn state_by_type_lookup() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        let nodes = |team: &str, t: &str| gql(&cfg, Q_STATE_BY_TYPE, json!({"team": team, "type": t}));
+        assert_eq!(nodes(TEAM, "unstarted"), json!({"data": {"workflowStates": {"nodes": [
+            {"id": "state-todo", "name": "Todo", "type": "unstarted", "position": 1}]}}}));
+        assert_eq!(nodes(TEAM, "triage").pointer("/data/workflowStates/nodes/0/id"), Some(&json!(TRIAGE_STATE_ID)));
+        for (team, t) in [(TEAM, "completed"), ("other", "unstarted")] {
+            assert_eq!(nodes(team, t), json!({"data": {"workflowStates": {"nodes": []}}}), "{team} {t}");
+        }
+        assert_eq!(error_code(&gql(&cfg, Q_STATE_BY_TYPE, json!({"team": TEAM}))), "GRAPHQL_VALIDATION_FAILED");
+        // TriageState is still its own operation
+        assert_eq!(gql(&cfg, Q_TRIAGE_STATE, json!({"team": TEAM})).pointer("/data/workflowStates/nodes/0/id"),
+                   Some(&json!(TRIAGE_STATE_ID)));
+    }
+
+    /// The review reminder: created straight into Todo with an id, assignee and due date;
+    /// a plain Todo, not triaged; a second create with the same id conflicts and
+    /// IssueById returns it (the job's recovery path).
+    #[test]
+    fn task_create_into_todo_with_id() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        let input = json!({"id": UUID, "teamId": TEAM, "title": "Review monthly cyber threat report — November 2026",
+                           "description": "- [ ] check", "stateId": TODO_STATE_ID, "assigneeId": "user-1",
+                           "dueDate": "2026-12-03"});
+        let v = gql(&cfg, M_ISSUE_CREATE, json!({"input": input}));
+        assert_eq!(v.pointer("/data/issueCreate/issue/id"), Some(&json!(UUID)));
+        let f = d.read();
+        let i = &f["issues"][0];
+        assert_eq!((i["state"].as_str(), i["assignee"].as_str(), i["due"].as_str()), (Some("todo"), Some("user-1"), Some("2026-12-03")));
+        let n = &states(&cfg, &[UUID])[0];
+        assert_eq!(n["state"], json!({"type": "unstarted", "name": "Todo"}));
+        assert_eq!((n["triagedAt"].clone(), n["history"].clone()), (Value::Null, json!({"nodes": []})), "never in Triage");
+        assert_eq!((n["assignee"].clone(), n["dueDate"].clone()), (json!({"name": "user-1"}), json!("2026-12-03")));
+
+        let before = fs::read(d.file()).unwrap();
+        assert_eq!(error_code(&gql(&cfg, M_ISSUE_CREATE, json!({"input": input}))), "INPUT_ERROR");
+        assert_eq!(fs::read(d.file()).unwrap(), before, "no second reminder");
+        assert_eq!(gql(&cfg, Q_ISSUE_BY_ID, json!({"id": UUID})).pointer("/data/issue/identifier"), Some(&json!("MOCK-1")));
+
+        // without assignee and due date: both stay empty; an unknown state is refused
+        let v = gql(&cfg, M_ISSUE_CREATE, json!({"input": {"teamId": TEAM, "title": "t", "stateId": TODO_STATE_ID}}));
+        assert_eq!(v.pointer("/data/issueCreate/issue/identifier"), Some(&json!("MOCK-2")));
+        let i = &d.read()["issues"][1];
+        assert_eq!((i["state"].as_str(), i["assignee"].as_str(), i["due"].as_str()), (Some("todo"), Some(""), Some("")));
+        let bad = gql(&cfg, M_ISSUE_CREATE, json!({"input": {"teamId": TEAM, "title": "t", "stateId": "state-done"}}));
+        assert_eq!(error_code(&bad), "INVALID_INPUT");
+        // a hand edit may still triage-like move it: "accepted" then reads as a triaged Todo
+        let mut f = d.read();
+        f["issues"][1]["state"] = json!("accepted");
+        fs::write(d.file(), f.to_string()).unwrap();
+        let ids = d.read()["issues"][1]["id"].as_str().unwrap().to_string();
+        assert!(states(&cfg, &[&ids])[0]["triagedAt"].is_string());
     }
 }

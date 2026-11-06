@@ -15,9 +15,35 @@
 </div>
 <main class="wrap">
 
+<section class="block" id="linear">
+<div class="shead"><h2>Triage and actions (Linear)</h2></div>
+<p class="snote">What needs a person: matched items waiting for triage in Linear, and the open actions. <span class="tip" tabindex="0" title="The figures are those of the month-to-date report (the Export snapshot PDF): assessed = relevant items of the month triaged in Linear; waiting = relevant items of the month not triaged yet (overdue after one business day); actions open = accepted tickets not closed (overdue after their due date); actions closed = fixed or closed without fix this month. Refresh tickets reads Linear again; the feeds are fetched by the scheduled job only.">&#9432;<span class="tiptext">The figures are those of the month-to-date report (the <b>Export snapshot</b> PDF): <em>assessed</em> = relevant items of the month triaged in Linear; <em>waiting</em> = relevant items of the month not triaged yet (overdue after one business day); <em>actions open</em> = accepted tickets not closed (overdue after their due date); <em>actions closed</em> = fixed or closed without fix this month. <b>Refresh tickets</b> reads Linear again; the feeds are fetched by the scheduled job only.</span></span></p>
+<div class="lbar"><div class="lsum" id="l-summary">Not generated yet.</div><div class="lact" id="l-refresh"></div></div>
+
+<section class="block" id="untriaged">
+<div class="shead"><h3>Matched to a fairCT component, waiting for triage</h3><span class="count" id="n-untriaged">0 items</span></div>
+<p class="snote">Items that name a fairCT component; triage them in Linear with Accept or Decline. <span class="tip" tabindex="0" title="FR-A2 and FR-A3 ask for every new item to be checked against fairCT&rsquo;s components and for relevant ones to be tracked to a fix. An item is matched when it names a listed component by package, CPE product or vendor and product name, either itself or through the CVE record of one of its CVEs; the rule that matched is shown under the component. A match makes the item a candidate only: affected versions are not checked. Each matched item gets one Linear issue in the Triage inbox, and triage happens in Linear: Accept turns the issue into a ticket with an owner and a due date, listed in the next table; Decline marks the item not relevant, with the reason recorded on the issue. Items that match no component are marked not relevant by rule and get no issue. A row turns red when the item has waited more than one business day; pending means the issue is not created yet. An issue declined without a reason stays in this table, with a note, until a reason is added as a comment in Linear.">&#9432;<span class="tiptext">FR-A2 and FR-A3 ask for every new item to be checked against fairCT&rsquo;s components and for relevant ones to be tracked to a fix. An item is <em>matched</em> when it names a listed component by package, CPE product or vendor and product name, either itself or through the CVE record of one of its CVEs; the rule that matched is shown under the component. A match makes the item a candidate only: affected versions are not checked. Each matched item gets one Linear issue in the Triage inbox, and triage happens in Linear: <b>Accept</b> turns the issue into a ticket with an owner and a due date, listed in the next table; <b>Decline</b> marks the item not relevant, with the reason recorded on the issue. Items that match no component are marked not relevant by rule and get no issue. A row turns red when the item has waited more than one business day; <em>pending</em> means the issue is not created yet. An issue declined without a reason stays in this table, with a note, until a reason is added as a comment in Linear.</span></span></p>
+<div class="callout note"><b>Sample component list:</b> matches are for testing the workflow only. <span class="tip" tabindex="0" title="Matching currently uses a sample list of Rust and UI libraries, container images and infrastructure, not fairCT&rsquo;s agreed component list, so the matches and counts in this section are for testing the workflow only.">&#9432;<span class="tiptext">Matching currently uses a sample list of Rust and UI libraries, container images and infrastructure, not fairCT&rsquo;s agreed component list, so the matches and counts in this section are for testing the workflow only.</span></span></div>
+<p class="snote cap">Waiting for triage <b id="s-untriaged">0</b> &nbsp;&middot;&nbsp; Marked not relevant by rule in this window <b id="s-auto">0</b></p>
+<div class="tscroll"><div class="scroller"><table>
+<thead><tr><th>Item</th><th>Component</th><th>First seen</th><th>Issue</th></tr></thead>
+<tbody id="t-untriaged"><tr><td colspan="4" class="empty">Not generated yet.</td></tr></tbody>
+</table></div></div>
+</section>
+
+<section class="block" id="tickets">
+<div class="shead"><h3>Open tickets</h3><span class="count" id="n-tickets">0 tickets</span></div>
+<p class="snote">Accepted in Linear and not closed, earliest due date first. <span class="tip" tabindex="0" title="Issues accepted in Linear and not yet closed, earliest due date first. The owner and the due date are set in Linear when the issue is accepted; a due date before today, a missing owner and a missing due date are shown in red.">&#9432;<span class="tiptext">Issues accepted in Linear and not yet closed, earliest due date first. The owner and the due date are set in Linear when the issue is accepted; a due date before today, a missing owner and a missing due date are shown in red.</span></span></p>
+<div class="tscroll"><div class="scroller"><table>
+<thead><tr><th>Issue</th><th>Item</th><th>Component</th><th>Assignee</th><th>Due</th><th>State</th></tr></thead>
+<tbody id="t-tickets"><tr><td colspan="6" class="empty">Not generated yet.</td></tr></tbody>
+</table></div></div>
+</section>
+</section>
+
 <section class="block" id="health">
 <div class="shead"><h2>Feed health</h2><span class="count" id="n-health">0 feeds</span></div>
-<p class="snote">FR-A1 asks for threat items from free, credible sources in one place, with the source and timestamp shown for each item and new items appearing within one hour of publication. The page is rebuilt every 6 hours; on 3 Nov 2026 the one-hour figure was set as a target to measure, not a hard rule. This table shows how each feed is doing: one row per feed, its status on the last run, how many items it contributed to this window, its newest item and its last successful fetch.</p>
+<p class="snote">Each feed&rsquo;s status on the last run, its items in this window, newest item and last successful fetch. <span class="tip" tabindex="0" title="FR-A1 asks for threat items from free, credible sources in one place, with the source and timestamp shown for each item and new items appearing within one hour of publication. The page is rebuilt every 6 hours; on 3 Nov 2026 the one-hour figure was set as a target to measure, not a hard rule. This table shows how each feed is doing: one row per feed, its status on the last run, how many items it contributed to this window, its newest item and its last successful fetch.">&#9432;<span class="tiptext">FR-A1 asks for threat items from free, credible sources in one place, with the source and timestamp shown for each item and new items appearing within one hour of publication. The page is rebuilt every 6 hours; on 3 Nov 2026 the one-hour figure was set as a target to measure, not a hard rule. This table shows how each feed is doing: one row per feed, its status on the last run, how many items it contributed to this window, its newest item and its last successful fetch.</span></span></p>
 <div class="legend">
 <p><span class="hs hs-ok">OK</span> fetched on this run. <span class="hs hs-ok">Not modified</span> the source answered HTTP 304: nothing new since the previous fetch.</p>
 <p><span class="hs hs-cached">Cached</span> not fetched on this run (the feed is polled less often than the page is rebuilt); the rows come from the last successful fetch.</p>
@@ -32,60 +58,40 @@
 
 <section class="block" id="kev">
 <div class="shead"><h2>Confirmed exploited in the wild</h2><span class="count" id="n-kev">0 entries</span></div>
-<p class="snote">CISA adds a CVE to its Known Exploited Vulnerabilities (KEV) catalog only when it has evidence of active exploitation. ENISA's EU Vulnerability Database (EUVD) flags exploited CVEs from a European perspective; a CVE listed by both appears once, with both source labels. US federal agencies get a binding remediation deadline (Fix due, CISA only); for everyone else this is the single best free signal of what to patch first.</p>
-<div class="callout"><b>If you run any of these at the edge</b> &mdash; a VPN concentrator, a firewall, a mail gateway, a support appliance &mdash; treat it as an incident, not a patch ticket. Many entries are unauthenticated remote code execution on devices that terminate untrusted traffic, and public exploitation often predates the fix.</div>
-<div class="scroller"><table>
+<p class="snote">Exploitation confirmed by CISA KEV or ENISA EUVD: the best free signal of what to patch first. <span class="tip" tabindex="0" title="CISA adds a CVE to its Known Exploited Vulnerabilities (KEV) catalog only when it has evidence of active exploitation. ENISA&rsquo;s EU Vulnerability Database (EUVD) flags exploited CVEs from a European perspective; a CVE listed by both appears once, with both source labels. US federal agencies get a binding remediation deadline (Fix due, CISA only); for everyone else this is the single best free signal of what to patch first.">&#9432;<span class="tiptext">CISA adds a CVE to its Known Exploited Vulnerabilities (KEV) catalog only when it has evidence of active exploitation. ENISA&rsquo;s EU Vulnerability Database (EUVD) flags exploited CVEs from a European perspective; a CVE listed by both appears once, with both source labels. US federal agencies get a binding remediation deadline (Fix due, CISA only); for everyone else this is the single best free signal of what to patch first.</span></span></p>
+<div class="callout"><b>If you run any of these at the edge</b>, treat it as an incident, not a patch ticket. <span class="tip" tabindex="0" title="A VPN concentrator, a firewall, a mail gateway, a support appliance: many entries are unauthenticated remote code execution on devices that terminate untrusted traffic, and public exploitation often predates the fix.">&#9432;<span class="tiptext">A VPN concentrator, a firewall, a mail gateway, a support appliance: many entries are unauthenticated remote code execution on devices that terminate untrusted traffic, and public exploitation often predates the fix.</span></span></div>
+<div class="tscroll"><div class="scroller"><table>
 <thead><tr><th>CVE</th><th>Product</th><th>Weakness</th><th>Added</th><th>Fix due</th></tr></thead>
 <tbody id="t-kev"><tr><td colspan="5" class="empty">Not generated yet.</td></tr></tbody>
-</table></div>
+</table></div></div>
 </section>
 
 <section class="block" id="adv">
 <div class="shead"><h2>EU and national advisories</h2><span class="count" id="n-adv">0 advisories</span></div>
-<p class="snote">CERT-EU writes advisories for EU institutions, bodies and agencies. NCSC-NL, the Dutch National Cyber Security Centre, publishes machine-readable CSAF advisories rated by probability and impact: <b>P</b> is the chance of abuse and <b>I</b> the damage if abused, each High, Medium or Low (NCSC-NL's own &ldquo;Kans&rdquo; and &ldquo;Schade&rdquo;). NCSC-NL titles are in Dutch. A revised advisory updates its row, marked <em>updated</em>, instead of adding a new one.</p>
-<div class="scroller"><table>
+<p class="snote">CERT-EU and NCSC-NL advisories; <b>P</b> is the chance of abuse, <b>I</b> the damage if abused. <span class="tip" tabindex="0" title="CERT-EU writes advisories for EU institutions, bodies and agencies. NCSC-NL, the Dutch National Cyber Security Centre, publishes machine-readable CSAF advisories rated by probability and impact: P is the chance of abuse and I the damage if abused, each High, Medium or Low (NCSC-NL&rsquo;s own &ldquo;Kans&rdquo; and &ldquo;Schade&rdquo;). NCSC-NL titles are in Dutch. A revised advisory updates its row, marked updated, instead of adding a new one.">&#9432;<span class="tiptext">CERT-EU writes advisories for EU institutions, bodies and agencies. NCSC-NL, the Dutch National Cyber Security Centre, publishes machine-readable CSAF advisories rated by probability and impact: <b>P</b> is the chance of abuse and <b>I</b> the damage if abused, each High, Medium or Low (NCSC-NL&rsquo;s own &ldquo;Kans&rdquo; and &ldquo;Schade&rdquo;). NCSC-NL titles are in Dutch. A revised advisory updates its row, marked <em>updated</em>, instead of adding a new one.</span></span></p>
+<div class="tscroll"><div class="scroller"><table>
 <thead><tr><th>Advisory</th><th>Published</th><th>Title</th><th>CVEs</th><th>Rating</th></tr></thead>
 <tbody id="t-adv"><tr><td colspan="5" class="empty">Not generated yet.</td></tr></tbody>
-</table></div>
+</table></div></div>
 </section>
 
 <section class="block" id="deps">
 <div class="shead"><h2>Advisories mapped to a package you may depend on</h2><span class="count" id="n-dep">0 advisories</span></div>
-<p class="snote">These come from GitHub&rsquo;s human-reviewed advisory set, the only feed here that names the exact package and the first fixed version. If you want an answer to &ldquo;does this affect <em>our</em> applications&rdquo; rather than &ldquo;is this bad in general&rdquo;, this is the table to diff against your lockfiles.</p>
-<div class="scroller"><table>
+<p class="snote">GitHub-reviewed advisories with the exact package and first fixed version: diff them against your lockfiles. <span class="tip" tabindex="0" title="These come from GitHub&rsquo;s human-reviewed advisory set, the only feed here that names the exact package and the first fixed version. If you want an answer to &ldquo;does this affect our applications&rdquo; rather than &ldquo;is this bad in general&rdquo;, this is the table to diff against your lockfiles.">&#9432;<span class="tiptext">These come from GitHub&rsquo;s human-reviewed advisory set, the only feed here that names the exact package and the first fixed version. If you want an answer to &ldquo;does this affect <em>our</em> applications&rdquo; rather than &ldquo;is this bad in general&rdquo;, this is the table to diff against your lockfiles.</span></span></p>
+<div class="tscroll"><div class="scroller"><table>
 <thead><tr><th>Advisory</th><th>Sev</th><th>Ecosystem</th><th>Package</th><th>Fixed in</th><th>Issue</th></tr></thead>
 <tbody id="t-dep"><tr><td colspan="6" class="empty">Not generated yet.</td></tr></tbody>
-</table></div>
+</table></div></div>
 </section>
 
 <section class="block" id="nvd">
 <div class="shead"><h2>All scored critical and high CVEs</h2><span class="count" id="n-nvd">0 CVEs</span></div>
-<p class="snote">New CVE records from CVE.org&rsquo;s cvelistV5 repository, sorted by base score. The score is the one in the CVE record itself: from the CVE Numbering Authority (CNA) that assigned the CVE, or from CISA&rsquo;s Authorized Data Publisher (CISA-ADP) container. When NVD has also scored the CVE and disagrees, its score is shown underneath. A CVE whose SSVC exploitation status is &ldquo;active&rdquo; is kept whatever its score. <code>AV:N</code> means reachable over the network and <code>PR:N</code> means no credentials needed &mdash; the combination is what turns a high score into an internet-facing emergency, so both are called out per row.</p>
+<p class="snote">New CVE.org records, highest base score first; <code>AV:N</code> with <code>PR:N</code> is called out per row. <span class="tip" tabindex="0" title="New CVE records from CVE.org&rsquo;s cvelistV5 repository, sorted by base score. The score is the one in the CVE record itself: from the CVE Numbering Authority (CNA) that assigned the CVE, or from CISA&rsquo;s Authorized Data Publisher (CISA-ADP) container. When NVD has also scored the CVE and disagrees, its score is shown underneath. A CVE whose SSVC exploitation status is &ldquo;active&rdquo; is kept whatever its score. AV:N means reachable over the network and PR:N means no credentials needed: the combination is what turns a high score into an internet-facing emergency, so both are called out per row.">&#9432;<span class="tiptext">New CVE records from CVE.org&rsquo;s cvelistV5 repository, sorted by base score. The score is the one in the CVE record itself: from the CVE Numbering Authority (CNA) that assigned the CVE, or from CISA&rsquo;s Authorized Data Publisher (CISA-ADP) container. When NVD has also scored the CVE and disagrees, its score is shown underneath. A CVE whose SSVC exploitation status is &ldquo;active&rdquo; is kept whatever its score. <code>AV:N</code> means reachable over the network and <code>PR:N</code> means no credentials needed &mdash; the combination is what turns a high score into an internet-facing emergency, so both are called out per row.</span></span></p>
 <p class="snote cap" id="n-cvecap">Not generated yet.</p>
-<div class="scroller"><table>
+<div class="tscroll"><div class="scroller"><table>
 <thead><tr><th>CVE</th><th>Score</th><th>Vendor</th><th>Description</th></tr></thead>
 <tbody id="t-nvd"><tr><td colspan="4" class="empty">Not generated yet.</td></tr></tbody>
-</table></div>
-</section>
-
-<section class="block" id="untriaged">
-<div class="shead"><h2>Matched to a fairCT component, waiting for triage</h2><span class="count" id="n-untriaged">0 items</span></div>
-<p class="snote">FR-A2 and FR-A3 ask for every new item to be checked against fairCT&rsquo;s components and for relevant ones to be tracked to a fix. An item is <em>matched</em> when it names a listed component by package, CPE product or vendor and product name, either itself or through the CVE record of one of its CVEs; the rule that matched is shown under the component. A match makes the item a candidate only: affected versions are not checked. Each matched item gets one Linear issue in the Triage inbox, and triage happens in Linear: <b>Accept</b> turns the issue into a ticket with an owner and a due date, listed in the next table; <b>Decline</b> marks the item not relevant, with the reason recorded on the issue. Items that match no component are marked not relevant by rule and get no issue. A row turns red when the item has waited more than one business day; <em>pending</em> means the issue is not created yet. An issue declined without a reason stays in this table, with a note, until a reason is added as a comment in Linear.</p>
-<div class="callout note"><b>Sample component list.</b> Matching currently uses a sample list of Rust and UI libraries, container images and infrastructure, not fairCT&rsquo;s agreed component list, so the matches and counts in this section are for testing the workflow only.</div>
-<p class="snote cap">Waiting for triage <b id="s-untriaged">0</b> &nbsp;&middot;&nbsp; Marked not relevant by rule in this window <b id="s-auto">0</b></p>
-<div class="scroller"><table>
-<thead><tr><th>Item</th><th>Component</th><th>First seen</th><th>Issue</th></tr></thead>
-<tbody id="t-untriaged"><tr><td colspan="4" class="empty">Not generated yet.</td></tr></tbody>
-</table></div>
-</section>
-
-<section class="block" id="tickets">
-<div class="shead"><h2>Open tickets</h2><span class="count" id="n-tickets">0 tickets</span></div>
-<p class="snote">Issues accepted in Linear and not yet closed, earliest due date first. The owner and the due date are set in Linear when the issue is accepted; a due date before today, a missing owner and a missing due date are shown in red.</p>
-<div class="scroller"><table>
-<thead><tr><th>Issue</th><th>Item</th><th>Component</th><th>Assignee</th><th>Due</th><th>State</th></tr></thead>
-<tbody id="t-tickets"><tr><td colspan="6" class="empty">Not generated yet.</td></tr></tbody>
-</table></div>
+</table></div></div>
 </section>
 
 <section class="block" id="sources">

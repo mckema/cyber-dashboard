@@ -26,7 +26,7 @@ fn nov() -> Period {
 }
 
 fn no_pdf() -> Opts {
-    Opts { pdf: false, tickets_as_of: None }
+    Opts { pdf: false, environment: Some("lab".into()), ..Default::default() }
 }
 
 fn idents(v: &Value) -> Vec<&str> {
@@ -62,7 +62,8 @@ fn november_figures() {
     assert_eq!(j["coverage"]["duplicates_dropped"], json!(2), "repeated id + second decision of B");
     assert_eq!(j["coverage"]["half_written_tail"], json!(true));
     assert_eq!(j["coverage"]["backfilled"], json!(0), "no triage.json");
-    assert_eq!(j["tracker"], json!({"endpoint": "http://linear-mock:8080/graphql", "lab_data": true}));
+    assert_eq!(j["tracker"], json!({"endpoint": "http://linear-mock:8080/graphql"}));
+    assert_eq!(j["marking"]["label"], json!("LAB DATA"), "EW_ENVIRONMENT unset = lab, tracker linear-mock");
     assert_eq!(j["components"][0]["decisions"], json!(7));
     assert_eq!(j["component_list"]["version"], json!("sample-2026-11-04"));
     // writing runs only: the dry run is out, fatal (no mode) and locked are in
@@ -222,7 +223,7 @@ fn data_sha_ignores_generated_at_only() {
     assert_ne!(a.json["generated_at"], b.json["generated_at"]);
     assert_eq!(a.data_sha, b.data_sha);
     let c = generate(&nov(), utc("2026-12-10T08:00:00Z"),
-                     &Opts { pdf: false, tickets_as_of: Some(utc("2026-11-30T12:00:00Z")) }).unwrap();
+                     &Opts { pdf: false, tickets_as_of: Some(utc("2026-11-30T12:00:00Z")), ..Default::default() }).unwrap();
     assert_ne!(a.data_sha, c.data_sha, "tickets as of is data");
     assert_eq!(c.as_of, "2026-11-30T12:00:00Z");
     assert_eq!(a.content_sha, c.content_sha, "content does not move with tickets as of");
@@ -234,7 +235,7 @@ fn content_sha_does_not_move_with_the_clock() {
     // Month to date, two cut-offs with no event in between (I on the 10th, E canceled on the 12th).
     let at = |s: &str| {
         let now = utc(s);
-        generate(&Period::MonthToDate, now, &Opts { pdf: false, tickets_as_of: Some(now) }).unwrap()
+        generate(&Period::MonthToDate, now, &Opts { pdf: false, tickets_as_of: Some(now), ..Default::default() }).unwrap()
     };
     let (a, b) = (at("2026-11-11T09:00:00Z"), at("2026-11-11T15:00:00Z"));
     assert_ne!(a.data_sha, b.data_sha, "the cut-off is data");
@@ -245,7 +246,7 @@ fn content_sha_does_not_move_with_the_clock() {
 fn month_to_date_runs_to_now() {
     let _t = lab("report-mtd");
     let now = utc("2026-11-10T12:00:00Z");
-    let g = generate(&Period::MonthToDate, now, &Opts { pdf: false, tickets_as_of: Some(now) }).unwrap();
+    let g = generate(&Period::MonthToDate, now, &Opts { pdf: false, tickets_as_of: Some(now), ..Default::default() }).unwrap();
     assert_eq!(g.label, "On-demand snapshot 2026-11 (to 2026-11-10) – not the official monthly report");
     assert!(g.dir.ends_with("reports/month-to-date"));
     let j = &g.json;
@@ -296,7 +297,8 @@ fn amsterdam_month_bounds_and_dst() {
         r#"{"id":"2","event":"decided","key":"k2","at":"2026-10-31T23:30:00Z","ts":"2026-10-01T00:00:00Z","decision":"matched"}"#, "\n",
     )).unwrap();
     let count = |(start, end): (DateTime<Utc>, DateTime<Utc>)| {
-        build::build(&log, &[], &build::Frame { start, end, cut: end, as_of: end, mtd: false, list: None })["funnel"]["notices"].clone()
+        build::build(&log, &[], &build::Frame { start, end, cut: end, as_of: end, mtd: false, list: None,
+                                                  environment: "lab".into(), test_run: false })["funnel"]["notices"].clone()
     };
     assert_eq!((count(b(2026, 10)), count(b(2026, 11))), (json!(1), json!(1)));
 }
@@ -383,7 +385,7 @@ impl Case {
         let now = utc(self.now);
         let (start, end) = nov().bounds(now);
         build::build(&log, &runs, &build::Frame { start, end, cut: end.min(now), as_of: now, mtd: false,
-                                                  list: Some(("abc".into(), 12)) })
+                                                  list: Some(("abc".into(), 12)), environment: "lab".into(), test_run: false })
     }
 }
 
@@ -539,10 +541,114 @@ fn previous_month_uses_the_same_rules() {
 #[ignore = "needs the typst CLI (TYPST_BIN); the job image has it"]
 fn renders_pdf_with_typst() {
     let _t = lab("report-pdf");
-    let g = generate(&nov(), utc("2026-12-03T08:00:00Z"), &Opts { pdf: true, tickets_as_of: None }).unwrap();
+    let g = generate(&nov(), utc("2026-12-03T08:00:00Z"), &Opts { pdf: true, ..Default::default() }).unwrap();
     let pdf = g.pdf.as_ref().unwrap();
     assert!(pdf.starts_with(b"%PDF-"));
     assert_eq!(g.pdf_sha, hex::encode(Sha256::digest(pdf)));
     let sums = std::fs::read_to_string(g.dir.join("SHA256SUMS")).unwrap();
     assert!(sums.ends_with(&format!("{}  report.pdf\n", g.pdf_sha)), "{sums}");
+}
+
+// ------------------------------------------------------------------ marking, KPI note, close events
+
+#[test]
+fn marking_by_environment() {
+    let mock = "http://linear-mock:8080/graphql";
+    let real = "https://api.linear.app/graphql";
+    assert_eq!(build::marking("lab", mock, false).0, "LAB DATA");
+    assert_eq!(build::marking("lab", real, false).0, "TEST DATA");
+    assert_eq!(build::marking("test", real, false).0, "TEST DATA");
+    assert_eq!(build::marking("test", mock, false).0, "LAB DATA");
+    assert_eq!(build::marking("production", real, false), ("", String::new()));
+    assert_eq!(build::marking(" Production ", mock, false).0, "", "production: no marking, whatever the tracker");
+    assert_eq!(build::marking("prod", real, false).0, "TEST DATA", "an unknown value is not production");
+    // --now: at least TEST DATA
+    let (label, notice) = build::marking("production", real, true);
+    assert_eq!(label, "TEST DATA");
+    assert!(notice.ends_with("not fairCT's. A test run with a set clock; not a report to send."), "{notice}");
+    assert_eq!(build::marking("lab", mock, true).0, "LAB DATA");
+    assert!(build::marking("lab", mock, true).1.ends_with("A test run with a set clock; not a report to send."));
+    assert!(environment_from(&|_| None) == "lab");
+    assert_eq!(environment_from(&|_| Some(" TEST ".into())), "test");
+}
+
+#[test]
+fn marking_in_report_json_and_fix_target_note() {
+    let _t = lab("report-marking");
+    let opts = |env: &str| Opts { pdf: false, environment: Some(env.into()), ..Default::default() };
+    let now = utc("2026-12-03T08:00:00Z");
+    let j = generate(&nov(), now, &opts("production")).unwrap().json;
+    assert_eq!(j["marking"], json!({"label": "", "notice": "", "environment": "production", "test_run": false}));
+    let j = generate(&nov(), now, &Opts { test_run: true, ..opts("production") }).unwrap().json;
+    assert_eq!(j["marking"]["label"], json!("LAB DATA"), "--now: marked; the fixture's tracker is linear-mock");
+    let fixed = j["kpis"].as_array().unwrap().iter().find(|k| k["key"] == "fixed").unwrap();
+    assert_eq!((fixed["target"].clone(), fixed["target_note"].clone()),
+               (json!("≥ 95%"), json!("team proposal, pending agreement")));
+    let open = j["kpis"].as_array().unwrap().iter().find(|k| k["key"] == "open").unwrap();
+    assert_eq!(open["target_note"], Value::Null);
+    // The template prints the marking and the note, not a fixed LAB DATA.
+    let t = pdf::TEMPLATE;
+    assert!(!t.contains("[LAB DATA]") && !t.contains("lab_data"));
+    assert!(t.contains("#let mark = d.marking.label") && t.contains("k.target_note"));
+    assert!(t.contains("team proposal pending agreement") && t.contains("NIST SP 800-40r4"));
+    assert!(t.contains("Quality check sample — automatically ruled-out items"));
+}
+
+/// The monthly close appends report_frozen, sample_drawn and review_issue_created
+/// with key report:YYYY-MM to the same log: the report counts nothing new.
+#[test]
+fn close_events_do_not_change_the_report() {
+    let t = temp_state("report-close-events");
+    // The fixture without its half-written last line, which an append would turn into a bad middle line.
+    let raw = String::from_utf8(fixture("report_events.jsonl")).unwrap();
+    let clean: String = raw.lines().filter(|l| serde_json::from_str::<Value>(l).is_ok()).map(|l| format!("{l}\n")).collect();
+    std::fs::write(t.dir.join(EVENTS_FILE), &clean).unwrap();
+    std::fs::write(t.dir.join("runs.jsonl"), fixture("report_runs.jsonl")).unwrap();
+    let now = utc("2026-12-03T08:00:00Z");
+    let before = generate(&nov(), now, &no_pdf()).unwrap();
+    let mtd_now = utc("2026-11-25T08:00:00Z");
+    let mtd = |n| generate(&Period::MonthToDate, n, &Opts { tickets_as_of: Some(n), ..no_pdf() }).unwrap();
+    let mtd_before = mtd(mtd_now);
+    let ev = |kind: &str, at: &str, f: Value| crate::triage::store::event(kind, "report:2026-11", at, &[kind], now, "live", f);
+    crate::feeds::state::append_jsonl(EVENTS_FILE, &[
+        ev("report_frozen", "2026-11-20T06:00:00Z", json!({"data_sha": "x", "pdf_sha": "y", "marking": "LAB DATA"})),
+        ev("sample_drawn", "2026-11-20T06:00:00Z", json!({"size": 10, "candidates": 1, "keys": ["GitHub:GHSA-gggg"]})),
+        ev("review_issue_created", "2026-11-20T06:00:01Z", json!({"issue_id": "i", "identifier": "MOCK-9", "url": "u"})),
+    ]);
+    let after = generate(&nov(), now, &no_pdf()).unwrap();
+    assert_eq!(after.data_sha, before.data_sha, "same data");
+    assert_eq!(after.json["funnel"], before.json["funnel"]);
+    assert_eq!(after.json["kpis"], before.json["kpis"]);
+    assert_eq!(after.json["coverage"]["duplicates_dropped"], before.json["coverage"]["duplicates_dropped"]);
+    assert_eq!(after.json["exceptions"]["log_lines_skipped"], json!(0));
+    let mtd_after = mtd(mtd_now);
+    assert_eq!((mtd_after.data_sha, mtd_after.as_of), (mtd_before.data_sha, mtd_before.as_of));
+    let log = model::read_events(&std::fs::read_to_string(t.dir.join(EVENTS_FILE)).unwrap()).unwrap();
+    assert!(log.events.iter().all(|e| !e.key.starts_with("report:")));
+}
+
+#[test]
+#[ignore = "needs the typst CLI (TYPST_BIN); the job image has it"]
+fn renders_monthly_pdf_with_sample_and_test_marking() {
+    let _t = lab("report-pdf-monthly");
+    let sample = json!({"size": 10, "candidates": 2, "seed": "ab".repeat(32), "method": "m", "note": "",
+                        "items": [{"key": "GitHub Advisory:GHSA-gggg-1111-2222", "source": "GitHub Advisory",
+                                   "first_seen": "2026-11-02T09:30:00+01:00", "title": "G: a library [x] #1 *bold* _u_ $5",
+                                   "vendor_product": "npm:left-pad", "url": "https://github.com/advisories/GHSA-gggg-1111-2222",
+                                   "from": "triage.json"},
+                                  {"key": "NCSC-NL:NCSC-2026-0001", "source": "NCSC-NL", "first_seen": "2026-11-03T09:30:00+01:00",
+                                   "title": "", "vendor_product": "", "url": "", "from": "key"}]});
+    let opts = Opts { pdf: true, environment: Some("production".into()), test_run: true, sample: Some(sample),
+                      ..Default::default() };
+    let g = generate(&nov(), utc("2026-12-01T05:00:00Z"), &opts).unwrap();
+    assert!(g.pdf.as_ref().unwrap().starts_with(b"%PDF-"));
+    assert_eq!(g.json["marking"]["label"], json!("LAB DATA"));
+    // and an empty sample, production without marking
+    std::fs::remove_dir_all(g.dir.clone()).unwrap();
+    let empty = json!({"size": 10, "candidates": 0, "seed": "cd".repeat(32), "method": "m",
+                       "note": "No automatically ruled-out items in the period.", "items": []});
+    let g = generate(&nov(), utc("2026-12-01T05:00:00Z"),
+                     &Opts { pdf: true, environment: Some("production".into()), sample: Some(empty), ..Default::default() }).unwrap();
+    assert!(g.pdf.as_ref().unwrap().starts_with(b"%PDF-"));
+    assert_eq!(g.json["marking"]["label"], json!(""));
 }

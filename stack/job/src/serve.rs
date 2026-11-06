@@ -1,30 +1,40 @@
-//! Local lab only: a small HTTP service behind the dashboard's "Refresh & download"
-//! link. On GET /report/month-to-date.pdf it reads the tracker back, re-splices the
-//! two ticket tables into the wiki page and returns a fresh month-to-date report
-//! (FR-A4 on demand). Production design (Cloud Run behind IAP) is in README §Deployment.
+//! Local lab only: a small HTTP service behind two links on the dashboard. "Export
+//! snapshot" (GET /report/month-to-date.pdf) and "Refresh tickets" (GET /refresh)
+//! both read the tracker back, rebuild the month-to-date report (FR-A4 on demand) and
+//! re-splice the Linear section of the wiki page (two ticket tables, their counters,
+//! the summary line); the first returns the PDF, the second sends the browser back
+//! to the page. Production design (Cloud Run behind IAP) is in README §Deployment.
 //!
 //! Routes:
 //!   GET /healthz                   200 "ok" (compose healthcheck: `serve --healthcheck`)
-//!   GET /report/month-to-date.pdf  the refresh flow below; any other method 405
-//!   anything else                  404
+//!   GET /report/month-to-date.pdf  the refresh flow below, answered with the PDF
+//!   GET /refresh                   the refresh flow below, answered with 303 to
+//!                                  WIKI_PUBLIC_URL (200 "Refreshed. Go back to the page."
+//!                                  when it is not set)
+//!   other methods on these paths   405; anything else 404
 //!
 //! Refresh flow, one request at a time (tiny_http, single thread: /healthz waits
 //! while a refresh runs):
-//!   1. Within SERVE_COOLDOWN_SECONDS of the last successful refresh: the last PDF.
+//!   1. Within SERVE_COOLDOWN_SECONDS of the last successful refresh (either route):
+//!      no refresh; the last PDF, or the redirect to the page.
 //!   2. Take state/run.lock, trying every 2 s for up to SERVE_LOCK_WAIT_SECONDS. Still
 //!      held by a run: the last PDF (`X-Report-Refreshed: false`), or 503 with
-//!      `Retry-After` when there is none yet.
+//!      `Retry-After` when there is none yet; /refresh always answers 503.
 //!   3. Under the lock: tracker read-back into state/triage.json (no read-back when
-//!      LINEAR_MODE=off), rebuild t-untriaged, t-tickets, n-untriaged, n-tickets and
-//!      s-untriaged (not s-auto, which counts a run's window), splice them into the
-//!      page with its stamp kept, write the page when it changed, then
-//!      report::publish_month_to_date. Any error there: the last PDF, else 500.
-//!   4. One runs.jsonl line per report request: mode "serve", result
-//!      refreshed | cooldown | locked | error, seconds, error, updated.
+//!      LINEAR_MODE=off), report::publish_month_to_date, then rebuild t-untriaged,
+//!      t-tickets, n-untriaged, n-tickets and s-untriaged (not s-auto, which counts a
+//!      run's window) and, from the report, l-summary and l-refresh; splice them into
+//!      the page with its stamp kept and write the page when it changed. A report
+//!      error leaves the summary as it was (the tables are still spliced). Any
+//!      error: the last PDF, else 500 (/refresh: 500).
+//!   4. One runs.jsonl line per request on either route: mode "serve", route, result
+//!      refreshed | cooldown | locked | error, seconds, error, updated, page_written.
 //!
 //! Environment (besides the ones `run` reads, see run.rs):
 //!   SERVE_COOLDOWN_SECONDS   60   no new refresh this soon after the last one
 //!   SERVE_LOCK_WAIT_SECONDS  90   how long a request waits for a run to finish
+//!   WIKI_PUBLIC_URL          —    the page as the browser sees it (WIKI_BASE is the
+//!                                 container-internal wiki URL); /refresh redirects there
 
 use std::any::Any;
 use std::io::{Read, Write};
@@ -55,6 +65,7 @@ pub struct Args {
 
 pub const HEALTH_PATH: &str = "/healthz";
 pub const REPORT_PATH: &str = "/report/month-to-date.pdf";
+pub const REFRESH_PATH: &str = "/refresh";
 /// File name the browser saves the PDF as.
 pub const DOWNLOAD_NAME: &str = "fairct-resolution-report-month-to-date.pdf";
 /// Retry-After (seconds) on a 503 while a run holds the lock and no PDF exists yet.
@@ -105,6 +116,26 @@ impl Reply {
         Reply { status: 200, headers, body: bytes, log }
     }
 
+    /// /refresh done (or skipped: `stale` = cooldown): 303 to the page when its public
+    /// URL is known, else a line of text.
+    fn back(page_url: Option<&str>, stale: Option<&str>, cooldown_secs: i64) -> Self {
+        let mut r = match page_url {
+            Some(u) => {
+                let mut r = Reply::text(303, format!("Refreshed. Back to {u}"));
+                r.headers.push(("Location", u.to_string()));
+                r
+            }
+            None if stale.is_some() => Reply::text(200, format!(
+                "Already refreshed in the last {cooldown_secs} s. Go back to the page.")),
+            None => Reply::text(200, "Refreshed. Go back to the page."),
+        };
+        r.headers.push(("X-Report-Refreshed", stale.is_none().to_string()));
+        if let Some(why) = stale {
+            r.headers.push(("X-Report-Reason", why.into()));
+        }
+        r
+    }
+
     /// Value of the first header called `name` (ASCII case-insensitive).
     #[cfg(test)]
     pub fn header(&self, name: &str) -> Option<&str> {
@@ -148,11 +179,13 @@ pub struct State {
     pub lock_wait_secs: u64,
     /// Time of the last successful refresh since the service started.
     pub last_refresh: Option<DateTime<Utc>>,
+    /// WIKI_PUBLIC_URL: where /refresh sends the browser back to.
+    pub page_url: Option<String>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { cooldown_secs: 60, lock_wait_secs: 90, last_refresh: None }
+        State { cooldown_secs: 60, lock_wait_secs: 90, last_refresh: None, page_url: None }
     }
 }
 
@@ -163,7 +196,12 @@ impl State {
             cooldown_secs: env_num("SERVE_COOLDOWN_SECONDS", d.cooldown_secs),
             lock_wait_secs: env_num("SERVE_LOCK_WAIT_SECONDS", d.lock_wait_secs),
             last_refresh: None,
+            page_url: std::env::var("WIKI_PUBLIC_URL").ok().map(|u| u.trim().to_string()).filter(|u| !u.is_empty()),
         }
+    }
+
+    fn cooling(&self, now: DateTime<Utc>) -> bool {
+        self.last_refresh.is_some_and(|t| now - t < Duration::seconds(self.cooldown_secs))
     }
 }
 
@@ -180,7 +218,7 @@ fn clip(s: &str, n: usize) -> String {
 /// One HTTP request -> reply. `url` may carry a query string; `now` is the request time.
 pub fn handle(method: &str, url: &str, now: DateTime<Utc>, st: &mut State, be: &mut dyn Backend) -> Reply {
     let path = url.split('?').next().unwrap_or("");
-    if path != HEALTH_PATH && path != REPORT_PATH {
+    if ![HEALTH_PATH, REPORT_PATH, REFRESH_PATH].contains(&path) {
         return Reply::text(404, "not found");
     }
     if method != "GET" {
@@ -192,52 +230,101 @@ pub fn handle(method: &str, url: &str, now: DateTime<Utc>, st: &mut State, be: &
         return Reply::text(200, "ok");
     }
     let t0 = Instant::now();
-    let (reply, mut rec) = refresh_flow(now, st, be);
+    let (reply, mut rec) = if path == REFRESH_PATH { page_flow(now, st, be) } else { refresh_flow(now, st, be) };
     rec["run_at"] = json!(iso_utc(now));
     rec["mode"] = json!("serve");
+    rec["route"] = json!(path);
     rec["seconds"] = json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0);
     be.record(&rec);
     reply
 }
 
-/// The refresh flow (module doc). Returns the reply and the runs.jsonl fields
-/// result, error and updated.
-fn refresh_flow(now: DateTime<Utc>, st: &mut State, be: &mut dyn Backend) -> (Reply, Value) {
-    if st.last_refresh.is_some_and(|t| now - t < Duration::seconds(st.cooldown_secs)) {
-        // Without a PDF on disk (deleted by hand) the cooldown does not apply.
-        if let Some((pdf, as_of)) = be.last_pdf() {
-            return (Reply::pdf(pdf, &as_of, Some("cooldown")), json!({"result": "cooldown"}));
-        }
-    }
+/// Outcome of trying to take the run lock for one request.
+enum Locked {
+    /// Held, after waiting this many seconds.
+    Held(Guard, u64),
+    /// Still held by a run after the wait: runs.jsonl error text.
+    Busy(String),
+    /// The lock file cannot be used.
+    Failed(String),
+}
 
+/// Take state/run.lock, trying every LOCK_POLL_SECS for up to SERVE_LOCK_WAIT_SECONDS.
+fn take_lock(st: &State, be: &mut dyn Backend) -> Locked {
     let attempts = st.lock_wait_secs / LOCK_POLL_SECS + 1;
     let mut waited = 0;
     let mut holder = String::new();
-    let mut guard = None;
     for i in 0..attempts {
         if i > 0 {
             be.sleep(LOCK_POLL_SECS);
             waited += LOCK_POLL_SECS;
         }
         match be.try_lock() {
-            Ok(Ok(g)) => {
-                guard = Some(g);
-                break;
-            }
+            Ok(Ok(g)) => return Locked::Held(g, waited),
             Ok(Err(h)) => holder = h,
-            Err(e) => return failed(be, "error", &e.0),
+            Err(e) => return Locked::Failed(e.0),
         }
     }
-    let Some(guard) = guard else {
-        let msg = format!("another run holds {}/run.lock ({holder}); waited {waited} s", state::dir().display());
-        return match be.last_pdf() {
-            Some((pdf, as_of)) => (Reply::pdf(pdf, &as_of, Some("locked")), json!({"result": "locked", "error": clip(&msg, 300)})),
-            None => {
-                let mut r = Reply::text(503, "A run is updating the data and there is no earlier report yet; try again in a few minutes.");
-                r.headers.push(("Retry-After", RETRY_AFTER_SECS.to_string()));
-                (r, json!({"result": "locked", "error": clip(&msg, 300)}))
+    let msg = format!("another run holds {}/run.lock ({holder}); waited {waited} s", state::dir().display());
+    Locked::Busy(clip(&msg, 300))
+}
+
+/// GET /refresh (module doc): refresh, then back to the page.
+fn page_flow(now: DateTime<Utc>, st: &mut State, be: &mut dyn Backend) -> (Reply, Value) {
+    if st.cooling(now) {
+        return (Reply::back(st.page_url.as_deref(), Some("cooldown"), st.cooldown_secs), json!({"result": "cooldown"}));
+    }
+    let fail = |err: &str| {
+        eprintln!("serve: error: {err}");
+        (Reply::text(500, format!("Refresh failed: {}", clip(err, 300))), json!({"result": "error", "error": clip(err, 300)}))
+    };
+    match take_lock(st, be) {
+        Locked::Failed(e) => fail(&e),
+        Locked::Busy(msg) => {
+            let mut r = Reply::text(503, "A scheduled run is updating the data; the page shows it when the run ends. \
+                                          Go back to the page and try again in a few minutes.");
+            r.headers.push(("Retry-After", RETRY_AFTER_SECS.to_string()));
+            (r, json!({"result": "locked", "error": msg}))
+        }
+        Locked::Held(guard, waited) => {
+            let at = now + Duration::seconds(waited as i64);
+            let res = be.refresh(at);
+            drop(guard);
+            match res {
+                Ok(Refreshed { updated, page_written, .. }) => {
+                    st.last_refresh = Some(at);
+                    (Reply::back(st.page_url.as_deref(), None, st.cooldown_secs),
+                     json!({"result": "refreshed", "updated": updated, "page_written": page_written}))
+                }
+                Err(e) => fail(&e.0),
             }
-        };
+        }
+    }
+}
+
+/// The refresh flow (module doc). Returns the reply and the runs.jsonl fields
+/// result, error and updated.
+fn refresh_flow(now: DateTime<Utc>, st: &mut State, be: &mut dyn Backend) -> (Reply, Value) {
+    if st.cooling(now) {
+        // Without a PDF on disk (deleted by hand) the cooldown does not apply.
+        if let Some((pdf, as_of)) = be.last_pdf() {
+            return (Reply::pdf(pdf, &as_of, Some("cooldown")), json!({"result": "cooldown"}));
+        }
+    }
+
+    let (guard, waited) = match take_lock(st, be) {
+        Locked::Held(g, w) => (g, w),
+        Locked::Failed(e) => return failed(be, "error", &e),
+        Locked::Busy(msg) => {
+            return match be.last_pdf() {
+                Some((pdf, as_of)) => (Reply::pdf(pdf, &as_of, Some("locked")), json!({"result": "locked", "error": msg})),
+                None => {
+                    let mut r = Reply::text(503, "A run is updating the data and there is no earlier report yet; try again in a few minutes.");
+                    r.headers.push(("Retry-After", RETRY_AFTER_SECS.to_string()));
+                    (r, json!({"result": "locked", "error": msg}))
+                }
+            };
+        }
     };
 
     let at = now + Duration::seconds(waited as i64);
@@ -278,9 +365,14 @@ impl Backend for Live {
     }
 
     fn refresh(&mut self, now: DateTime<Utc>) -> Result<Refreshed, Fatal> {
-        let (updated, page_written) = refresh_tickets(now)?;
-        let report = report::publish_month_to_date(now)?;
-        Ok(Refreshed { report, updated, page_written })
+        let (view, updated) = read_back(now)?;
+        let report = report::publish_month_to_date(now);
+        let mut regions = render::ticket_regions(&view, now);
+        if let Ok(g) = &report {
+            regions.html = render::linear_regions(Some(&g.json), std::env::var("SERVE_PUBLIC_URL").ok().as_deref());
+        }
+        let page_written = splice_page(regions)?;
+        Ok(Refreshed { report: report?, updated, page_written })
     }
 
     fn last_pdf(&self) -> Option<(Vec<u8>, String)> {
@@ -305,9 +397,9 @@ fn mode_note(t: &Result<Option<Box<dyn tracker::Tracker>>, tracker::TrackerError
     }
 }
 
-/// Read the tracker back into state/triage.json and re-splice the two ticket
-/// tables into the page. Returns (records changed, page written).
-fn refresh_tickets(now: DateTime<Utc>) -> Result<(usize, bool), Fatal> {
+/// Read the tracker back into state/triage.json. Returns the triage tables' view
+/// and the number of records changed.
+fn read_back(now: DateTime<Utc>) -> Result<(render::TriageView, usize), Fatal> {
     let mut store = Store::load()?;
     let mut t = tracker::from_env();
     let note = mode_note(&t);
@@ -320,9 +412,7 @@ fn refresh_tickets(now: DateTime<Utc>) -> Result<(usize, bool), Fatal> {
         }
     }
     store.save();
-    let view = step::view(&store, &[], now, note);
-    let written = splice_page(render::ticket_regions(&view, now))?;
-    Ok((updated, written))
+    Ok((step::view(&store, &[], now, note), updated))
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -416,8 +506,9 @@ pub fn main(args: Args) -> Result<i32, Fatal> {
     let mut st = State::from_env();
     let server = tiny_http::Server::http(("0.0.0.0", args.port))
         .map_err(|e| Fatal(format!("serve: cannot listen on 0.0.0.0:{}: {e}", args.port)))?;
-    println!("{} serve listening on 0.0.0.0:{}, state {}, cooldown {} s, lock wait {} s",
-             iso_utc(state::utcnow()), args.port, state::dir().display(), st.cooldown_secs, st.lock_wait_secs);
+    println!("{} serve listening on 0.0.0.0:{}, state {}, cooldown {} s, lock wait {} s, page {}",
+             iso_utc(state::utcnow()), args.port, state::dir().display(), st.cooldown_secs, st.lock_wait_secs,
+             st.page_url.as_deref().unwrap_or("(WIKI_PUBLIC_URL not set)"));
     let mut be = Live;
     for req in server.incoming_requests() {
         serve_one(req, &mut st, &mut be);
@@ -629,6 +720,87 @@ mod tests {
         let r = get(&mut st, &mut be);
         assert_eq!((r.status, r.header("X-Report-Reason")), (200, Some("error")));
         assert!(be.refreshes.is_empty());
+    }
+
+    const PAGE: &str = "http://localhost:3000/en/CTP/run-books/Cyber-Exploit-Watch";
+
+    fn page_state() -> State {
+        State { page_url: Some(PAGE.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn refresh_redirects_to_the_page() {
+        let (mut st, mut be) = (page_state(), Fake::default());
+        let r = handle("GET", "/refresh?from=page", now(), &mut st, &mut be);
+        assert_eq!((r.status, r.header("Location")), (303, Some(PAGE)));
+        assert_eq!((r.header("X-Report-Refreshed"), r.header("Cache-Control")), (Some("true"), Some("no-store")));
+        assert_eq!(be.refreshes, [now()]);
+        assert!(!be.held.get(), "lock released after the refresh");
+        assert_eq!(st.last_refresh, Some(now()));
+        let rec = &be.records[0];
+        assert_eq!((rec["mode"].as_str(), rec["route"].as_str(), rec["result"].as_str()),
+                   (Some("serve"), Some("/refresh"), Some("refreshed")));
+        assert_eq!((rec["updated"].as_u64(), rec["page_written"].as_bool()), (Some(2), Some(true)));
+        assert_eq!(handle("POST", REFRESH_PATH, now(), &mut st, &mut be).status, 405);
+        assert_eq!(be.records.len(), 1, "a refused method is not recorded");
+    }
+
+    #[test]
+    fn refresh_without_page_url_says_go_back() {
+        let (mut st, mut be) = (State::default(), Fake::default());
+        let r = handle("GET", REFRESH_PATH, now(), &mut st, &mut be);
+        assert_eq!((r.status, r.header("Location")), (200, None));
+        assert_eq!(r.body, b"Refreshed. Go back to the page.");
+        let r = handle("GET", REFRESH_PATH, now() + Duration::seconds(5), &mut st, &mut be);
+        assert_eq!((r.status, r.header("X-Report-Reason")), (200, Some("cooldown")));
+        assert!(String::from_utf8_lossy(&r.body).starts_with("Already refreshed in the last 60 s."));
+    }
+
+    /// One cooldown for both routes: a refresh of either kind starts it.
+    #[test]
+    fn refresh_cooldown() {
+        let (mut st, mut be) = (page_state(), Fake::default());
+        assert_eq!(handle("GET", REFRESH_PATH, now(), &mut st, &mut be).status, 303);
+        let soon = now() + Duration::seconds(59);
+        let r = handle("GET", REFRESH_PATH, soon, &mut st, &mut be);
+        assert_eq!((r.status, r.header("Location")), (303, Some(PAGE)));
+        assert_eq!((r.header("X-Report-Refreshed"), r.header("X-Report-Reason")), (Some("false"), Some("cooldown")));
+        assert_eq!((be.refreshes.len(), be.lock_calls), (1, 1), "no refresh and no lock attempt during the cooldown");
+        assert_eq!(be.records[1]["result"], "cooldown");
+        // The PDF built by /refresh is served without a new refresh.
+        let r = handle("GET", REPORT_PATH, soon, &mut st, &mut be);
+        assert_eq!((r.status, r.header("X-Report-Reason")), (200, Some("cooldown")));
+        assert_eq!(be.records[2]["route"], REPORT_PATH);
+        let later = now() + Duration::seconds(60);
+        assert_eq!(handle("GET", REFRESH_PATH, later, &mut st, &mut be).header("X-Report-Refreshed"), Some("true"));
+        assert_eq!(be.refreshes, [now(), later]);
+        // And a PDF click starts it for /refresh.
+        let (mut st, mut be) = (page_state(), Fake::default());
+        assert_eq!(get(&mut st, &mut be).header("X-Report-Refreshed"), Some("true"));
+        let r = handle("GET", REFRESH_PATH, now() + Duration::seconds(1), &mut st, &mut be);
+        assert_eq!((r.status, r.header("X-Report-Reason")), (303, Some("cooldown")));
+    }
+
+    #[test]
+    fn refresh_locked_or_failed() {
+        let mut st = State { lock_wait_secs: 4, ..page_state() };
+        let mut be = Fake { busy: u32::MAX, last: old_pdf(), ..Default::default() };
+        let r = handle("GET", REFRESH_PATH, now(), &mut st, &mut be);
+        assert_eq!((r.status, r.header("Retry-After"), r.header("Location")), (503, Some("120"), None));
+        assert_eq!((be.lock_calls, be.slept), (3, 4));
+        assert_eq!(be.records[0]["result"], "locked");
+        assert!(be.refreshes.is_empty() && st.last_refresh.is_none());
+        let mut be = Fake { fail: Some("tracker read-back: Linear: network error".into()), ..Default::default() };
+        let r = handle("GET", REFRESH_PATH, now(), &mut st, &mut be);
+        assert_eq!(r.status, 500);
+        assert!(String::from_utf8_lossy(&r.body).contains("tracker read-back"));
+        assert_eq!((be.records[0]["result"].as_str(), st.last_refresh), (Some("error"), None));
+        assert!(!be.held.get());
+        let mut be = Fake { lock_error: true, ..Default::default() };
+        assert_eq!(handle("GET", REFRESH_PATH, now(), &mut st, &mut be).status, 500);
+        // A report without a PDF is no error for the page.
+        let mut be = Fake { no_pdf: true, ..Default::default() };
+        assert_eq!(handle("GET", REFRESH_PATH, now(), &mut st, &mut be).status, 303);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //!   exploit-watch demo OUT.html [--dark]
 //!   exploit-watch triage --report
 //!   exploit-watch report (--month YYYY-MM | --month-to-date) [--no-pdf]
+//!   exploit-watch report --close-month [--month YYYY-MM] [--now RFC3339]
 //!   exploit-watch serve [--port 8090] [--healthcheck]
 //!
 //! See README.md (Architecture) for how the pieces fit together.

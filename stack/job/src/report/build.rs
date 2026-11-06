@@ -48,6 +48,37 @@ pub struct Frame {
     /// The component list the job can load now: (sha256, number of components). The
     /// count is printed only when the sha is that of the list the period used.
     pub list: Option<(String, usize)>,
+    /// EW_ENVIRONMENT: lab | test | production (marking()).
+    pub environment: String,
+    /// A test run with a set clock (`report --close-month --now`): marked at least TEST DATA.
+    pub test_run: bool,
+}
+
+/// Target share of fixes by due date: a team proposal, not agreed yet (printed with the KPI).
+const FIX_TARGET_NOTE: &str = "team proposal, pending agreement";
+
+/// The data marking on every page of the PDF ("" = none), and its one-line notice.
+/// production: none (unless a test run); otherwise "LAB DATA" when the tracker is
+/// linear-mock, else "TEST DATA". A test run is marked at least TEST DATA. Any
+/// value other than "production" counts as a test environment.
+pub fn marking(environment: &str, endpoint: &str, test_run: bool) -> (&'static str, String) {
+    let production = environment.trim().eq_ignore_ascii_case("production");
+    let label = if production && !test_run {
+        ""
+    } else if endpoint.contains("linear-mock") {
+        "LAB DATA"
+    } else {
+        "TEST DATA"
+    };
+    let mut notice = match label {
+        "" => String::new(),
+        "LAB DATA" => "tickets, owners and dates come from a simulated tracker (linear-mock), not from fairCT's.".into(),
+        _ => "built in a test environment: tickets, owners and dates are not fairCT's.".into(),
+    };
+    if test_run {
+        notice = format!("{} A test run with a set clock; not a report to send.", notice.trim_end());
+    }
+    (label, notice)
 }
 
 /// Feeds whose failure for more than two days turns the report red (and aborts a run).
@@ -355,6 +386,8 @@ struct Kpi {
     target: &'static str,
     /// None: not rated ("—").
     status: Option<Rag>,
+    /// Printed under the target (e.g. that the target is not agreed yet).
+    target_note: Option<&'static str>,
 }
 
 /// The KPI rows and every reason a rule fired (RAG rules, printed in the PDF):
@@ -397,7 +430,7 @@ fn kpis(f: &Facts) -> (Vec<Kpi>, Vec<Reason>) {
                              (0, n) => format!("—; {n} without a reason"),
                              (y, 0) => pct(ok, y),
                              (y, n) => format!("{}; {n} without a reason", pct(ok, y)),
-                         }, target: "100%", status: Some(worst(&rs)) };
+                         }, target: "100%", target_note: None, status: Some(worst(&rs)) };
     all.append(&mut rs);
 
     // open actions
@@ -420,7 +453,7 @@ fn kpis(f: &Facts) -> (Vec<Kpi>, Vec<Reason>) {
         }
     }
     let open = Kpi { key: "open", label: "Open actions (of which overdue)",
-                     value: format!("{} ({} overdue)", f.open.len(), f.overdue.len()), target: "0 overdue",
+                     value: format!("{} ({} overdue)", f.open.len(), f.overdue.len()), target: "0 overdue", target_note: None,
                      status: Some(worst(&rs)) };
     all.append(&mut rs);
 
@@ -432,17 +465,17 @@ fn kpis(f: &Facts) -> (Vec<Kpi>, Vec<Reason>) {
     } else if on_time as f64 >= FIX_TARGET * n as f64 {
         Some(Rag::Green)
     } else {
-        all.push(reason(Rag::Amber, format!("fixes by due date: {}, below the 95% target", pct(on_time, n)), false));
+        all.push(reason(Rag::Amber, format!("fixes by due date: {}, below the proposed 95% target", pct(on_time, n)), false));
         Some(Rag::Amber)
     };
     let fixed = Kpi { key: "fixed", label: "Fixed by due date", value: if n == 0 { "—".into() } else { pct(on_time, n) },
-                      target: "≥ 95%", status: fixed_status };
+                      target: "≥ 95%", target_note: Some(FIX_TARGET_NOTE), status: fixed_status };
 
     // known exploited still open (its red reason is listed under open actions)
     let expl: Vec<&String> = f.open.iter().filter(|k| f.it(k).exploited).collect();
     let expl_overdue = expl.iter().any(|k| f.overdue.contains(*k));
     let exploited = Kpi { key: "exploited", label: "Known-exploited items still open", value: expl.len().to_string(),
-                          target: "0 overdue", status: Some(if expl_overdue { Rag::Red } else { Rag::Green }) };
+                          target: "0 overdue", target_note: None, status: Some(if expl_overdue { Rag::Red } else { Rag::Green }) };
 
     // sources
     for (core, since) in &f.core_down {
@@ -462,7 +495,7 @@ fn kpis(f: &Facts) -> (Vec<Kpi>, Vec<Reason>) {
     let good = f.sources.iter().filter(|(_, s)| healthy(s)).count();
     let sources = Kpi { key: "sources", label: "Sources healthy",
                         value: if f.sources.is_empty() { "no data".into() } else { format!("{good}/{}", f.sources.len()) },
-                        target: "all", status: Some(worst(&rs)) };
+                        target: "all", target_note: None, status: Some(worst(&rs)) };
     all.append(&mut rs);
 
     // tracker (not a KPI row; counts for the report status)
@@ -472,7 +505,7 @@ fn kpis(f: &Facts) -> (Vec<Kpi>, Vec<Reason>) {
                           attention: true, monitoring: true });
     }
 
-    let relevant = Kpi { key: "relevant", label: "Relevant to fairCT", value: f.relevant.len().to_string(), target: "—", status: None };
+    let relevant = Kpi { key: "relevant", label: "Relevant to fairCT", value: f.relevant.len().to_string(), target: "—", target_note: None, status: None };
     (vec![relevant, assessed, open, fixed, exploited, sources], all)
 }
 
@@ -577,7 +610,7 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
             Some(p) => p.iter().find(|q| q.key == k.key).map(|q| q.value.clone()).unwrap_or_else(|| "no data".into()),
         };
         json!({"key": k.key, "label": k.label, "value": k.value, "target": k.target,
-               "status": k.status.map_or("—", Rag::title), "previous": previous})
+               "status": k.status.map_or("—", Rag::title), "previous": previous, "target_note": k.target_note})
     }).collect();
     let mut sorted = reasons.clone();
     sorted.sort_by(|a, b| b.rag.cmp(&a.rag));
@@ -746,6 +779,7 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
     let endpoint = runs.iter().filter(|r| r.at < f.cut).rev().find_map(|r| endpoint_of(&r))
         .or_else(|| runs.iter().rev().find_map(|r| endpoint_of(&r)))
         .unwrap_or_default();
+    let mark = marking(&f.environment, &endpoint, f.test_run);
 
     // ---------------------------------------------------------- coverage sentence
     let names: Vec<&str> = fa.sources.iter().map(|(n, _)| n.as_str()).collect();
@@ -795,7 +829,8 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
         "coverage": {"from": local(log.coverage_from), "partial": f.start < log.coverage_from,
                      "duplicates_dropped": log.duplicates, "half_written_tail": log.half_written_tail,
                      "backfilled": log.events.iter().filter(|e| e.v.get("backfilled").is_some()).count()},
-        "tracker": {"endpoint": endpoint, "lab_data": endpoint.contains("linear-mock")},
+        "tracker": {"endpoint": endpoint},
+        "marking": {"label": mark.0, "notice": mark.1, "environment": f.environment, "test_run": f.test_run},
         "components": components.into_iter()
             .map(|((v, s), n)| json!({"version": v, "sha256": s, "decisions": n})).collect::<Vec<_>>(),
         "component_list": component_list,

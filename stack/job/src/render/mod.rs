@@ -19,6 +19,12 @@
 //!   text   s-kev s-crit s-high s-dep s-adv s-untriaged s-auto
 //!          n-health n-kev n-adv n-dep n-nvd n-cvecap n-untriaged n-tickets winlabel
 //!   stamp  rstat   (inner HTML, contains <b>; must never contain a <div>)
+//!   html   l-summary l-refresh   (inner HTML of a <div>, spans and links only, never a <div>)
+//!
+//! The Linear section (since 2026-11-06 above the feed health table) opens with a
+//! summary line of the month-to-date report (`l-summary`, numbers from report.json so
+//! that the page and the PDF agree) and the "Refresh tickets" link with the tickets'
+//! "as of" time (`l-refresh`, changes every run).
 //!
 //! The triage tables take a TriageView, built by the caller from the triage
 //! store and the tracker; render does not depend on the triage module's types.
@@ -38,9 +44,10 @@ mod tables;
 
 use std::sync::LazyLock;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::feeds::common::{Fatal, Item, parse_iso};
 
@@ -58,6 +65,8 @@ pub const TEXT_IDS: [&str; 16] = [
     "n-health", "n-kev", "n-adv", "n-dep", "n-nvd", "n-cvecap", "n-untriaged", "n-tickets", "winlabel",
 ];
 pub const STAMP_ID: &str = "rstat";
+/// <div> regions with inline markup (spans, b, a), never a nested <div>.
+pub const HTML_IDS: [&str; 2] = ["l-summary", "l-refresh"];
 
 /// Page content and scriptCss, relative to the repo root (the job and demo run from there).
 pub const SKELETON_PATH: &str = "stack/wiki/page/skeleton.html";
@@ -125,21 +134,24 @@ pub struct TriageView {
     pub mode_note: Option<String>,
 }
 
-/// Everything the job writes, in a fixed order (tbody ids, then text ids, then rstat).
+/// Everything the job writes, in a fixed order (tbody ids, then text ids, then html
+/// ids, then rstat). An html region left out is not touched by apply_regions.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Regions {
     pub tbody: Vec<(String, String)>,
     pub text: Vec<(String, String)>,
     pub stamp: String,
+    pub html: Vec<(String, String)>,
 }
 
 impl Regions {
-    /// The value of a tbody or text region by anchor id ("" when absent).
+    /// The value of a tbody, text or html region by anchor id ("" when absent).
     pub fn get(&self, id: &str) -> &str {
         if id == STAMP_ID {
             return &self.stamp;
         }
-        self.tbody.iter().chain(self.text.iter()).find(|(k, _)| k == id).map(|(_, v)| v.as_str()).unwrap_or("")
+        self.tbody.iter().chain(self.text.iter()).chain(self.html.iter()).find(|(k, _)| k == id)
+            .map(|(_, v)| v.as_str()).unwrap_or("")
     }
 }
 
@@ -174,45 +186,182 @@ pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) 
 /// Display name of the FR-A4 report (MS-30 is the "Cyber threat dashboard").
 pub const REPORT_NAME: &str = "Cyber threat report";
 
-/// The FR-A4 report card, appended to the stamp: name and month, what it covers
-/// (FR-A4's own words), the "data as of" time of the PDF the last run uploaded,
-/// a primary button to download it (`pdf_href`) and, in the lab, a secondary
-/// button to the `serve` link that reads the tickets back first. Plain links
-/// styled as buttons (the wiki strips scripts). "" when there is neither.
-pub fn report_links(pdf_href: Option<&str>, tickets_as_of: &str, serve_url: Option<&str>) -> String {
-    let mut buttons = Vec::new();
-    if let Some(h) = pdf_href.filter(|h| !h.is_empty()) {
-        buttons.push(format!(
-            "<a class=\"rbtn\" href=\"{}\" title=\"This month so far, as of the time shown (updated by the scheduled job)\">\
-             &darr;&nbsp; Download report (PDF)</a>",
-            esc(h)
-        ));
+/// The latest frozen monthly report, as the card links it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MonthlyLink {
+    /// "October 2026".
+    pub title: String,
+    /// Wiki asset path with ?v=<first 12 hex of the PDF sha>.
+    pub href: String,
+    /// "1 Nov 2026" (Amsterdam date of the freeze).
+    pub frozen_on: String,
+    /// The review reminder issue: (identifier such as TRI-31, URL).
+    pub review: Option<(String, String)>,
+}
+
+impl MonthlyLink {
+    /// From the fields of report::latest_monthly(): month "YYYY-MM", asset path, PDF
+    /// sha256, frozen_at (RFC 3339) and the review issue. None when the month or the
+    /// path is unusable.
+    pub fn new(month: &str, path: &str, pdf_sha: &str, frozen_at: &str, review: Option<(String, String)>) -> Option<Self> {
+        let first = NaiveDate::parse_from_str(&format!("{}-01", month.trim()), "%Y-%m-%d").ok()?;
+        if path.trim().is_empty() {
+            return None;
+        }
+        let v = &pdf_sha[..pdf_sha.len().min(12)];
+        let href = if v.is_empty() { path.to_string() } else { format!("{path}?v={v}") };
+        let frozen_on = parse_iso(frozen_at)
+            .map(|t| crate::triage::store::to_amsterdam(t).format("%-d %b %Y").to_string())
+            .unwrap_or_default();
+        Some(MonthlyLink { title: first.format("%B %Y").to_string(), href, frozen_on, review })
     }
-    if let Some(u) = serve_url.map(|u| u.trim().trim_end_matches('/')).filter(|u| !u.is_empty()) {
+}
+
+/// "1 Dec 2026": the first of the month after `now`'s Amsterdam month, when the
+/// first monthly report is due.
+fn next_first(now: DateTime<Utc>) -> String {
+    let l = crate::triage::store::to_amsterdam(now).date();
+    let (y, m) = if l.month() == 12 { (l.year() + 1, 1) } else { (l.year(), l.month() + 1) };
+    NaiveDate::from_ymd_opt(y, m, 1).map(|d| d.format("%-d %b %Y").to_string()).unwrap_or_default()
+}
+
+/// `serve_url` trimmed of spaces and a trailing slash; None when empty.
+fn serve_base(serve_url: Option<&str>) -> Option<&str> {
+    serve_url.map(|u| u.trim().trim_end_matches('/')).filter(|u| !u.is_empty())
+}
+
+/// The FR-A4 report card, appended to the stamp: name, what it covers (FR-A4's own
+/// words) and two buttons, plain links styled as buttons (the wiki strips scripts):
+///   "Monthly report · <Month YYYY>": the latest frozen monthly PDF (`monthly`), with
+///     the review issue as a small link; without one, "First monthly report: 1 <Mon YYYY>".
+///   "Export snapshot": a month-to-date PDF, fresh from Linear through `serve`
+///     (SERVE_PUBLIC_URL) or else the one the last run uploaded (`mtd_href`, with its
+///     "as of" time `tickets_as_of`).
+/// The word "official" is not used: the monthly report is final (frozen), not approved.
+/// "" when there is no button at all.
+pub fn report_links(monthly: Option<&MonthlyLink>, mtd_href: Option<&str>, tickets_as_of: &str,
+                    serve_url: Option<&str>, now: DateTime<Utc>) -> String {
+    let mut buttons = Vec::new();
+    let mut notes = Vec::new();
+    match monthly {
+        Some(m) => {
+            let tip = if m.frozen_on.is_empty() { "Final, frozen".to_string() } else { format!("Final, frozen on {}", esc(&m.frozen_on)) };
+            buttons.push(format!("<a class=\"rbtn\" href=\"{}\" title=\"{tip}\">&darr;&nbsp; Monthly report &middot; {}</a>",
+                                 esc(&m.href), esc(&m.title)));
+            if let Some((id, url)) = m.review.as_ref().filter(|(id, _)| !id.trim().is_empty()) {
+                let link = if url.starts_with("https://") || url.starts_with("http://") {
+                    format!("<a class=\"rrev\" href=\"{}\">{}</a>", esc(url), esc(id))
+                } else {
+                    esc(id)
+                };
+                notes.push(format!("<span class=\"rreport-a\">Review: {link}</span>"));
+            }
+        }
+        None => notes.push(format!("<span class=\"rreport-a\">First monthly report: {}</span>", next_first(now))),
+    }
+    if let Some(u) = serve_base(serve_url) {
         buttons.push(format!(
-            "<a class=\"rbtn rbtn-2\" href=\"{}/report/month-to-date.pdf\" title=\"Reads the tickets back from \
-             Linear first (a few seconds), updates the ticket tables below, then downloads the report\">\
-             &#8635;&nbsp; Refresh data &amp; download</a>",
+            "<a class=\"rbtn rbtn-2\" href=\"{}/report/month-to-date.pdf\" \
+             title=\"Month to date, fresh from Linear. Not the monthly report.\">&darr;&nbsp; Export snapshot</a>",
             esc(u)
         ));
+    } else if let Some(h) = mtd_href.filter(|h| !h.is_empty()) {
+        buttons.push(format!(
+            "<a class=\"rbtn rbtn-2\" href=\"{}\" title=\"Month to date, as of the last scheduled run. \
+             Not the monthly report.\">&darr;&nbsp; Export snapshot</a>",
+            esc(h)
+        ));
+        if let Some(t) = parse_iso(tickets_as_of) {
+            notes.push(format!("<span class=\"rreport-a\">Snapshot data as of <b>{} {} UTC</b></span>", day(&t, false), hm(&t)));
+        }
     }
     if buttons.is_empty() {
         return String::new();
     }
-    let t = parse_iso(tickets_as_of);
-    let month = t
-        .map(|t| format!(" &mdash; {} so far", crate::triage::store::to_amsterdam(t).format("%B %Y")))
-        .unwrap_or_default();
-    let as_of = t
-        .map(|t| format!("<span class=\"rreport-a\">Data as of <b>{} {} UTC</b></span>", day(&t, false), hm(&t)))
-        .unwrap_or_default();
     format!(
         "<span class=\"rreport\"><span class=\"rreport-txt\">\
-         <span class=\"rreport-t\"><b>{REPORT_NAME}</b>{month}</span>\
+         <span class=\"rreport-t\"><b>{REPORT_NAME}</b></span>\
          <span class=\"rreport-d\">Items triaged, actions taken and actions open, with owner and due date. \
-         Internal to fairCT.</span>{as_of}</span><span class=\"rbtns\">{}</span></span>",
+         Internal to fairCT.</span>{}</span><span class=\"rbtns\">{}</span></span>",
+        notes.join(""),
         buttons.join("")
     )
+}
+
+// ---------------------------------------------------------------- Linear summary
+
+/// "<b>3</b>" and, when given, " (k overdue)" with a non-zero k in red.
+fn figure(label: &str, n: u64, overdue: Option<u64>) -> String {
+    let late = match overdue {
+        None => String::new(),
+        Some(0) => " (0 overdue)".into(),
+        Some(k) => format!(" <span class=\"lbad\">({} overdue)</span>", thousands(k as usize)),
+    };
+    format!("<span class=\"lfig\">{label} <b>{}</b>{late}</span>", thousands(n as usize))
+}
+
+/// The four figures of the Linear section for the month to date, from the report's
+/// data (report.json) so that the page and the PDF agree:
+///   Assessed       funnel.assessed: relevant items of the month assessed in Linear
+///   Waiting        funnel.waiting: relevant items of the month not assessed yet; overdue =
+///                  those of them over 1 business day (funnel.over_one_day, not assessed)
+///   Actions open   open_actions.count, overdue = open_actions.overdue
+///   Actions closed outcomes.fixed_count + outcomes.closed_without_fix (closed in the month)
+/// Without a report: one line saying so.
+pub fn linear_summary(report: Option<&Value>) -> String {
+    let Some(r) = report.filter(|r| r.get("funnel").is_some()) else {
+        return "<span class=\"lper\">Month to date</span><span class=\"lfig\">No report figures yet: \
+                they appear after the first scheduled run of the month.</span>".into();
+    };
+    let n = |p: &str| r.pointer(p).and_then(Value::as_u64).unwrap_or(0);
+    let len = |p: &str| r.pointer(p).and_then(Value::as_array).map_or(0, |a| a.len() as u64);
+    // Waiting items of the month over 1 business day: over_one_day rows with no
+    // assessment, first seen on or after the period start.
+    let start = r.pointer("/period/start").and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+    let late_waiting = r.pointer("/funnel/over_one_day").and_then(Value::as_array).map_or(0, |rows| {
+        rows.iter()
+            .filter(|row| row.get("assessed_at").is_none_or(Value::is_null))
+            .filter(|row| {
+                let seen = row.get("first_seen").and_then(Value::as_str).and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+                matches!((seen, start), (Some(s), Some(b)) if s >= b)
+            })
+            .count() as u64
+    });
+    let month = r.pointer("/period/month").and_then(Value::as_str).unwrap_or("");
+    let label = if month.is_empty() { "Month to date".to_string() } else { format!("{}, month to date", esc(month)) };
+    [
+        format!("<span class=\"lper\">{label}</span>"),
+        figure("Assessed", n("/funnel/assessed"), None),
+        figure("Waiting", n("/funnel/waiting"), Some(late_waiting)),
+        figure("Actions open", n("/open_actions/count"), Some(n("/open_actions/overdue"))),
+        figure("Actions closed", n("/outcomes/fixed_count") + len("/outcomes/closed_without_fix"), None),
+    ]
+    .join("")
+}
+
+/// The "Refresh tickets" link to `serve` (none without SERVE_PUBLIC_URL) and "as of
+/// HH:MM <CET|CEST>", the report's tickets-as-of time in Amsterdam time.
+pub fn linear_refresh(report: Option<&Value>, serve_url: Option<&str>) -> String {
+    let mut s = String::new();
+    if let Some(u) = serve_base(serve_url) {
+        s.push_str(&format!(
+            "<a class=\"rbtn rbtn-2\" href=\"{}/refresh\" title=\"Reads the tickets back from Linear (a few seconds) \
+             and updates this section. Feeds are not fetched again.\">&#8635;&nbsp; Refresh tickets</a>",
+            esc(u)
+        ));
+    }
+    if let Some(t) = report.and_then(|r| r.get("as_of")).and_then(Value::as_str).and_then(parse_iso) {
+        let zone = if crate::triage::store::amsterdam_offset(t) == Duration::hours(2) { "CEST" } else { "CET" };
+        s.push_str(&format!("<span class=\"lasof\">as of {} {zone}</span>",
+                            crate::triage::store::to_amsterdam(t).format("%H:%M")));
+    }
+    s
+}
+
+/// The html regions (HTML_IDS order) for a month-to-date report's data.
+pub fn linear_regions(report: Option<&Value>, serve_url: Option<&str>) -> Vec<(String, String)> {
+    HTML_IDS.iter().map(|s| s.to_string()).zip([linear_summary(report), linear_refresh(report, serve_url)]).collect()
 }
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
@@ -272,6 +421,8 @@ pub fn build_regions(
         tbody: TBODY_IDS.iter().map(|s| s.to_string()).zip(tbody).collect(),
         text: TEXT_IDS.iter().map(|s| s.to_string()).zip(text).collect(),
         stamp: build_stamp(now, kev_catalog, health),
+        // The caller puts in the month-to-date report's figures (linear_regions).
+        html: linear_regions(None, None),
     }
 }
 
@@ -305,7 +456,9 @@ pub const TICKET_TEXT_IDS: [&str; 3] = ["s-untriaged", "n-untriaged", "n-tickets
 /// The two triage tables and their counters only, exactly as build_regions renders
 /// them for the same view and `now` (end of the window), for `serve`'s partial
 /// re-splice. `stamp` is left empty: the caller puts back the page's own stamp
-/// (stamp_of), since apply_regions always writes it.
+/// (stamp_of), since apply_regions always writes it. `html` is left empty too: the
+/// caller adds linear_regions() once it has the report (apply_regions leaves the
+/// page's summary as it is otherwise).
 pub fn ticket_regions(view: &TriageView, now: DateTime<Utc>) -> Regions {
     let today = now.format("%Y-%m-%d").to_string();
     let note = view.mode_note.as_deref();
@@ -315,6 +468,7 @@ pub fn ticket_regions(view: &TriageView, now: DateTime<Utc>) -> Regions {
         tbody: TICKET_TBODY_IDS.iter().map(|s| s.to_string()).zip(tbody).collect(),
         text: TICKET_TEXT_IDS.iter().map(|s| s.to_string()).zip(text).collect(),
         stamp: String::new(),
+        html: Vec::new(),
     }
 }
 
@@ -379,8 +533,9 @@ pub fn apply_regions(doc: &str, regions: &Regions) -> Result<String, Fatal> {
         doc.replace_range(a..b, rows);
     }
     let stamp = (STAMP_ID.to_string(), regions.stamp.clone());
-    for (eid, text) in regions.text.iter().chain(std::iter::once(&stamp)) {
-        let Some((_, open_end, close_start, _)) = find_element(&doc, eid, eid == STAMP_ID) else {
+    for (eid, text) in regions.text.iter().chain(regions.html.iter()).chain(std::iter::once(&stamp)) {
+        let div = eid == STAMP_ID || HTML_IDS.contains(&eid.as_str());
+        let Some((_, open_end, close_start, _)) = find_element(&doc, eid, div) else {
             return Err(Fatal(format!("page anchor id=\"{eid}\" not found — re-seed the page skeleton")));
         };
         doc.replace_range(open_end..close_start, text);
@@ -495,7 +650,7 @@ mod tests {
     }
 
     fn all_anchors() -> Vec<&'static str> {
-        TBODY_IDS.iter().chain(TEXT_IDS.iter()).copied().chain([STAMP_ID]).collect()
+        TBODY_IDS.iter().chain(TEXT_IDS.iter()).chain(HTML_IDS.iter()).copied().chain([STAMP_ID]).collect()
     }
 
     // ------------------------------------------------ skeleton
@@ -586,23 +741,169 @@ mod tests {
         }
     }
 
+    fn t_now() -> DateTime<Utc> {
+        parse_iso("2026-11-06T09:00:00Z").unwrap()
+    }
+
+    fn monthly() -> MonthlyLink {
+        MonthlyLink::new("2026-10", "/exploit-watch/report-2026-10.pdf", "0123456789abcdef", "2026-11-01T05:00:12Z",
+                         Some(("TRI-31".into(), "https://linear.app/x/issue/TRI-31".into()))).unwrap()
+    }
+
+    /// The parts of a month-to-date report.json the summary reads.
+    fn report_fixture() -> Value {
+        serde_json::json!({
+            "as_of": "2026-11-06T13:05:00Z",
+            "period": {"start": "2026-11-01T00:00:00+01:00", "month": "November 2026"},
+            "funnel": {"assessed": 5, "waiting": 3, "over_one_day": [
+                {"key": "a", "first_seen": "2026-11-02T10:00:00+01:00", "assessed_at": null, "business_hours": null},
+                {"key": "b", "first_seen": "2026-10-28T10:00:00+01:00", "assessed_at": null, "business_hours": null},
+                {"key": "c", "first_seen": "2026-11-03T10:00:00+01:00", "assessed_at": "2026-11-05T10:00:00+01:00",
+                 "business_hours": 48.0}]},
+            "open_actions": {"count": 4, "overdue": 2, "items": []},
+            "outcomes": {"fixed_count": 2, "closed_without_fix": [{"key": "d"}]},
+        })
+    }
+
     #[test]
-    fn report_links_in_the_stamp() {
-        assert_eq!(report_links(None, "", None), "");
-        assert_eq!(report_links(None, "", Some("  ")), "");
-        let both = report_links(Some("/exploit-watch/report-month-to-date.pdf?v=abc"), "2026-11-05T07:31:00Z",
-                                Some("http://localhost:8090/"));
-        assert!(both.starts_with(r#"<span class="rreport">"#), "{both}");
-        assert!(both.contains("<b>Cyber threat report</b> &mdash; November 2026 so far"), "{both}");
-        assert!(both.contains("Data as of <b>5 Nov 07:31 UTC</b>"), "{both}");
-        assert!(both.contains(r#"<a class="rbtn" href="/exploit-watch/report-month-to-date.pdf?v=abc""#), "{both}");
-        assert!(both.contains(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/report/month-to-date.pdf""#), "{both}");
-        assert!(both.contains("Download report (PDF)</a>") && both.contains("Refresh data &amp; download</a>"), "{both}");
-        assert!(!both.contains("<div"), "the stamp may not hold a div");
-        let only_serve = report_links(None, "", Some("http://x"));
-        assert!(only_serve.contains("rbtn-2") && !only_serve.contains("Data as of"), "{only_serve}");
-        let evil = report_links(Some(r#"/x?v="><script>"#), "", None);
-        assert!(!evil.contains("<script>"), "{evil}");
+    fn monthly_link_from_latest_monthly() {
+        let m = monthly();
+        assert_eq!((m.title.as_str(), m.frozen_on.as_str()), ("October 2026", "1 Nov 2026"));
+        assert_eq!(m.href, "/exploit-watch/report-2026-10.pdf?v=0123456789ab");
+        assert!(MonthlyLink::new("2026-13", "/x.pdf", "", "", None).is_none());
+        assert!(MonthlyLink::new("2026-10", " ", "", "", None).is_none());
+        assert_eq!(MonthlyLink::new("2026-10", "/x.pdf", "", "", None).unwrap().href, "/x.pdf");
+    }
+
+    #[test]
+    fn report_card_buttons() {
+        assert_eq!(report_links(None, None, "", None, t_now()), "");
+        assert_eq!(report_links(None, Some(""), "", Some("  "), t_now()), "");
+        // Lab: a frozen month and serve.
+        let lab = report_links(Some(&monthly()), Some("/exploit-watch/report-month-to-date.pdf?v=abc"),
+                               "2026-11-05T07:31:00Z", Some("http://localhost:8090/"), t_now());
+        assert!(lab.starts_with(r#"<span class="rreport">"#), "{lab}");
+        assert!(lab.contains(r#"<a class="rbtn" href="/exploit-watch/report-2026-10.pdf?v=0123456789ab" title="Final, frozen on 1 Nov 2026">&darr;&nbsp; Monthly report &middot; October 2026</a>"#), "{lab}");
+        assert!(lab.contains(r#"<span class="rreport-a">Review: <a class="rrev" href="https://linear.app/x/issue/TRI-31">TRI-31</a></span>"#), "{lab}");
+        assert!(lab.contains(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/report/month-to-date.pdf" title="Month to date, fresh from Linear. Not the monthly report.">&darr;&nbsp; Export snapshot</a>"#), "{lab}");
+        assert!(!lab.contains("report-month-to-date.pdf"), "serve wins over the uploaded asset: {lab}");
+        assert!(!lab.contains("First monthly report") && !lab.contains("Snapshot data as of"), "{lab}");
+        assert!(!lab.contains("Download report") && !lab.to_lowercase().contains("official"), "{lab}");
+        assert!(!lab.contains("<div"), "the stamp may not hold a div");
+        // No monthly report yet, no serve: the uploaded asset with its time (option B).
+        let b = report_links(None, Some("/exploit-watch/report-month-to-date.pdf?v=abc"), "2026-11-05T07:31:00Z", None, t_now());
+        assert!(b.contains(r#"<span class="rreport-a">First monthly report: 1 Dec 2026</span>"#), "{b}");
+        assert!(b.contains(r#"<a class="rbtn rbtn-2" href="/exploit-watch/report-month-to-date.pdf?v=abc""#), "{b}");
+        assert!(b.contains("Snapshot data as of <b>5 Nov 07:31 UTC</b>") && !b.contains("Monthly report &middot;"), "{b}");
+        // December rolls over to January; Amsterdam time decides the month.
+        let dec = report_links(None, None, "", Some("http://x"), parse_iso("2026-12-31T23:30:00Z").unwrap());
+        assert!(dec.contains("First monthly report: 1 Feb 2027"), "{dec}");
+        // A review without a usable URL is shown as text; hostile values are escaped.
+        let mut m = monthly();
+        m.review = Some((r#"<script>"#.into(), "javascript:alert(1)".into()));
+        m.href = r#"/x?v="><script>"#.into();
+        let evil = report_links(Some(&m), None, "", None, t_now());
+        assert!(!evil.contains("<script>") && !evil.contains("javascript:"), "{evil}");
+        assert!(evil.contains("Review: &lt;script&gt;</span>"), "{evil}");
+    }
+
+    #[test]
+    fn linear_summary_from_the_report() {
+        let r = report_fixture();
+        let s = linear_summary(Some(&r));
+        assert_eq!(s, concat!(
+            r#"<span class="lper">November 2026, month to date</span>"#,
+            r#"<span class="lfig">Assessed <b>5</b></span>"#,
+            r#"<span class="lfig">Waiting <b>3</b> <span class="lbad">(1 overdue)</span></span>"#,
+            r#"<span class="lfig">Actions open <b>4</b> <span class="lbad">(2 overdue)</span></span>"#,
+            r#"<span class="lfig">Actions closed <b>3</b></span>"#));
+        let mut calm = r.clone();
+        calm["open_actions"]["overdue"] = serde_json::json!(0);
+        calm["funnel"]["over_one_day"] = serde_json::json!([]);
+        let s = linear_summary(Some(&calm));
+        assert!(s.contains("Waiting <b>3</b> (0 overdue)</span>") && s.contains("Actions open <b>4</b> (0 overdue)</span>"), "{s}");
+        assert!(!s.contains("lbad"), "{s}");
+        assert!(linear_summary(None).contains("No report figures yet"));
+        assert!(linear_summary(Some(&serde_json::json!({"error": "x"}))).contains("No report figures yet"));
+        // 13:05 UTC is 14:05 in Amsterdam in November (CET), 15:05 in summer (CEST).
+        let f = linear_refresh(Some(&r), Some("http://localhost:8090/"));
+        assert!(f.starts_with(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/refresh" title="#), "{f}");
+        assert!(f.contains("Refresh tickets</a>") && f.ends_with(r#"<span class="lasof">as of 14:05 CET</span>"#), "{f}");
+        let mut summer = r.clone();
+        summer["as_of"] = serde_json::json!("2026-07-01T13:05:00Z");
+        assert!(linear_refresh(Some(&summer), None).ends_with("as of 15:05 CEST</span>"));
+        assert_eq!(linear_refresh(Some(&r), None), r#"<span class="lasof">as of 14:05 CET</span>"#);
+        assert_eq!(linear_refresh(None, None), "");
+        let regions = linear_regions(Some(&r), None);
+        assert_eq!(regions.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), HTML_IDS);
+        for (_, v) in &regions {
+            assert!(!v.contains("<div"), "{v}");
+        }
+        let evil = linear_regions(Some(&serde_json::json!({"funnel": {}, "period": {"month": super::test_support::EVIL}})),
+                                  Some(super::test_support::EVIL));
+        assert!(!evil.iter().any(|(_, v)| v.contains("<script")), "{evil:?}");
+    }
+
+    /// Spliced into the page; an html region left out of Regions is not touched.
+    #[test]
+    fn html_regions_splice() {
+        let mut r = load();
+        r.html = linear_regions(Some(&report_fixture()), Some("http://localhost:8090"));
+        let page = apply_regions(&skel(), &r).unwrap();
+        assert_eq!(apply_regions(&page, &r).unwrap(), page, "idempotent");
+        assert!(page.contains(r#"<div class="lsum" id="l-summary"><span class="lper">November 2026"#), "summary spliced");
+        assert!(page.contains(r#"<div class="lact" id="l-refresh"><a class="rbtn rbtn-2" href="http://localhost:8090/refresh""#));
+        let mut part = ticket_regions(&TriageView::default(), t_now());
+        part.stamp = stamp_of(&page).unwrap();
+        let out = apply_regions(&page, &part).unwrap();
+        let inner = |d: &str, id: &str| find_element(d, id, true).map(|(_, a, b, _)| d[a..b].to_string()).unwrap();
+        for id in HTML_IDS {
+            assert_eq!(inner(&out, id), inner(&page, id), "{id}");
+        }
+        assert!(apply_regions(&skel().replace(r#"id="l-refresh""#, ""), &r).is_err());
+    }
+
+    /// The Linear section (summary, untriaged, open tickets) sits right above feed
+    /// health, under one heading; tiles and status strip stay above it; long tables scroll.
+    #[test]
+    fn page_order_and_scrolling_tables() {
+        let s = skel();
+        let at = |needle: &str| s.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        let order = [r#"id="rstat""#, r#"<div class="triage">"#, r#"<section class="block" id="linear">"#,
+                     "Triage and actions (Linear)", r#"id="l-summary""#, r#"<section class="block" id="untriaged">"#,
+                     r#"<section class="block" id="tickets">"#, r#"<section class="block" id="health">"#,
+                     r#"id="kev""#, r#"id="adv""#, r#"id="deps""#, r#"id="nvd""#, r#"id="sources""#, r#"id="terminal""#];
+        for w in order.windows(2) {
+            assert!(at(w[0]) < at(w[1]), "{} before {}", w[0], w[1]);
+        }
+        // Nothing but the closing tags of the Linear section between it and feed health.
+        let between = &s[at(r#"<tbody id="t-tickets">"#)..at(r#"<section class="block" id="health">"#)];
+        assert_eq!(re(r"\s+").replace_all(between.split_once("</tbody>").unwrap().1, ""), "</table></div></div></section></section>");
+        for t in ["t-kev", "t-adv", "t-dep", "t-nvd", "t-untriaged", "t-tickets"] {
+            let before = &s[..at(&format!("<tbody id=\"{t}\">"))];
+            let open = before.rfind("<div class=\"tscroll\"><div class=\"scroller\"><table>").unwrap_or(0);
+            assert!(open > before.rfind("</table>").unwrap_or(0), "{t} not in a tscroll");
+        }
+        assert!(!s[at(r#"<section class="block" id="health">"#)..at(r#"<tbody id="t-health">"#)].contains("tscroll"),
+                "feed health does not scroll");
+        assert_eq!(s.matches("<section").count(), s.matches("</section>").count());
+    }
+
+    /// Every tooltip has the same text in its title and in its tiptext (tags aside),
+    /// and holds no block element.
+    #[test]
+    fn tooltips_are_complete() {
+        let s = skel();
+        let tips: Vec<_> = re(r#"<span class="tip" tabindex="0" title="([^"]*)">&#9432;<span class="tiptext">(.*?)</span></span>"#)
+            .captures_iter(&s).map(|c| (c[1].to_string(), c[2].to_string())).collect();
+        assert_eq!(tips.len(), s.matches(r#"class="tip""#).count(), "every tip in the expected form");
+        assert!(tips.len() >= 9, "{}", tips.len());
+        let plain = |x: &str| re(r"<[^>]+>").replace_all(x, "").replace("&mdash;", ":").replace(" :", ":");
+        for (title, text) in &tips {
+            assert!(!title.contains('<'), "{title}");
+            assert!(!re(r"<(div|p|ul|table)\b").is_match(text), "{text}");
+            assert_eq!(plain(title), plain(text));
+        }
     }
 
     #[test]
@@ -759,7 +1060,12 @@ mod tests {
         let t = evil_triage();
         evil.push_str(&build_untriaged_rows(&t.untriaged, None));
         evil.push_str(&build_ticket_rows(&t.tickets, "2026-11-03", None));
-        evil.push_str(&report_links(Some("/x.pdf?v=1"), "2026-11-05T07:57:00Z", Some("http://localhost:8090")));
+        evil.push_str(&report_links(Some(&monthly()), Some("/x.pdf?v=1"), "2026-11-05T07:57:00Z", None, t_now()));
+        evil.push_str(&report_links(None, None, "", Some("http://localhost:8090"), t_now()));
+        for h in linear_regions(Some(&report_fixture()), Some("http://localhost:8090")) {
+            evil.push_str(&h.1);
+        }
+        evil.push_str(&linear_summary(None));
         let css = read(STYLE_PATH);
         let fallback = ["sm", "score-other", "pi-L", "pi-X", "sv-MEDIUM", "sv-LOW"];
         for c in re(r#"class="([^"]*)""#).captures_iter(&(page + &evil)) {

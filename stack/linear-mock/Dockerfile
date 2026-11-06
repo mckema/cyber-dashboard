@@ -18,7 +18,7 @@
 # and the image. The runtime stage installs nothing, so it needs no proxy and
 # no ca-certificates (the mock makes no outbound connections).
 
-FROM rust:1.99.1-slim-bookworm AS build
+FROM rust:1.99.1-slim-trixie AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked \
  && cp target/release/linear-mock /usr/local/bin/linear-mock
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app \
  && mkdir /data \
  && chown app:app /data

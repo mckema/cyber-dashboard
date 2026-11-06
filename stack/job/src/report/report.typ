@@ -2,14 +2,16 @@
 // plus data_sha) next to it; only typst's embedded fonts are used. Layout approved
 // on 2026-11-05: page 1 for the COO, then detail, then the audit appendix.
 #let d = json("data.json")
-#let lab = d.tracker.lab_data
+// Data marking ("" in production): "LAB DATA" (linear-mock) or "TEST DATA", on every page.
+#let mark = d.marking.label
+#let marked = mark != ""
 #let mtd = d.period.kind == "month-to-date"
 
 // FIRST TLP 2.0: the label in amber (#FFC000) on black, at least 11 pt.
 #let tlp = box(fill: black, inset: (x: 5pt, y: 3pt), radius: 1pt,
   text(fill: rgb("#FFC000"), weight: "bold", font: "DejaVu Sans Mono", size: 11pt)[TLP:AMBER+STRICT])
-#let labtag = box(fill: rgb("#B00020"), inset: (x: 4pt, y: 3pt), radius: 1pt,
-  text(fill: white, weight: "bold", font: "DejaVu Sans Mono", size: 9pt)[LAB DATA])
+#let marktag = box(fill: rgb("#B00020"), inset: (x: 4pt, y: 3pt), radius: 1pt,
+  text(fill: white, weight: "bold", font: "DejaVu Sans Mono", size: 9pt)[#mark])
 
 #let rag-fill = (GREEN: rgb("#1e7b34"), AMBER: rgb("#c77700"), RED: rgb("#b00020"))
 #let rag-tint = (Green: rgb("#e3f2e6"), Amber: rgb("#fff1d6"), Red: rgb("#fbe3e6"))
@@ -47,7 +49,7 @@
     set text(size: 8.5pt)
     grid(columns: (1fr, auto), align: (left + horizon, right + horizon), column-gutter: 6pt,
       [Cyber threat report · #d.period.month · #d.document.id],
-      { if lab { labtag; h(4pt) }; tlp })
+      { if marked { marktag; h(4pt) }; tlp })
     v(-3pt)
     line(length: 100%, stroke: 0.4pt + gray)
   },
@@ -57,11 +59,11 @@
     v(-3pt)
     grid(columns: (auto, 1fr, auto), column-gutter: 10pt, align: (left + horizon, left + horizon, right + horizon),
       tlp,
-      [Generated #short(d.generated_at) (Amsterdam) · data sha256 #raw(d.data_sha.slice(0, 12))#if lab [ · *LAB DATA*]],
+      [Generated #short(d.generated_at) (Amsterdam) · data sha256 #raw(d.data_sha.slice(0, 12))#if marked [ · *#mark*]],
       [Page #counter(page).display() / #counter(page).final().first()])
   },
-  background: if lab {
-    rotate(-35deg, text(size: 96pt, weight: "bold", fill: rgb(176, 0, 32, 22))[LAB DATA])
+  background: if marked {
+    rotate(-35deg, text(size: 96pt, weight: "bold", fill: rgb(176, 0, 32, 22))[#mark])
   },
 )
 #set table(stroke: 0.4pt + luma(170), inset: (x: 4pt, y: 3pt))
@@ -85,8 +87,8 @@
 #text(size: 10.5pt)[#d.subtitle] \
 #text(size: 9pt, fill: luma(60))[Period #d.period.text · generated #short(d.generated_at) (Europe/Amsterdam) · tickets as of #short(d.tickets_as_of)]
 
-#if lab {
-  notice(rgb("#fde7ea"), rgb("#B00020"))[*LAB DATA* – tickets, owners and dates come from a test tracker, not from fairCT's.]
+#if marked {
+  notice(rgb("#fde7ea"), rgb("#B00020"))[*#mark* – #d.marking.notice]
 }
 #if d.coverage.partial {
   notice(rgb("#fff4d6"), rgb("#c58a00"))[*Partial history* – records start on #short(d.coverage.from)#[;] figures before that moment are incomplete.]
@@ -119,10 +121,12 @@
 #let status-cell(s) = if s == "—" { [—] } else {
   table.cell(fill: rag-tint.at(s))[#text(fill: rag-fill.at(upper(s)), weight: "bold")[#s]]
 }
+// A target that is not agreed yet carries a note under it.
+#let target-cell(k) = if k.target_note == none { k.target } else [#k.target \ #text(size: 7pt, fill: luma(60))[#k.target_note]]
 #table(columns: (1fr, auto, auto, auto, auto),
   align: (left, left, left, left, left),
   table.header([*Measure*], [*This period*], [*Target*], [*Status*], [*vs #d.previous.label*]),
-  ..d.kpis.map(k => (k.label, k.value, k.target, status-cell(k.status), k.previous)).flatten())
+  ..d.kpis.map(k => (k.label, k.value, target-cell(k), status-cell(k.status), k.previous)).flatten())
 
 // ------------------------------------------------------------------ open actions
 == Open actions and plans
@@ -254,7 +258,7 @@ Time to assess (Amsterdam business hours, Monday–Friday, from first seen to th
   [*Tickets as of*], [#short(d.tickets_as_of) (last read-back from the tracker included)],
   [*History covers from*], [#short(d.coverage.from)#if d.coverage.partial [ (after the period start: partial)]#[;] #thou(d.coverage.duplicates_dropped) repeated events dropped#if d.coverage.half_written_tail [; a half-written last line skipped]#if d.coverage.backfilled > 0 [; risk fields of #thou(d.coverage.backfilled) older decisions taken from triage.json]],
   [*Component list*], [#if d.component_list.version == "" [—] else [#d.component_list.version#if d.component_list.count != none [ (#d.component_list.count components)], sha256 #raw(d.component_list.sha256)]#if d.components.len() > 1 [; decisions in the period: #d.components.map(c => [#c.version (#c.decisions)]).join([, ])]],
-  [*Tracker*], [#dash(d.tracker.endpoint)#if lab [ — *LAB DATA*]],
+  [*Tracker*], [#dash(d.tracker.endpoint)#if marked [ — *#mark*]],
   [*Scheduled runs*], [#d.runs.writing#if d.runs.writing > 0 [ (#d.runs.by_result.pairs().map(((k, v)) => [#k #v]).join([, ]))]],
   [*Data sha256*], [#raw(d.data_sha)],
   [*Source files*], [`triage-events.jsonl` (event log), `runs.jsonl` (run log), `triage.json` (item copies for older decisions); output `report.json`, `report.pdf`, `SHA256SUMS`],
@@ -269,6 +273,27 @@ Time to assess (Amsterdam business hours, Monday–Friday, from first seen to th
   Removed during the period: #d.feeds_removed.join(", ").
 ]
 
+// Monthly close only (close.rs): the random sample of automatically ruled-out items.
+#let rs = d.at("review_sample", default: none)
+#if rs != none [
+== Quality check sample — automatically ruled-out items
+  #set text(size: 9pt)
+  A control for the automatic rule-out, which matches by component name only and does not check affected versions: #rs.items.len() of #thou(rs.candidates) items ruled out automatically in the period, drawn at random before this report was frozen (seed sha256 #raw(rs.seed.slice(0, 16))…, reproducible from the event log). The review reminder in the ticket tracker asks a person to check each one; an item found relevant is reported there, so that the component list can be completed.
+
+  #if rs.items.len() == 0 {
+    emph(if rs.note == "" { "No automatically ruled-out items in the period." } else { rs.note })
+  } else {
+    table(columns: (auto, auto, 1fr, auto),
+      table.header([*No.*], [*Item*], [*Title*], [*Vendor / product*]),
+      ..rs.items.enumerate().map(((n, i)) => (
+        str(n + 1),
+        if i.url == "" { text(size: 7.5pt, i.key) } else { link(i.url, text(size: 7.5pt, i.key)) },
+        if i.title == "" { "—" } else { cut(i.title, 90) },
+        dash(i.vendor_product),
+      )).flatten())
+  }
+]
+
 == Definitions
 #set text(size: 8.5pt)
 - *Source of the figures*: the append-only event log of Exploit Watch and its run log. Events are placed at the time the tracker gives (when the ticket was triaged, completed or canceled), not when they were logged; repeated events are counted once.
@@ -277,7 +302,7 @@ Time to assess (Amsterdam business hours, Monday–Friday, from first seen to th
 - *Open action*: accepted and not closed at the end of the period; the owner and due date are the plan. *Overdue*: due date before the end of the period. *Fixed*: done in the tracker; *on time* when closed on or before the due date (Amsterdam date). *Closed without fix*: accepted, then canceled.
 - *Known exploited*: the item comes from the CISA Known Exploited Vulnerabilities catalog or ENISA EUVD's exploited list, its CVE.org record has CISA's SSVC "Exploitation: active", or one of its CVEs was seen in CISA KEV or ENISA EUVD by the end of the period.
 - *Sources healthy*: sources fetched in the last scheduled run of the period, or read from the job's cache within their polling interval; *stale* or *failing* means the fetch failed.
-- *KPIs*: assessed within 1 business day = assessments within 24 business hours ÷ (assessments + items waiting longer), target 100%; open actions and overdue, target 0 overdue; fixed by due date = fixes on or before the due date ÷ fixes in the period, target ≥ 95% (remediation by due date and time to remediate as in NIST SP 800-40r4, Table 1); known-exploited items still open, target 0 overdue; sources healthy, target all. Recording and monitoring of ICT-related threats follow RTS (EU) 2024/1774, Art. 10. *vs previous month* is the same measure for the previous calendar month when the event log covers it, else "first period".
+- *KPIs*: assessed within 1 business day = assessments within 24 business hours ÷ (assessments + items waiting longer), target 100%; open actions and overdue, target 0 overdue; fixed by due date = fixes on or before the due date ÷ fixes in the period (the metric "remediation by due date" as defined in NIST SP 800-40r4, Table 1, like the median time to fix, "time to remediate"; NIST sets no target), target ≥ 95%, a team proposal pending agreement with fairCT; known-exploited items still open, target 0 overdue; sources healthy, target all. Recording and monitoring of ICT-related threats follow RTS (EU) 2024/1774, Art. 10. *vs previous month* is the same measure for the previous calendar month when the event log covers it, else "first period".
 - *Overall status* is the worst of the rules below (team proposal, 2026-11-05). *GREEN*: every relevant item assessed within 1 business day, no overdue action, every open action has an owner and a due date, all sources healthy in the last run, no tracker error in the period, at least 95% of fixes by their due date. *AMBER*, any of: an assessment took (or an item has waited) more than 1 business day; an open action lacks an owner or a due date; ruled out by a person without a reason; a source stale or failing in the last run, or no scheduled run in the period; a tracker error in the period; an overdue action on an item not known to be exploited; fewer than 95% of the fixes in the period by their due date. *RED*, any of: an overdue action on a known-exploited item; a relevant item not assessed for more than 3 business days at the end of the period; a core source (CISA KEV or CVE.org) failing for more than 2 days.
 - *Data sha256* is the sha256 of report.json without its generation time: two reports with equal data have equal values. This report implements requirement FR-A4 (resolution report to the fairCT COO).
 

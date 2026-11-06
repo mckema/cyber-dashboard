@@ -1,9 +1,20 @@
 //! ENISA EU Vulnerability Database, exploited-vulnerability view.
 //!
 //! /api/vulnerabilities is 404; /api/search with fromKEVDate/toKEVDate is the
-//! documented query (2026-11-03). The API sends Cache-Control: no-store and no
-//! ETag, so every run is a full (small) fetch. Dates come as "Nov 3, 2026,
+//! query the EUVD site uses (2026-11-03); fromKEVDate is in no published API
+//! documentation (checked 2026-11-06). The API sends Cache-Control: no-store and
+//! no ETag, so every run is a full (small) fetch. Dates come as "Nov 3, 2026,
 //! 12:41:24 AM" with no zone; ENISA serves them in UTC.
+//!
+//! Fallback (2026-11-06): when the fromKEVDate query fails (HTTP error, not JSON,
+//! no items/total, page cap, a bad item), the job reads every exploited entry with
+//! /api/search?exploited=true (1,786 entries, 18 pages of 100 on 2026-11-06) and
+//! keeps those whose exploitedSince falls in the window. Paging stops at `total`,
+//! not at a date: the list is sorted by dateUpdated, and exploitedSince can be
+//! later than dateUpdated (3 of 300 entries checked). /api/exploitedvulnerabilities
+//! is not used: it ignores page/size, returned a fixed list of 4 entries, and
+//! missed one of the 5 entries the fromKEVDate query returned for the same 7 days.
+//! stats["primary_error"] tells run.rs to say so in the health note.
 
 use std::sync::OnceLock;
 
@@ -17,8 +28,10 @@ pub const NAME: &str = "ENISA EUVD";
 pub const CADENCE: u64 = 0;
 
 pub const URL: &str = "https://euvdservices.enisa.europa.eu/api/search";
-pub const PAGE_SIZE: usize = 100; // API maximum
+pub const PAGE_SIZE: usize = 100; // API maximum (size=200 returns 100)
 pub const MAX_PAGES: usize = 10;
+/// Fallback reads all exploited entries: 1,786 on 2026-11-06, so 30 pages leave room for growth.
+pub const FALLBACK_MAX_PAGES: usize = 30;
 
 const MON: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -113,35 +126,100 @@ pub fn to_item(v: &Value) -> Result<Item, SourceError> {
     Ok(it)
 }
 
-fn fetch_with<G>(start: DateTime<Utc>, end: DateTime<Utc>, get: &G) -> Result<FetchOutput, SourceError>
+/// Every row of one /api/search query, paging until `total` rows are read.
+/// Returns (rows, requests). Err on a non-JSON page, a page without `items` and
+/// `total`, the page cap, or ids that do not add up to `total` (the list changed
+/// while paging).
+fn search_all<G>(get: &G, query: &[(&str, &str)], what: &str, max_pages: usize) -> Result<(Vec<Value>, usize), SourceError>
+where
+    G: Fn(&str, &str, GetOpts) -> Result<Response, SourceError>,
+{
+    let size = PAGE_SIZE.to_string();
+    let mut rows: Vec<Value> = Vec::new();
+    for page in 0..max_pages {
+        let p = page.to_string();
+        let mut params = query.to_vec();
+        params.extend([("size", size.as_str()), ("page", p.as_str())]);
+        let r = get(URL, &format!("{NAME} ({what}) page {page}"), GetOpts { conditional: false, params: &params, ..Default::default() })?;
+        let j: Value = r.json().map_err(|_| SourceError::new(format!("{NAME} ({what}): response is not JSON")))?;
+        let (Some(total), Some(batch)) = (j.get("total").and_then(Value::as_u64), j.get("items").and_then(Value::as_array)) else {
+            return Err(SourceError::new(format!("{NAME} ({what}): response has no 'items' list and 'total'")));
+        };
+        let total = total as usize;
+        rows.extend(batch.iter().cloned());
+        if batch.is_empty() || rows.len() >= total {
+            let mut ids = rows.iter().map(|v| v.get("id").and_then(Value::as_str)).collect::<Option<Vec<&str>>>()
+                .ok_or_else(|| SourceError::new(format!("{NAME} ({what}): item without id")))?;
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() != total {
+                return Err(SourceError::new(format!("{NAME} ({what}): {} distinct ids for a total of {total}; the list changed while paging", ids.len())));
+            }
+            return Ok((rows, page + 1));
+        }
+    }
+    Err(SourceError::new(format!("{NAME} ({what}): more than {} results; page cap hit", max_pages * PAGE_SIZE)))
+}
+
+fn newest_first(mut out: Vec<Item>) -> Vec<Item> {
+    out.sort_by(|a, b| (&b.published, &b.id).cmp(&(&a.published, &a.id)));
+    out
+}
+
+/// Primary: entries whose KEV date (exploitedSince) is in the window. Returns (items, requests).
+fn by_kev_date<G>(start: DateTime<Utc>, end: DateTime<Utc>, get: &G) -> Result<(Vec<Item>, usize), SourceError>
 where
     G: Fn(&str, &str, GetOpts) -> Result<Response, SourceError>,
 {
     let from = start.date_naive().to_string();
     let to = end.date_naive().to_string();
-    let size = PAGE_SIZE.to_string();
-    let mut rows: Vec<Value> = Vec::new();
-    let mut done = false;
-    for page in 0..MAX_PAGES {
-        let p = page.to_string();
-        let params = [("fromKEVDate", from.as_str()), ("toKEVDate", to.as_str()), ("size", size.as_str()), ("page", p.as_str())];
-        let r = get(URL, &format!("{NAME} page {page}"), GetOpts { conditional: false, params: &params, ..Default::default() })?;
-        let j: Value = r.json().map_err(|_| SourceError::new(format!("{NAME}: response is not JSON")))?;
-        let total = j.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let batch = j.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
-        let empty = batch.is_empty();
-        rows.extend(batch);
-        if empty || rows.len() >= total {
-            done = true;
-            break;
+    let (rows, requests) = search_all(get, &[("fromKEVDate", from.as_str()), ("toKEVDate", to.as_str())], "fromKEVDate", MAX_PAGES)?;
+    let items = rows.iter().map(to_item).collect::<Result<Vec<_>, _>>()?;
+    Ok((newest_first(items), requests))
+}
+
+/// Fallback: every exploited entry, filtered here to exploitedSince within the
+/// window's dates (both ends included, as fromKEVDate/toKEVDate). Entries without
+/// exploitedSince cannot be placed in the window and are left out.
+/// Returns (items, requests, entries read).
+fn by_exploited_flag<G>(start: DateTime<Utc>, end: DateTime<Utc>, get: &G) -> Result<(Vec<Item>, usize, usize), SourceError>
+where
+    G: Fn(&str, &str, GetOpts) -> Result<Response, SourceError>,
+{
+    let (first, last) = (start.date_naive(), end.date_naive());
+    let (rows, requests) = search_all(get, &[("exploited", "true")], "exploited=true", FALLBACK_MAX_PAGES)?;
+    let items = rows.iter()
+        .filter(|v| date_of(v, "exploitedSince").is_some_and(|d| (first..=last).contains(&d.date_naive())))
+        .map(to_item)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((newest_first(items), requests, rows.len()))
+}
+
+fn fetch_with<G>(start: DateTime<Utc>, end: DateTime<Utc>, get: &G) -> Result<FetchOutput, SourceError>
+where
+    G: Fn(&str, &str, GetOpts) -> Result<Response, SourceError>,
+{
+    let mut stats = Map::new();
+    let items = match by_kev_date(start, end, get) {
+        Ok((items, requests)) => {
+            stats.insert("via".into(), "fromKEVDate".into());
+            stats.insert("requests".into(), requests.into());
+            items
         }
-    }
-    if !done {
-        return Err(SourceError::new(format!("{NAME}: more than {} results; page cap hit", MAX_PAGES * PAGE_SIZE)));
-    }
-    let mut out = rows.iter().map(to_item).collect::<Result<Vec<_>, _>>()?;
-    out.sort_by(|a, b| (&b.published, &b.id).cmp(&(&a.published, &a.id)));
-    Ok(out.into())
+        // Rate limited: the fallback would send up to 18 more requests to the same host.
+        Err(primary) if primary.status == Some(429) => return Err(primary),
+        Err(primary) => {
+            eprintln!("  {}; trying exploited=true", primary.message);
+            let (items, requests, read) = by_exploited_flag(start, end, get)
+                .map_err(|e| SourceError::new(format!("{}; fallback: {}", primary.message, e.message)))?;
+            stats.insert("via".into(), "exploited=true".into());
+            stats.insert("requests".into(), requests.into());
+            stats.insert("scanned".into(), read.into());
+            stats.insert("primary_error".into(), primary.message.into());
+            items
+        }
+    };
+    Ok(FetchOutput { items, stats })
 }
 
 pub fn fetch(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<FetchOutput, SourceError> {
@@ -204,6 +282,131 @@ mod tests {
         assert_eq!(calls.iter().map(|c| p(c, "page")).collect::<Vec<_>>(), ["0", "1"]);
         assert_eq!(p(&calls[0], "fromKEVDate"), "2026-10-27");
         assert_eq!(p(&calls[0], "toKEVDate"), "2026-11-03");
+    }
+
+    fn param(o: &GetOpts, k: &str) -> Option<String> {
+        o.params.iter().find(|(a, _)| *a == k).map(|(_, b)| b.to_string())
+    }
+
+    /// Page `page` of euvd_search_exploited.json (6 real entries from
+    /// /api/search?exploited=true, 2026-11-06) served 3 per page.
+    fn exploited_page(page: usize) -> Response {
+        let j = fixture_json("euvd_search_exploited.json");
+        let rows = j["items"].as_array().unwrap();
+        let a = (page * 3).min(rows.len());
+        ok_json(&json!({"items": rows[a..(a + 3).min(rows.len())], "total": j["total"]}))
+    }
+
+    fn http(status: u16, label: &str) -> SourceError {
+        SourceError { message: format!("{label}: HTTP {status}"), status: Some(status) }
+    }
+
+    fn euvd_ids(items: &[Item]) -> Vec<&str> {
+        items.iter().map(|i| i.x("euvd_id")).collect()
+    }
+
+    #[test]
+    fn primary_ok_no_fallback() {
+        let j = fixture_json("euvd_search.json");
+        let fake = |_url: &str, _label: &str, o: GetOpts| {
+            assert!(param(&o, "exploited").is_none(), "fallback must not run");
+            Ok(ok_json(&j))
+        };
+        let out = fetch_with(start(), end(), &fake).unwrap();
+        assert_eq!(euvd_ids(&out.items), ["EUVD-2026-102437", "EUVD-2026-112462"]);
+        assert_eq!(out.stats["via"], "fromKEVDate");
+        assert_eq!(out.stats["requests"], 1);
+        assert!(!out.stats.contains_key("primary_error"));
+    }
+
+    #[test]
+    fn fallback_when_primary_fails() {
+        let cases: Vec<(&str, Box<dyn Fn() -> Result<Response, SourceError>>)> = vec![
+            ("HTTP 404", Box::new(|| Err(http(404, "ENISA EUVD (fromKEVDate) page 0")))),
+            ("HTTP 403", Box::new(|| Err(http(403, "ENISA EUVD (fromKEVDate) page 0")))),
+            // a proxy block page
+            ("not JSON", Box::new(|| Ok(resp("<html>blocked</html>", 200, &[], "https://example.test/", false)))),
+            ("no 'items' list", Box::new(|| Ok(ok_json(&json!({"content": [], "totalElements": 0}))))),
+            // fromKEVDate ignored: every exploited entry comes back, more than the page cap
+            ("page cap hit", Box::new(|| Ok(ok_json(&json!({"items": [{"id": "EUVD-1"}], "total": 1786}))))),
+            ("without id", Box::new(|| Ok(ok_json(&json!({"items": [{"aliases": "CVE-1"}], "total": 1}))))),
+        ];
+        for (want, primary) in cases {
+            let pages: Mutex<Vec<String>> = Mutex::new(vec![]);
+            let fake = |_url: &str, _label: &str, o: GetOpts| {
+                if param(&o, "fromKEVDate").is_some() {
+                    return primary();
+                }
+                assert_eq!(param(&o, "exploited").as_deref(), Some("true"));
+                assert!(param(&o, "toKEVDate").is_none());
+                let page = param(&o, "page").unwrap();
+                pages.lock().unwrap().push(page.clone());
+                Ok(exploited_page(page.parse().unwrap()))
+            };
+            let out = fetch_with(start(), end(), &fake).unwrap_or_else(|e| panic!("{want}: {e}"));
+            // Window 2026-10-27..2026-11-03, both ends included: Oct 26 and Nov 4 are out,
+            // and so is an entry whose exploitedSince (Oct 10) is later than its dateUpdated.
+            assert_eq!(euvd_ids(&out.items), ["EUVD-2026-114575", "EUVD-2026-115872", "EUVD-2026-108169"], "{want}");
+            assert_eq!(out.items[0].published, "2026-11-03");
+            assert_eq!(out.items[2].published, "2026-10-27");
+            assert_eq!(pages.into_inner().unwrap(), ["0", "1"]);
+            assert_eq!(out.stats["via"], "exploited=true");
+            assert_eq!(out.stats["requests"], 2);
+            assert_eq!(out.stats["scanned"], 6);
+            let err = out.stats["primary_error"].as_str().unwrap();
+            assert!(err.contains(want), "{want}: {err}");
+        }
+    }
+
+    #[test]
+    fn rate_limited_primary_skips_fallback() {
+        let fake = |_url: &str, _label: &str, o: GetOpts| {
+            assert!(param(&o, "exploited").is_none(), "fallback must not run after a 429");
+            Err(http(429, "ENISA EUVD (fromKEVDate) page 0"))
+        };
+        let e = fetch_with(start(), end(), &fake).unwrap_err();
+        assert_eq!(e.message, "ENISA EUVD (fromKEVDate) page 0: HTTP 429");
+    }
+
+    #[test]
+    fn both_fail() {
+        let fake = |_url: &str, _label: &str, o: GetOpts| {
+            if param(&o, "fromKEVDate").is_some() {
+                Err(http(404, "ENISA EUVD (fromKEVDate) page 0"))
+            } else {
+                Err(http(429, "ENISA EUVD (exploited=true) page 0"))
+            }
+        };
+        let e = fetch_with(start(), end(), &fake).unwrap_err();
+        assert_eq!(e.message, "ENISA EUVD (fromKEVDate) page 0: HTTP 404; fallback: ENISA EUVD (exploited=true) page 0: HTTP 429");
+    }
+
+    #[test]
+    fn list_changed_while_paging() {
+        // Page 1 repeats page 0 (an update moved entries down): fewer distinct ids than total.
+        let fake = |_url: &str, _label: &str, o: GetOpts| {
+            if param(&o, "fromKEVDate").is_some() {
+                return Err(http(404, "primary"));
+            }
+            Ok(exploited_page(0))
+        };
+        let e = fetch_with(start(), end(), &fake).unwrap_err();
+        assert!(e.message.contains("3 distinct ids for a total of 6; the list changed while paging"), "{}", e.message);
+    }
+
+    /// Live: the fallback query finds the same entries as fromKEVDate for the last 7 days.
+    /// cargo test -- --ignored live_fallback_matches --nocapture
+    #[test]
+    #[ignore]
+    fn live_fallback_matches_primary_euvd() {
+        let end = Utc::now();
+        let start = end - chrono::Duration::days(7);
+        let (a, ra) = by_kev_date(start, end, &common::get).unwrap();
+        let (b, rb, read) = by_exploited_flag(start, end, &common::get).unwrap();
+        println!("LIVE euvd fromKEVDate: {} items, {ra} requests; exploited=true: {} of {read} entries, {rb} requests",
+                 a.len(), b.len());
+        let ids = |v: &[Item]| { let mut x: Vec<String> = v.iter().map(|i| i.x("euvd_id").to_string()).collect(); x.sort(); x };
+        assert_eq!(ids(&a), ids(&b));
     }
 
     /// Live, against a copy of state/: EW_STATE_COPY=<dir> cargo test -- --ignored live_state_copy --nocapture

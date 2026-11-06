@@ -14,6 +14,13 @@
 //!               score/severity/exploited of older `decided` lines from triage.json
 //!   build.rs    the report sections, KPIs, RAG status and their definitions
 //!   pdf.rs      report.typ + data.json -> PDF/A-2b through the typst CLI
+//!   close.rs    monthly close: freeze a finished month (frozen.json), upload its PDF,
+//!               the quality-check sample and the review reminder in Linear
+//!
+//! Data marking (since 2026-11-06, build::marking): EW_ENVIRONMENT = lab | test |
+//! production (default lab). Production carries none; otherwise every page says
+//! "LAB DATA" when the tracker is linear-mock, else "TEST DATA". A test run of the
+//! close (`--now`) is marked at least TEST DATA.
 //!
 //! The report takes no lock: it only reads the event log (and triage.json for the
 //! backfill), and a last line still being written is skipped (model::read_events). data_sha is the sha256 of
@@ -21,8 +28,12 @@
 //! reports of equal data have equal data_sha.
 
 mod build;
+pub mod close;
 mod model;
 mod pdf;
+
+#[allow(unused_imports)] // MonthlyUpload and ReviewRef: for the page's report card
+pub use close::{MonthlyUpload, ReviewRef, latest_monthly};
 
 use std::path::PathBuf;
 
@@ -96,6 +107,10 @@ impl Period {
     }
 }
 
+/// Renders report.json (+ data_sha, tickets as of) to PDF bytes: pdf::render, or a
+/// stand-in in tests (no typst there).
+pub type Renderer = fn(&Value, &str, DateTime<Utc>) -> Result<Vec<u8>, Fatal>;
+
 #[derive(Debug, Clone, Default)]
 pub struct Opts {
     /// Render the PDF (needs the typst CLI). Off in unit tests.
@@ -103,6 +118,24 @@ pub struct Opts {
     /// "Tickets as of": when the tracker was last read back. None: the last writing
     /// run in runs.jsonl that got that far (run_at), up to the end of the period.
     pub tickets_as_of: Option<DateTime<Utc>>,
+    /// EW_ENVIRONMENT (lab | test | production) for the data marking; None: read it
+    /// from the environment (environment()).
+    pub environment: Option<String>,
+    /// A test run with a set clock (`--close-month --now`): marked at least TEST DATA.
+    pub test_run: bool,
+    /// The quality-check sample (close.rs), printed in the appendix of a monthly report.
+    pub sample: Option<Value>,
+    /// None: pdf::render (the typst CLI).
+    pub render: Option<Renderer>,
+}
+
+/// EW_ENVIRONMENT, trimmed and lowercased; unset or empty: "lab".
+pub fn environment_from(var: &dyn Fn(&str) -> Option<String>) -> String {
+    var("EW_ENVIRONMENT").map(|v| v.trim().to_ascii_lowercase()).filter(|v| !v.is_empty()).unwrap_or_else(|| "lab".into())
+}
+
+pub fn environment() -> String {
+    environment_from(&|k| std::env::var(k).ok())
 }
 
 /// What generate() produced.
@@ -165,6 +198,14 @@ pub fn data_sha(report: &Value) -> String {
 /// return it. Err when the event log is missing or the period ends before its
 /// coverage; a period that starts before it carries a coverage note.
 pub fn generate(period: &Period, now: DateTime<Utc>, opts: &Opts) -> Result<Generated, Fatal> {
+    if let Period::Month { .. } = period {
+        let name = period.month_name(now);
+        if let Some(f) = state::load_json::<Value>(&format!("reports/{name}/{}", close::FROZEN)) {
+            return Err(Fatal(format!(
+                "report: {}/reports/{name} is frozen ({} at {}); the final monthly report is not overwritten",
+                state::dir().display(), close::FROZEN, f["frozen_at"].as_str().unwrap_or("?"))));
+        }
+    }
     let raw = state::load_bytes(EVENTS_FILE).ok_or_else(|| Fatal(format!(
         "report: {}/{EVENTS_FILE} not found; the event log is started by the first writing `run` (since 2026-11-05)",
         state::dir().display())))?;
@@ -188,18 +229,23 @@ pub fn generate(period: &Period, now: DateTime<Utc>, opts: &Opts) -> Result<Gene
         .min(cut);
 
     let label = period.label(now);
+    let environment = opts.environment.clone().unwrap_or_else(environment);
     let mut data = build::build(&log, &runs, &build::Frame {
-        start, end, cut, as_of, mtd: *period == Period::MonthToDate, list,
+        start, end, cut, as_of, mtd: *period == Period::MonthToDate, list, environment, test_run: opts.test_run,
     });
     data["label"] = json!(label);
     // UTC twin of tickets_as_of (local), read by `serve` to label the last PDF.
     data["as_of"] = json!(iso_utc(as_of));
     data["period"]["kind"] = json!(if *period == Period::MonthToDate { "month-to-date" } else { "month" });
     data["period"]["name"] = json!(period.month_name(now));
+    if let (Some(s), Period::Month { .. }) = (&opts.sample, period) {
+        data["review_sample"] = s.clone();
+    }
     let data_sha = data_sha(&data);
     data["generated_at"] = json!(build::local(now));
 
-    let pdf = if opts.pdf { Some(pdf::render(&data, &data_sha, as_of)?) } else { None };
+    let render = opts.render.unwrap_or(pdf::render);
+    let pdf = if opts.pdf { Some(render(&data, &data_sha, as_of)?) } else { None };
     let pdf_sha = pdf.as_deref().map(sha_hex).unwrap_or_default();
 
     let name = period.dir_name(now);
@@ -241,7 +287,7 @@ const REUPLOAD_HOURS: i64 = 24;
 /// error is returned in `upload_error`, not as Err: the PDF on disk is still good.
 /// Shared by `run` and `serve`.
 pub fn publish_month_to_date(now: DateTime<Utc>) -> Result<Generated, Fatal> {
-    let mut g = generate(&Period::MonthToDate, now, &Opts { pdf: true, tickets_as_of: Some(now) })?;
+    let mut g = generate(&Period::MonthToDate, now, &Opts { pdf: true, tickets_as_of: Some(now), ..Default::default() })?;
     let last: Value = state::load_json(UPLOAD_FILE).unwrap_or(Value::Null);
     let last_sha = last["content_sha"].as_str().unwrap_or("");
     let last_at = last["uploaded_at"].as_str().and_then(parse_iso);
@@ -277,8 +323,9 @@ pub fn uploaded() -> Option<(String, String, String)> {
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Calendar month to report, YYYY-MM (Amsterdam time).
-    #[arg(long, conflicts_with = "month_to_date", required_unless_present = "month_to_date")]
+    /// Calendar month to report, YYYY-MM (Amsterdam time). With --close-month: the
+    /// month to close (default: the month before --now).
+    #[arg(long, conflicts_with = "month_to_date", required_unless_present_any = ["month_to_date", "close_month"])]
     pub month: Option<String>,
     /// From the first of this month to now.
     #[arg(long)]
@@ -286,14 +333,25 @@ pub struct Args {
     /// Write report.json only, no PDF.
     #[arg(long)]
     pub no_pdf: bool,
+    /// Close a finished month: freeze its final report, upload the PDF to the wiki and
+    /// file the review reminder in Linear (see close.rs). Takes the run lock.
+    #[arg(long, conflicts_with_all = ["month_to_date", "no_pdf"])]
+    pub close_month: bool,
+    /// --close-month only, for tests: act as if it were this moment (RFC 3339). The
+    /// report is marked at least TEST DATA and the reminder title starts with "[TEST] ".
+    #[arg(long, requires = "close_month", value_name = "RFC3339")]
+    pub now: Option<String>,
 }
 
 pub fn main(args: Args) -> Result<i32, Fatal> {
+    if args.close_month {
+        return close::main(args.month.as_deref(), args.now.as_deref());
+    }
     let period = match &args.month {
         Some(m) => Period::parse_month(m)?,
         None => Period::MonthToDate,
     };
-    let g = generate(&period, state::utcnow(), &Opts { pdf: !args.no_pdf, tickets_as_of: None })?;
+    let g = generate(&period, state::utcnow(), &Opts { pdf: !args.no_pdf, ..Default::default() })?;
     println!("{}", g.label);
     println!("  tickets as of {}, history from {}", g.as_of, g.coverage_from);
     if g.json["coverage"]["partial"] == json!(true) {

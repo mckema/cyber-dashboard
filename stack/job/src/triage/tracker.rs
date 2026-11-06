@@ -93,8 +93,16 @@
 //! from the item key. Attachment URLs are no dedup key either: Linear upserts
 //! them per (issue, url) only, the same url on another issue is a new
 //! attachment (T16).
+//!
+//! Tasks (since 2026-11-06): create_task() files a plain issue that is not an item,
+//! such as the monthly report review reminder (report/close.rs), straight into the
+//! team's workflow state of a given type (TaskSpec::state_type, "unstarted" = Todo),
+//! not into Triage. The state is looked up by type like the triage state (the one
+//! with the lowest position when the team has several). It uses the same
+//! idempotent create (IssueCreateInput.id, read back by id on a conflict); the
+//! caller keeps the id. assigneeId and dueDate are sent only when set.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -242,7 +250,26 @@ pub enum TrackerError {
     Fake(String),
 }
 
+/// A plain issue that is not an item (e.g. the monthly review reminder): created in
+/// the team's first workflow state of `state_type`, not in Triage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSpec {
+    pub title: String,
+    /// Markdown.
+    pub description: String,
+    /// Linear workflow state type, e.g. "unstarted" (Todo).
+    pub state_type: String,
+    /// Linear user id; sent only when set.
+    pub assignee_id: Option<String>,
+    /// Sent only when set.
+    pub due_date: Option<NaiveDate>,
+}
+
 pub trait Tracker {
+    /// Create one task (TaskSpec) with `id` (a UUID v4 the caller keeps) as its
+    /// tracker id. Called again with the same id after an answer was lost, it
+    /// returns the issue that exists.
+    fn create_task(&mut self, spec: &TaskSpec, id: &str) -> Result<IssueRef, TrackerError>;
     /// Create one issue for a matched item in the triage inbox, with `id` (a UUID
     /// v4 the store keeps for the item) as its tracker id. Called again with the
     /// same id after an answer was lost, it returns the issue that exists.
@@ -447,6 +474,9 @@ pub struct FakeIssue {
     pub changed: String,
     #[serde(default)]
     pub comments: Vec<FakeComment>,
+    /// create_task(): the caller's id; a second create_task with it returns this issue.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task_id: String,
 }
 
 /// The states a test can write in the file ("completed" is accepted for done, "canceled"
@@ -568,7 +598,28 @@ impl Tracker for FakeTracker {
             identifier: identifier.clone(), url: url.clone(), title: issue_title(item),
             description: issue_description(item, m), item_key: item.key(), created: iso_utc((self.clock)()),
             state: FakeState::Triage, assignee: String::new(), due: String::new(), reason: String::new(),
-            actor: String::new(), changed: String::new(), comments: vec![],
+            actor: String::new(), changed: String::new(), comments: vec![], task_id: String::new(),
+        });
+        Self::save(&f);
+        Ok(IssueRef { id: identifier.clone(), identifier, url })
+    }
+
+    /// A task is an accepted issue (no triage); `id` is kept, and a repeat returns
+    /// the issue that has it (Linear's conflict, then the read-back by id).
+    fn create_task(&mut self, spec: &TaskSpec, id: &str) -> Result<IssueRef, TrackerError> {
+        let mut f = Self::load()?;
+        if let Some(i) = f.issues.iter().find(|i| !id.is_empty() && i.task_id == id) {
+            return Ok(IssueRef { id: i.identifier.clone(), identifier: i.identifier.clone(), url: i.url.clone() });
+        }
+        let identifier = format!("FAKE-{}", f.next);
+        let url = format!("https://linear.invalid/fake/issue/{identifier}");
+        f.next += 1;
+        f.issues.push(FakeIssue {
+            identifier: identifier.clone(), url: url.clone(), title: spec.title.clone(),
+            description: spec.description.clone(), item_key: String::new(), created: iso_utc((self.clock)()),
+            state: FakeState::Accepted, assignee: spec.assignee_id.clone().unwrap_or_default(),
+            due: spec.due_date.map(|d| d.to_string()).unwrap_or_default(), reason: String::new(),
+            actor: String::new(), changed: String::new(), comments: vec![], task_id: id.into(),
         });
         Self::save(&f);
         Ok(IssueRef { id: identifier.clone(), identifier, url })
@@ -752,6 +803,13 @@ const Q_TRIAGE_STATE: &str = "query TriageState($team: ID!) {
   }
 }";
 
+/// The team's workflow states of one type (create_task: "unstarted" = Todo).
+const Q_STATE_BY_TYPE: &str = "query StateByType($team: ID!, $type: String!) {
+  workflowStates(filter: { team: { id: { eq: $team } }, type: { eq: $type } }) {
+    nodes { id name type position }
+  }
+}";
+
 const M_ISSUE_CREATE: &str = "mutation IssueCreate($input: IssueCreateInput!) {
   issueCreate(input: $input) {
     success
@@ -795,15 +853,18 @@ pub struct LinearTracker {
     transport: Box<dyn Transport>,
     pub team_id: String,
     triage_state: Option<String>,
+    /// create_task(): workflow state ids by type, looked up once each.
+    typed_states: Vec<(String, String)>,
     /// Rate-limit headers of the last answer, for the health note.
     pub rate: RateLimit,
-    /// create_issue() calls that found their issue already created (Tracker::recovered).
+    /// create_issue() / create_task() calls that found their issue already created (Tracker::recovered).
     recovered: usize,
 }
 
 impl LinearTracker {
     pub fn new(transport: Box<dyn Transport>, team_id: &str) -> Self {
-        Self { transport, team_id: team_id.into(), triage_state: None, rate: RateLimit::default(), recovered: 0 }
+        Self { transport, team_id: team_id.into(), triage_state: None, typed_states: vec![], rate: RateLimit::default(),
+               recovered: 0 }
     }
 
     /// LINEAR_API_KEY + LINEAR_TEAM_ID from the environment (used by the live test).
@@ -881,6 +942,46 @@ impl LinearTracker {
         })?;
         self.triage_state = Some(id.to_string());
         Ok(id.to_string())
+    }
+
+    /// Id of the team's workflow state of type `state_type` with the lowest position
+    /// (looked up once per type, then cached).
+    pub fn state_id_by_type(&mut self, state_type: &str) -> Result<String, TrackerError> {
+        if let Some((_, id)) = self.typed_states.iter().find(|(t, _)| t == state_type) {
+            return Ok(id.clone());
+        }
+        let team = self.team_id.clone();
+        let d = self.gql(Q_STATE_BY_TYPE, json!({"team": team, "type": state_type}), "workflowStates")?;
+        let nodes = d.pointer("/workflowStates/nodes").and_then(Value::as_array)
+            .ok_or_else(|| TrackerError::Reply("workflowStates: no nodes".into()))?;
+        let pos = |n: &Value| n.get("position").and_then(Value::as_f64).unwrap_or(f64::MAX);
+        let id = nodes.iter().filter(|n| n.get("id").and_then(Value::as_str).is_some_and(|s| !s.is_empty()))
+            .min_by(|a, b| pos(a).total_cmp(&pos(b)))
+            .and_then(|n| n.get("id")).and_then(Value::as_str)
+            .ok_or_else(|| TrackerError::Config(format!("Linear team {team} has no workflow state of type {state_type:?}; \
+                                                         check LINEAR_TEAM_ID")))?
+            .to_string();
+        self.typed_states.push((state_type.to_string(), id.clone()));
+        Ok(id)
+    }
+
+    /// issueCreate with `input`; on an id conflict the existing issue is read back by id
+    /// (IdTaken when Linear does not return it).
+    fn create_with_id(&mut self, input: Value, id: &str) -> Result<IssueRef, TrackerError> {
+        let d = match self.gql(M_ISSUE_CREATE, json!({"input": input}), "issueCreate") {
+            Ok(d) => d,
+            Err(e) if is_id_conflict(&e) => {
+                // Created by an earlier attempt whose answer was lost.
+                let r = self.issue_by_id(id)?.ok_or_else(|| TrackerError::IdTaken(id.into()))?;
+                self.recovered += 1;
+                return Ok(r);
+            }
+            Err(e) => return Err(e),
+        };
+        if d.pointer("/issueCreate/success") != Some(&Value::Bool(true)) {
+            return Err(TrackerError::Reply(format!("issueCreate: success is not true: {}", head(&d.to_string(), 200))));
+        }
+        issue_ref(d.pointer("/issueCreate/issue").unwrap_or(&Value::Null), "issueCreate")
     }
 
     /// The issue with this id, None when Linear does not return it (`issue: null`
@@ -1030,20 +1131,22 @@ impl Tracker for LinearTracker {
         let state = self.triage_state_id()?;
         let input = json!({"id": id, "teamId": self.team_id, "title": issue_title(item),
                            "description": issue_description(item, m), "stateId": state});
-        let d = match self.gql(M_ISSUE_CREATE, json!({"input": input}), "issueCreate") {
-            Ok(d) => d,
-            Err(e) if is_id_conflict(&e) => {
-                // Created by an earlier attempt whose answer was lost.
-                let r = self.issue_by_id(id)?.ok_or_else(|| TrackerError::IdTaken(id.into()))?;
-                self.recovered += 1;
-                return Ok(r);
-            }
-            Err(e) => return Err(e),
-        };
-        if d.pointer("/issueCreate/success") != Some(&Value::Bool(true)) {
-            return Err(TrackerError::Reply(format!("issueCreate: success is not true: {}", head(&d.to_string(), 200))));
+        self.create_with_id(input, id)
+    }
+
+    /// issueCreate in the team's first state of spec.state_type, with `id` as
+    /// IssueCreateInput.id; assigneeId and dueDate (YYYY-MM-DD) only when set.
+    fn create_task(&mut self, spec: &TaskSpec, id: &str) -> Result<IssueRef, TrackerError> {
+        let state = self.state_id_by_type(&spec.state_type)?;
+        let mut input = json!({"id": id, "teamId": self.team_id, "title": spec.title,
+                               "description": spec.description, "stateId": state});
+        if let Some(a) = spec.assignee_id.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            input["assigneeId"] = json!(a);
         }
-        issue_ref(d.pointer("/issueCreate/issue").unwrap_or(&Value::Null), "issueCreate")
+        if let Some(d) = spec.due_date {
+            input["dueDate"] = json!(d.format("%Y-%m-%d").to_string());
+        }
+        self.create_with_id(input, id)
     }
 
     fn recovered(&self) -> usize {
@@ -1436,6 +1539,81 @@ mod tests {
         assert_eq!(l.create_issue(&item(), &m(), ID).unwrap_err(),
                    TrackerError::Network("issue: operation timed out".into()));
         assert_eq!(l.recovered(), 0);
+    }
+
+    fn task(assignee: Option<&str>, due: Option<&str>) -> TaskSpec {
+        TaskSpec {
+            title: "Review monthly cyber threat report — November 2026".into(), description: "- [ ] check".into(),
+            state_type: "unstarted".into(), assignee_id: assignee.map(String::from),
+            due_date: due.map(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap()),
+        }
+    }
+
+    const UNSTARTED: &str = r#"{"data":{"workflowStates":{"nodes":[
+        {"id":"state-later","name":"Later","type":"unstarted","position":5},
+        {"id":"state-todo","name":"Todo","type":"unstarted","position":1}]}}}"#;
+
+    /// A task goes to the team's first unstarted state (Todo), not Triage; assigneeId
+    /// and dueDate only when set; the state is looked up once.
+    #[test]
+    fn linear_create_task_requests() {
+        let (mut l, seen) = linear(vec![
+            reply(200, UNSTARTED, &[]),
+            reply(200, &fixture("linear_issue_create.json"), &[]),
+            reply(200, &fixture("linear_issue_create.json"), &[]),
+        ]);
+        let r = l.create_task(&task(None, None), ID).unwrap();
+        assert_eq!(r.identifier, "CTP-123");
+        l.create_task(&task(Some(" user-1 "), Some("2026-12-03")), ID).unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "one state lookup");
+        assert!(seen[0]["query"].as_str().unwrap().starts_with("query StateByType("));
+        assert!(seen[0]["query"].as_str().unwrap().contains("type: { eq: $type }"));
+        assert_eq!(seen[0]["variables"], json!({"team": "team-uuid", "type": "unstarted"}));
+        assert_eq!(seen[1]["variables"]["input"], json!({
+            "id": ID, "teamId": "team-uuid", "title": "Review monthly cyber threat report — November 2026",
+            "description": "- [ ] check", "stateId": "state-todo"}));
+        let input = &seen[2]["variables"]["input"];
+        assert_eq!((input["assigneeId"].clone(), input["dueDate"].clone()), (json!("user-1"), json!("2026-12-03")));
+    }
+
+    /// The answer to the reminder's create was lost: the same id conflicts and the
+    /// issue is read back by id, as for item issues.
+    #[test]
+    fn linear_create_task_conflict_is_recovered_by_lookup() {
+        let (mut l, seen) = linear(vec![
+            reply(200, UNSTARTED, &[]),
+            reply(200, &fixture("linear_error_issue_conflict.json"), &[]),
+            reply(200, &fixture("linear_issue_by_id.json"), &[]),
+        ]);
+        let r = l.create_task(&task(None, None), ID).unwrap();
+        assert_eq!((r.id.as_str(), r.identifier.as_str()), (ID, "CTP-120"));
+        assert_eq!(l.recovered(), 1);
+        let seen = seen.lock().unwrap();
+        assert!(seen[2]["query"].as_str().unwrap().starts_with("query IssueById"));
+        assert_eq!(seen[2]["variables"], json!({"id": ID}));
+    }
+
+    #[test]
+    fn linear_create_task_without_such_state_is_a_config_error() {
+        let (mut l, _) = linear(vec![reply(200, r#"{"data":{"workflowStates":{"nodes":[]}}}"#, &[])]);
+        let e = l.create_task(&task(None, None), ID).unwrap_err();
+        assert!(matches!(&e, TrackerError::Config(m) if m.contains("no workflow state of type \"unstarted\"")), "{e:?}");
+    }
+
+    #[test]
+    fn fake_create_task_is_idempotent_by_id() {
+        let _t = state::testing::temp_state("tracker-fake-task");
+        let mut f = FakeTracker::with_clock(fixed_now);
+        let a = f.create_task(&task(Some("u1"), Some("2026-12-03")), ID).unwrap();
+        let b = f.create_task(&task(None, None), ID).unwrap();
+        assert_eq!(a, b);
+        let file = FakeTracker::load().unwrap();
+        assert_eq!(file.issues.len(), 1);
+        let i = &file.issues[0];
+        assert_eq!((i.state, i.assignee.as_str(), i.due.as_str(), i.task_id.as_str(), i.item_key.as_str()),
+                   (FakeState::Accepted, "u1", "2026-12-03", ID, ""));
+        assert_ne!(f.create_task(&task(None, None), "other-id").unwrap(), a);
     }
 
     /// Only "conflict on insert of Issue" is recovered; every other INPUT_ERROR or

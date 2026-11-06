@@ -235,6 +235,10 @@ mod tests {
     }
 
     impl Tracker for Flaky {
+        fn create_task(&mut self, _spec: &crate::triage::tracker::TaskSpec, _id: &str) -> Result<IssueRef, TrackerError> {
+            Err(TrackerError::Reply("Flaky: no tasks".into()))
+        }
+
         fn create_issue(&mut self, item: &Item, _m: &Match, _id: &str) -> Result<IssueRef, TrackerError> {
             self.call(format!("create {}", item.id))?;
             let n = &item.id[10..]; // NCSC-2026-0464 -> CTP-0464

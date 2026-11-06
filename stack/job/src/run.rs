@@ -22,7 +22,13 @@
 //!   LINEAR_TEAM_ID    live mode only: team whose Triage inbox receives issues
 //!   LINEAR_API_URL    https://api.linear.app/graphql   live mode endpoint (compose lab: the linear-mock service)
 //!   LOCK_WAIT_SECONDS 900                      --every: how long a loop run waits for a held lock
-//!   SERVE_PUBLIC_URL  —                        lab: URL of the `serve` service, linked from the page stamp
+//!   SERVE_PUBLIC_URL  —                        lab: URL of the `serve` service, linked from the report card
+//!                                              ("Export snapshot") and the Linear section ("Refresh tickets")
+//!   EW_ENVIRONMENT    lab                      lab | test | production: data marking of the report PDFs
+//!   REVIEW_SAMPLE_SIZE 10                      monthly close: automatically ruled-out items sampled for review
+//!   WIKI_PUBLIC_URL   —                        the page as the browser sees it (review reminder links)
+//!   REPORT_REVIEW_ASSIGNEE_ID —                monthly close: Linear user id the review reminder is assigned to
+//!   REPORT_REVIEW_DUE_DAYS    —                monthly close: reminder due this many business days after month end
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -45,7 +51,8 @@ const WINDOW_DAYS: i64 = 7;
 // Regions that change on every run without the data changing. They are left out
 // of the "did anything change" fingerprint, otherwise every run writes a new
 // page version (Wiki.js keeps them all).
-const VOLATILE: &[&str] = &["t-health", "n-health", "winlabel"];
+// l-refresh carries the tickets' "as of" time.
+const VOLATILE: &[&str] = &["t-health", "n-health", "winlabel", "l-refresh"];
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -167,6 +174,9 @@ fn feed_note(key: &str, items: &[Item], st: &Map<String, Value>) -> String {
                              st.get("mode").and_then(Value::as_str).unwrap_or(""), n("changed"), n("requests")),
         "nvd" => "Enrichment only: adds NVD scores to CVE.org records; polled every 2 h.".into(),
         "github" => format!("{} requests.", n("requests")),
+        "euvd" if st.contains_key("primary_error") => format!(
+            "Fallback: all {} exploited entries read ({} requests); the fromKEVDate query failed: {}",
+            n("scanned"), n("requests"), clip(&n("primary_error"), 160)),
         _ => String::new(),
     }
 }
@@ -290,26 +300,32 @@ fn without_volatile(html: &str) -> Result<String, Fatal> {
         tbody: blank(&ids(&render::TBODY_IDS)),
         text: blank(&ids(&render::TEXT_IDS)),
         stamp: String::new(),
+        html: blank(&ids(&render::HTML_IDS)),
     };
     render::apply_regions(html, &r)
 }
 
 /// sha256 hex of the regions that carry data, plus each feed's status, the Linear
-/// row's status and the content sha of the report PDF the page links to. Stored in state/wiki.json; an equal fingerprint means there is nothing
-/// new to write.
-fn fingerprint(regions: &Regions, health: &[HealthRow], tracker: Option<&HealthRow>, report_sha: &str) -> String {
+/// row's status, the content sha of the report PDF the page links to and the
+/// newest final monthly PDF (pdf sha and review reminder). Stored in
+/// state/wiki.json; an equal fingerprint means there is nothing new to write.
+fn fingerprint(regions: &Regions, health: &[HealthRow], tracker: Option<&HealthRow>, report_sha: &str,
+               monthly: &str) -> String {
     let pick = |v: &[(String, String)]| -> Map<String, Value> {
         v.iter().filter(|(k, _)| !VOLATILE.contains(&k.as_str())).map(|(k, x)| (k.clone(), json!(x))).collect()
     };
     let stable = json!({
         "tbody": pick(&regions.tbody),
         "text": pick(&regions.text),
+        "html": pick(&regions.html),
         // Health statuses count (a feed going stale is news); their timestamps don't.
         "health": health.iter().map(|h| json!([h.source, h.status])).collect::<Vec<_>>(),
         // Linear going from ok to error (or back) is news; its counts and message are not.
         "tracker": tracker.map(|t| t.status.clone()),
         // A new month-to-date PDF on the wiki changes the link (its ?v=), so rewrite.
         "report": report_sha,
+        // A new final monthly PDF (or its review reminder) changes the card.
+        "monthly": monthly,
     });
     // serde_json::Map is a BTreeMap (no preserve_order feature), so object keys are serialised sorted.
     let s = serde_json::to_string(&stable).expect("JSON value");
@@ -357,8 +373,10 @@ fn run(args: &Args) -> Result<(), Fatal> {
 
     // FR-A4: the month-to-date report PDF, uploaded as a wiki asset when its content
     // changed (writing runs only; never fails the run).
+    let mut report_json: Option<Value> = None;
     let report_rec = writing.then(|| match report::publish_month_to_date(now) {
         Ok(g) => {
+            report_json = Some(g.json.clone());
             println!("  report: {} (content {}{})", g.label, &g.content_sha[..12],
                      if g.uploaded { ", uploaded" } else { ", unchanged" });
             if let Some(e) = &g.upload_error {
@@ -372,16 +390,51 @@ fn run(args: &Args) -> Result<(), Fatal> {
             json!({"error": clip(&e.0, 300)})
         }
     });
+    // FR-A4 monthly close, catch-up: once the previous Amsterdam month is over, freeze
+    // it, upload its PDF and file the review reminder (report/close.rs). Resumes what
+    // failed last time; never fails the run (a panic is caught and recorded too).
+    let close_rec = writing.then(|| {
+        let period = report::close::previous_month(now);
+        match catch_unwind(AssertUnwindSafe(|| report::close::close_month_live(&period, now, false))) {
+            Ok(Ok(c)) => {
+                for l in c.lines() {
+                    println!("  report: {l}");
+                }
+                c.record()
+            }
+            Ok(Err(e)) => {
+                println!("  report: close {}: {}", period.month_name(now), e.0);
+                json!({"month": period.month_name(now), "error": clip(&e.0, 300)})
+            }
+            Err(p) => {
+                let msg = format!("internal error: panic: {}", panic_text(p));
+                println!("  report: close {}: {msg}", period.month_name(now));
+                json!({"month": period.month_name(now), "error": clip(&msg, 300)})
+            }
+        }
+    });
     let uploaded = report::uploaded();
+    // The card links the newest final monthly PDF and its review reminder: a new one rewrites the page.
+    let monthly = report::latest_monthly();
+    let monthly_sha = monthly.as_ref()
+        .map(|m| format!("{}|{}", m.pdf_sha, m.review.as_ref().map(|r| r.identifier.as_str()).unwrap_or("")))
+        .unwrap_or_default();
 
     let mut regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health, triage.tracker.as_ref(),
                                             &triage.view, start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
     let serve_url = std::env::var("SERVE_PUBLIC_URL").ok();
+    // Linear section summary: this run's month-to-date report, else the last one on
+    // disk (dry run, --out, or a report error).
+    let report_json = report_json.or_else(|| state::load_json::<Value>("reports/month-to-date/report.json"));
+    regions.html = render::linear_regions(report_json.as_ref(), serve_url.as_deref());
     let pdf_href = uploaded.as_ref().map(|(p, sha, _)| format!("{p}?v={}", &sha[..sha.len().min(12)]));
     let as_of = uploaded.as_ref().map(|(_, _, a)| a.as_str()).unwrap_or("");
-    regions.stamp.push_str(&render::report_links(pdf_href.as_deref(), as_of, serve_url.as_deref()));
+    let monthly_link = monthly.and_then(|m| {
+        render::MonthlyLink::new(&m.month, &m.path, &m.pdf_sha, &m.frozen_at, m.review.map(|r| (r.identifier, r.url)))
+    });
+    regions.stamp.push_str(&render::report_links(monthly_link.as_ref(), pdf_href.as_deref(), as_of, serve_url.as_deref(), now));
     let report_sha = uploaded.as_ref().map(|(_, sha, _)| sha.as_str()).unwrap_or("");
-    let fp = fingerprint(&regions, &health, triage.tracker.as_ref(), report_sha);
+    let fp = fingerprint(&regions, &health, triage.tracker.as_ref(), report_sha, &monthly_sha);
 
     let mut record = Map::new();
     record.insert("run_at".into(), json!(iso_utc(now)));
@@ -454,6 +507,9 @@ fn run(args: &Args) -> Result<(), Fatal> {
     record.insert("triage".into(), triage.record);
     if let Some(r) = report_rec {
         record.insert("report".into(), r);
+    }
+    if let Some(c) = close_rec {
+        record.insert("close_month".into(), c);
     }
     record.insert("seconds".into(), json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0));
     state::append_run(&Value::Object(record));
@@ -558,25 +614,47 @@ mod tests {
     }
 
     #[test]
+    fn euvd_note_only_on_fallback() {
+        let mut st = Map::new();
+        st.insert("via".into(), json!("fromKEVDate"));
+        assert_eq!(feed_note("euvd", &[], &st), "");
+        st.insert("via".into(), json!("exploited=true"));
+        st.insert("requests".into(), json!(18));
+        st.insert("scanned".into(), json!(1786));
+        st.insert("primary_error".into(), json!("ENISA EUVD (fromKEVDate) page 0: HTTP 404"));
+        assert_eq!(feed_note("euvd", &[], &st),
+                   "Fallback: all 1786 exploited entries read (18 requests); the fromKEVDate query failed: ENISA EUVD (fromKEVDate) page 0: HTTP 404");
+    }
+
+    #[test]
     fn fingerprint_follows_data_not_volatile_regions() {
         let regions = |kev: &str, win: &str| Regions {
             tbody: vec![("t-health".into(), win.into()), ("t-kev".into(), kev.into())],
             text: vec![("winlabel".into(), win.into()), ("s-kev".into(), "1".into())],
             stamp: win.into(),
+            html: vec![("l-refresh".into(), format!("as of {win}")), ("l-summary".into(), "Waiting 1".into())],
         };
         let health = |status: &str| vec![HealthRow { source: "CISA KEV".into(), status: status.into(), ..Default::default() }];
         let linear = |status: &str, note: &str| HealthRow { source: "Linear".into(), status: status.into(), note: note.into(), ..Default::default() };
-        let a = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "");
+        let a = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "", "");
         assert_eq!(a.len(), 64);
-        assert_eq!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:33"), &health("ok"), None, ""));
-        assert_ne!(a, fingerprint(&regions("<tr>CVE-2</tr>", "06:03"), &health("ok"), None, ""));
-        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("stale"), None, ""));
+        assert_eq!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:33"), &health("ok"), None, "", ""));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-2</tr>", "06:03"), &health("ok"), None, "", ""));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("stale"), None, "", ""));
         // The Linear row's status counts; its note (counts, error text) does not.
-        let ok = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "1 created")), "");
-        assert_eq!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "2 updated")), ""));
-        assert_ne!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("error", "HTTP 500")), ""));
+        let ok = fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "1 created")), "", "");
+        assert_eq!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("ok", "2 updated")), "", ""));
+        assert_ne!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("error", "HTTP 500")), "", ""));
         // A new report PDF on the wiki (its content sha) is news for the page link.
-        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "abc"));
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "abc", ""));
+        // The Linear summary counts; its "as of" (l-refresh) does not.
+        let mut r = regions("<tr>CVE-1</tr>", "06:03");
+        r.html[1].1 = "Waiting 2".into();
+        assert_ne!(a, fingerprint(&r, &health("ok"), None, "", ""));
+        // A new final monthly PDF (or its review reminder) as well.
+        assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "", "sha|"));
+        assert_ne!(fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "", "sha|"),
+                   fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "", "sha|TRI-30"));
         // Keys are serialised in sorted order, whatever order the map was built in.
         assert_eq!(serde_json::to_string(&json!({"b": 1, "a": {"z": 0, "y": 0}})).unwrap(), r#"{"a":{"y":0,"z":0},"b":1}"#);
     }
@@ -615,7 +693,7 @@ mod tests {
     #[test]
     fn without_volatile_ignores_per_run_regions_only() {
         let page = |health: &str, kev: &str, win: &str, stamp: &str| format!(
-            r#"<tbody id="t-health">{health}</tbody><tbody id="t-kev">{kev}</tbody><b id="winlabel">{win}</b><span id="n-health">x</span><div class="rstat" id="rstat">{stamp}</div>"#);
+            r#"<tbody id="t-health">{health}</tbody><tbody id="t-kev">{kev}</tbody><b id="winlabel">{win}</b><span id="n-health">x</span><div class="rstat" id="rstat">{stamp}</div><div class="lact" id="l-refresh"><span>as of {win}</span></div>"#);
         let a = without_volatile(&page("<tr>ok 06:03</tr>", "<tr>CVE-1</tr>", "06:03", "Generated <b>06:03</b>")).unwrap();
         let b = without_volatile(&page("<tr>ok 06:33</tr>", "<tr>CVE-1</tr>", "06:33", "Generated <b>06:33</b>")).unwrap();
         let reseeded = without_volatile(&page("", "", "", "")).unwrap();

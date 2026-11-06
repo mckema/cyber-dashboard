@@ -58,6 +58,11 @@
 //!   field_changed     field (assignee | due | reason), from, to (at: the read-back)
 //!   pruned            the record left triage.json (first_seen)
 //!
+//! The monthly close (report/close.rs, since 2026-11-06) appends three more kinds
+//! with the key `report:YYYY-MM` and the same line shape: report_frozen,
+//! sample_drawn and review_issue_created. They are not item events; the report
+//! model skips every `report:` key.
+//!
 //! When the file does not exist yet, the first save() writes a baseline instead
 //! of the queued events: the same events rebuilt from every record, with dates
 //! taken from the record, and "source": "baseline".
@@ -181,7 +186,7 @@ impl PartialEq for Store {
 
 /// One event line (module doc). `parts` make the id: equal parts, equal id, so a
 /// replayed event can be dropped.
-fn event(kind: &str, key: &str, at: &str, parts: &[&str], ts: DateTime<Utc>, source: &str, fields: Value) -> Value {
+pub(crate) fn event(kind: &str, key: &str, at: &str, parts: &[&str], ts: DateTime<Utc>, source: &str, fields: Value) -> Value {
     let id = hex::encode(&Sha256::digest(format!("{kind}|{key}|{}", parts.join("|")).as_bytes())[..16]);
     let mut v = json!({"id": id, "event": kind, "key": key, "at": at, "ts": iso_utc(ts), "source": source});
     if let (Some(o), Value::Object(f)) = (v.as_object_mut(), fields) {
