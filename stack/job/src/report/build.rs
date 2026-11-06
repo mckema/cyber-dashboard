@@ -689,6 +689,9 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
     // ---------------------------------------------------------- previous month
     let (pstart, pend, pname, plabel) = previous_month(f.start);
     let covered = log.coverage_from < pend;
+    // A previous month the event log covers only in part: its figures are shown (the
+    // column header says "partial") but give no trend arrow, like a month to date (2026-11-06).
+    let prev_partial = covered && pstart < log.coverage_from;
     let prev = covered.then(|| kpis(&facts(log, runs, pstart, pend)).0);
     // Trend against the previous month: ▲ ▼ = of the measure's number. A month to date
     // is a partial month: no arrow against a full one (Henry, 2026-11-06).
@@ -701,7 +704,7 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
         };
         let trend = match (k.num, p.and_then(|q| q.num)) {
             _ if f.mtd => "partial month",
-            _ if prev.is_none() => "—",
+            _ if prev.is_none() || prev_partial => "—",
             (Some(a), Some(b)) if (a - b).abs() < 0.05 => "=",
             (Some(a), Some(b)) if a > b => "▲",
             (Some(_), Some(_)) => "▼",

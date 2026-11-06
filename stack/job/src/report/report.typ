@@ -84,9 +84,8 @@
 #text(size: 16pt, weight: "bold")[#d.title] \
 #text(size: 9pt, fill: luma(50))[*#doc-status* · #d.document.id · Period #d.period.text · tickets as of #short(d.tickets_as_of)]
 
-#if marked {
-  notice(rgb("#fde7ea"), red)[*#mark* – #d.marking.notice]
-}
+// The data marking is the header tag and the watermark only (Henry, 2026-11-06: no notice
+// box on page 1); `marking.notice` stays in report.json.
 #if d.coverage.partial {
   notice(rgb("#fff4d6"), rgb("#c58a00"))[*Partial history* – the event log starts after the beginning of the period (see the appendix); figures before it are incomplete.]
 }
@@ -115,7 +114,7 @@
 #let trend-cell(t) = if t in ("▲", "▼", "=") { text(font: "DejaVu Sans Mono", size: 9pt, t) } else { muted(t) }
 #table(columns: (1fr, auto, auto, auto, auto, auto),
   align: (left, left, left, left, left, center),
-  table.header([*Measure*], [*#so-far([This month], [So far])*], [*Target*], [*Status*], [*Previous month*], [*Trend*]),
+  table.header([*Measure*], [*#so-far([This month], [So far])*], [*Target*], [*Status*], [*Previous month#if d.previous.covered and d.previous.partial [ (partial)]*], [*Trend*]),
   ..d.kpis.map(k => (k.label, k.value, target-cell(k), status-cell(k.status), k.previous, trend-cell(k.at("trend", default: "—")))).flatten())
 #if noted.len() > 0 [
   #v(-4pt)

@@ -149,7 +149,7 @@ fn november_figures() {
         "The points below need a decision or follow-up.",
     ]));
     let trend: Vec<&str> = j["kpis"].as_array().unwrap().iter().map(|k| k["trend"].as_str().unwrap()).collect();
-    assert_eq!(trend, ["▲", "▼", "▲", "—", "▲", "="], "against October; no fix in October");
+    assert_eq!(trend, ["—"; 6], "the log covers October only in part: no arrows");
 
     // The month in review: backlog reconciles, waiting at the end, merged closed list.
     assert_eq!(j["backlog"], json!({"open_start": 1, "accepted": 3, "reopened": 0, "fixed": 1, "closed_without_fix": 1,
@@ -754,6 +754,14 @@ fn previous_month_uses_the_same_rules() {
     assert_eq!(kpi(&j, "relevant"), ("0".into(), "—".into(), "1".into()));
     assert_eq!(kpi(&j, "open"), ("1 (0 overdue)".into(), "Green".into(), "1 (0 overdue)".into()));
     assert_eq!(kpi(&j, "sources").2, "no data", "no run in October");
+    assert!(j["kpis"].as_array().unwrap().iter().all(|k| k["trend"] == json!("—")), "October only in part: no arrows");
+    // The log starts before October: a full previous month gives arrows.
+    let full = |s: &str| s.replace("2026-11-02", "2026-10-05").replace("\"ts\":\"2026-11-01", "\"ts\":\"2026-09-30");
+    let mut c = Case::good();
+    c.events = c.events.iter().map(|l| full(l)).collect();
+    let j = c.build();
+    assert_eq!(j["previous"]["partial"], json!(false));
+    assert_eq!(j["kpis"][0]["trend"], json!("▼"), "relevant: 0 in November against 1 in October");
 }
 
 #[test]
