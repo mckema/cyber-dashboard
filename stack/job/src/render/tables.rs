@@ -742,7 +742,7 @@ mod tests {
             item_id: id.into(), item_url: String::new(), title: "t".into(), component: "tokio".into(),
             rule: "package".into(), first_seen: first_seen.into(), issue_identifier: issue.into(),
             issue_url: if issue.is_empty() { String::new() } else { format!("https://linear.invalid/fake/issue/{issue}") },
-            overdue, note: String::new(),
+            overdue, note: String::new(), no_reason: false,
         }
     }
 

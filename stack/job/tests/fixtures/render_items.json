@@ -5,6 +5,11 @@
  "end": "2026-11-03T02:45:00Z",
  "kev_catalog": "2026.11.02",
  "cap": 300,
+ "report": {"_comment": "The parts of a month-to-date report.json the Linear tiles read.",
+  "as_of": "2026-11-03T02:40:00Z", "period": {"start": "2026-11-01T00:00:00+01:00", "month": "November 2026"},
+  "funnel": {"assessed": 13, "waiting": 2},
+  "kpis": [{"key": "assessed", "value": "11 of 15 (73%)"}],
+  "outcomes": {"fixed_count": 1, "closed_without_fix": [{"key": "CISA KEV:CVE-2026-100001"}]}},
  "health": [
   {"source": "CISA KEV", "status": "ok", "items": 2, "newest": "2026-11-02T17:04:11Z", "last_success": "2026-11-03T02:45:03Z", "note": "Read from the GitHub mirror: cisa.gov returned HTTP 403."},
   {"source": "ENISA EUVD", "status": "ok", "items": 2, "newest": "2026-11-02T19:10:52Z", "last_success": "2026-11-03T02:45:04Z", "note": ""},
@@ -95,7 +100,7 @@
    {"item_id": "GHSA-9f4c-x2pq-7m8w", "item_url": "https://github.com/advisories/GHSA-9f4c-x2pq-7m8w",
     "title": "vite: dev server file system allow-list can be bypassed with a crafted path",
     "component": "vite", "rule": "package", "first_seen": "2026-10-29T16:05:00Z", "issue_identifier": "FAKE-4", "issue_url": "https://linear.invalid/fake/issue/FAKE-4", "overdue": true,
-    "note": "declined in Linear without a reason"}
+    "note": "declined in Linear without a reason", "no_reason": true}
   ],
   "tickets": [
    {"issue_identifier": "FAKE-2", "issue_url": "https://linear.invalid/fake/issue/FAKE-2", "item_id": "CVE-2026-109902",

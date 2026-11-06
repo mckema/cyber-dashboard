@@ -6,9 +6,13 @@
 //! Interface fixed on 2026-11-05 so `run` (month-to-date PDF every writing run),
 //! `serve` (refresh on click) and the `report` subcommand share one engine.
 //!
-//! Layout approved by Henry on 2026-11-05: page 1 for the COO (overall status with a
-//! bottom line, attention list, KPIs against target and the previous month, open
-//! actions, resolved items, coverage), then detail and an audit appendix.
+//! Layout (Henry, 2026-11-06; one template and one build path for the monthly report
+//! and the month to date, each fact once): page 1 summary for the COO (overall status
+//! with a two-sentence bottom line, key figures with the previous month and a trend,
+//! decisions and attention grouped by kind); page 2 the month in review (intake,
+//! assessment, action backlog reconciliation, open actions, closed in the month,
+//! waiting); appendix (quality-check sample of a closed month, feed health, tracker
+//! errors, definitions, provenance and document control in one table).
 //!
 //!   model.rs    read the event log (tolerant) and runs.jsonl, replay per key; fill
 //!               score/severity/exploited of older `decided` lines from triage.json
@@ -169,9 +173,10 @@ pub struct Generated {
 }
 
 /// The sections whose change makes a new month-to-date upload worth it. They do not
-/// move with the clock alone (no ages, no run counts, no cut-off time).
-const CONTENT_KEYS: [&str; 10] = ["components", "status", "bottom_line", "attention", "kpis", "open_actions",
-                                  "resolved", "outcomes", "funnel", "exceptions"];
+/// move with the hour (no run counts, no cut-off time, no durations); ages in whole
+/// days and "over 1 business day" flags change at most once a day.
+const CONTENT_KEYS: [&str; 12] = ["components", "status", "bottom_line", "attention", "kpis", "open_actions",
+                                  "resolved", "outcomes", "funnel", "backlog", "waiting_items", "exceptions"];
 
 /// sha256 of the content sections of report.json (CONTENT_KEYS).
 pub fn content_sha(report: &Value) -> String {
@@ -240,6 +245,14 @@ pub fn generate(period: &Period, now: DateTime<Utc>, opts: &Opts) -> Result<Gene
     data["period"]["name"] = json!(period.month_name(now));
     if let (Some(s), Period::Month { .. }) = (&opts.sample, period) {
         data["review_sample"] = s.clone();
+    }
+    // The review reminder of a closed month, when review.json already names its issue
+    // (the close files it after the freeze, so a first freeze does not have it yet).
+    if let Period::Month { .. } = period {
+        let review = state::load_json::<Value>(&format!("reports/{}/{}", period.month_name(now), close::REVIEW));
+        if let Some(id) = review.as_ref().and_then(|r| r.pointer("/issue/identifier")).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            data["review_issue"] = json!(id);
+        }
     }
     let data_sha = data_sha(&data);
     data["generated_at"] = json!(build::local(now));

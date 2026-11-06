@@ -179,6 +179,8 @@ pub struct Triaged {
     /// accepted | declined
     pub state: String,
     pub actor: String,
+    /// The event's `ts`: the read-back (log write) that saw the triage.
+    pub ts: String,
 }
 
 /// What the log says about one item key up to a moment.
@@ -214,7 +216,51 @@ pub struct Item {
     pub assignee: String,
     pub due: String,
     pub reason: String,
+    /// When the current (non-empty) reason arrived; None while there is none. A
+    /// reason replaced by a newer comment keeps the first one's time.
+    pub reason_since: Option<DateTime<Utc>>,
     pub pruned: bool,
+}
+
+impl Item {
+    /// Declined in Linear with no reason: FR-A2 asks for one, so not assessed yet
+    /// (like the dashboard's untriaged table, triage::store::Store::untriaged).
+    pub fn declined_without_reason(&self) -> bool {
+        self.state == "declined" && self.reason.trim().is_empty()
+    }
+
+    /// Not assessed yet: in Triage, never read back and never triaged, or declined
+    /// without a reason (Henry, 2026-11-06: one definition of "waiting" on the page
+    /// and in the PDF).
+    pub fn pending(&self) -> bool {
+        self.state == "triage" || (self.state == "none" && self.first_triaged.is_none()) || self.declined_without_reason()
+    }
+
+    /// When the item was assessed, None while pending(). Accepted (also later closed):
+    /// the triage time. Declined: the later of the triage time and the time its reason
+    /// arrived (reason_since).
+    pub fn assessed_at(&self) -> Option<DateTime<Utc>> {
+        let t = self.first_triaged.as_ref()?;
+        if self.pending() {
+            return None;
+        }
+        Some(if self.state == "declined" { self.reason_since.map_or(t.at, |r| r.max(t.at)) } else { t.at })
+    }
+}
+
+/// When the reason of a `field_changed` reason event arrived: its `reason_at` (when
+/// the comment was written, logged since 2026-11-06). Without one (older events, or a
+/// duplicate without a comment): the triage time when the same read-back saw the
+/// triage (same `ts`: the reason came with the decline), else the event's `at`, the
+/// read-back that first saw the reason (at most one run interval late).
+fn reason_time(e: &Ev, triaged: Option<&Triaged>) -> DateTime<Utc> {
+    if let Some(t) = e.v.get("reason_at").and_then(Value::as_str).and_then(parse_iso) {
+        return t;
+    }
+    match triaged {
+        Some(t) if !t.ts.is_empty() && t.ts == e.s("ts") => t.at,
+        _ => e.at,
+    }
 }
 
 /// Replay every event before `until` (exclusive) per key.
@@ -249,7 +295,8 @@ pub fn replay(events: &[Ev], until: DateTime<Utc>) -> BTreeMap<String, Item> {
             }
             "triaged" => {
                 if it.first_triaged.is_none() {
-                    it.first_triaged = Some(Triaged { at: e.at, state: e.s("state").into(), actor: e.s("actor").into() });
+                    it.first_triaged = Some(Triaged { at: e.at, state: e.s("state").into(), actor: e.s("actor").into(),
+                                                      ts: e.s("ts").into() });
                 }
             }
             // The state is the one logged last, not the one with the latest `at`: a
@@ -265,7 +312,14 @@ pub fn replay(events: &[Ev], until: DateTime<Utc>) -> BTreeMap<String, Item> {
                 match e.s("field") {
                     "assignee" => it.assignee = to,
                     "due" => it.due = to,
-                    "reason" => it.reason = to,
+                    "reason" => {
+                        if to.trim().is_empty() {
+                            it.reason_since = None;
+                        } else if it.reason.trim().is_empty() || it.reason_since.is_none() {
+                            it.reason_since = Some(reason_time(e, it.first_triaged.as_ref()));
+                        }
+                        it.reason = to;
+                    }
                     _ => {}
                 }
             }

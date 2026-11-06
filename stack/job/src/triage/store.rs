@@ -55,7 +55,9 @@
 //!   triaged           Linear triagedAt changed: state (accepted | declined), actor
 //!   state_changed     from, to (IssueState names; from "none" before the first read-back);
 //!                     at: completedAt / canceledAt / startedAt / triagedAt when known
-//!   field_changed     field (assignee | due | reason), from, to (at: the read-back)
+//!   field_changed     field (assignee | due | reason), from, to (at: the read-back);
+//!                     a reason change also carries reason_at (when the comment was
+//!                     written, "" when unknown or for a duplicate; since 2026-11-06)
 //!   pruned            the record left triage.json (first_seen)
 //!
 //! The monthly close (report/close.rs, since 2026-11-06) appends three more kinds
@@ -288,8 +290,13 @@ fn status_events(key: &str, issue_id: &str, old: Option<&IssueStatus>, new: &Iss
     }
     for (field, a, b) in [("assignee", &o.assignee, &new.assignee), ("due", &o.due, &new.due), ("reason", &o.reason, &new.reason)] {
         if a != b {
-            v.push(event("field_changed", key, &stamp, &[issue_id, field, a, b, &stamp], now, source,
-                         json!({"issue_id": issue_id, "field": field, "from": a, "to": b})));
+            let mut fields = json!({"issue_id": issue_id, "field": field, "from": a, "to": b});
+            // When the reason comment was written (since 2026-11-06): the report's
+            // assessment time of a decline whose reason came later.
+            if field == "reason" {
+                fields["reason_at"] = json!(new.reason_at);
+            }
+            v.push(event("field_changed", key, &stamp, &[issue_id, field, a, b, &stamp], now, source, fields));
         }
     }
     v
@@ -927,10 +934,17 @@ mod tests {
         assert_eq!(left, ["CISA KEV:CVE-1", "CISA KEV:CVE-2"]);
 
         // A reason added later (a comment in Linear) is read back: triage complete.
-        s.apply_statuses(&[(iref(1), declined("vendor build only"))], at(6, 9, 0));
+        let mut late = declined("vendor build only");
+        late.reason_at = "2026-11-06T08:40:00Z".into();
+        s.pending.clear();
+        s.apply_statuses(&[(iref(1), late)], at(6, 9, 0));
         let keys: Vec<&str> = s.untriaged(at(6, 9, 0)).iter().map(|u| u.key).collect();
         assert_eq!(keys, ["CISA KEV:CVE-2"]);
         assert_eq!(s.gaps().missing_reason, 1);
+        // The event carries when the comment was written (the report's assessment time).
+        let ev = s.pending_events().iter().find(|e| e["event"] == "field_changed" && e["field"] == "reason").unwrap();
+        assert_eq!((ev["to"].as_str(), ev["reason_at"].as_str(), ev["at"].as_str()),
+                   (Some("vendor build only"), Some("2026-11-06T08:40:00Z"), Some("2026-11-06T09:00:00Z")));
     }
 
     /// FR-A3 asks for an owner and a due date on every ticket. Only open tickets count;

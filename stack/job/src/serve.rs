@@ -2,7 +2,7 @@
 //! snapshot" (GET /report/month-to-date.pdf) and "Refresh tickets" (GET /refresh)
 //! both read the tracker back, rebuild the month-to-date report (FR-A4 on demand) and
 //! re-splice the Linear section of the wiki page (two ticket tables, their counters,
-//! the summary line); the first returns the PDF, the second sends the browser back
+//! the four tiles, the "as of" time); the first returns the PDF, the second sends the browser back
 //! to the page. Production design (Cloud Run behind IAP) is in README §Deployment.
 //!
 //! Routes:
@@ -23,10 +23,11 @@
 //!   3. Under the lock: tracker read-back into state/triage.json (no read-back when
 //!      LINEAR_MODE=off), report::publish_month_to_date, then rebuild t-untriaged,
 //!      t-tickets, n-untriaged, n-tickets and s-untriaged (not s-auto, which counts a
-//!      run's window) and, from the report, l-summary and l-refresh; splice them into
-//!      the page with its stamp kept and write the page when it changed. A report
-//!      error leaves the summary as it was (the tables are still spliced). Any
-//!      error: the last PDF, else 500 (/refresh: 500).
+//!      run's window), the tiles l-kpis (the "now" tiles from the same view, the month
+//!      tiles from the report) and l-refresh; splice them into the page with its stamp
+//!      kept and write the page when it changed. On a report error the month tiles
+//!      and "as of" come from the last report.json on disk (the tables and "now"
+//!      tiles are still spliced). Any error: the last PDF, else 500 (/refresh: 500).
 //!   4. One runs.jsonl line per request on either route: mode "serve", route, result
 //!      refreshed | cooldown | locked | error, seconds, error, updated, page_written.
 //!
@@ -367,10 +368,10 @@ impl Backend for Live {
     fn refresh(&mut self, now: DateTime<Utc>) -> Result<Refreshed, Fatal> {
         let (view, updated) = read_back(now)?;
         let report = report::publish_month_to_date(now);
-        let mut regions = render::ticket_regions(&view, now);
-        if let Ok(g) = &report {
-            regions.html = render::linear_regions(Some(&g.json), std::env::var("SERVE_PUBLIC_URL").ok().as_deref());
-        }
+        // The month tiles and "as of": this report, else the last one on disk (as run.rs).
+        let disk = report.is_err().then(|| state::load_json::<Value>(&format!("{MTD_DIR}/report.json"))).flatten();
+        let json = report.as_ref().ok().map(|g| &g.json).or(disk.as_ref());
+        let regions = render::ticket_regions(&view, now, json, std::env::var("SERVE_PUBLIC_URL").ok().as_deref());
         let page_written = splice_page(regions)?;
         Ok(Refreshed { report: report?, updated, page_written })
     }

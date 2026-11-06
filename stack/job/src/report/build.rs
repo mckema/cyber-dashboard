@@ -6,25 +6,37 @@
 //!   notices          `decided` events in the period ("new public vulnerability notices")
 //!   relevant         matched among them ("relevant to fairCT"); the rest is
 //!                    not-relevant-by-rule ("automatically ruled out")
-//!   assessed         a relevant item of the period whose first `triaged` event exists
-//!                    by the cut-off ("assessed"): accepted ("action planned") or
-//!                    declined ("ruled out by a person"); time to assess =
-//!                    business_time(first_seen, triaged.at), Amsterdam Mon-Fri
-//!   waiting          matched, not pruned, still in Triage or never read back at the
-//!                    cut-off, whatever month it was first seen ("not assessed yet")
+//!   assessed         a relevant item of the period with a first `triaged` event by the
+//!                    cut-off that is not waiting ("assessed"): accepted ("action
+//!                    planned") or declined with a reason ("ruled out by a person");
+//!                    time to assess = business_time(first_seen, assessed at), Amsterdam
+//!                    Mon-Fri, where assessed at = the triage time, for a decline the
+//!                    later of the triage time and the time its reason arrived
+//!                    (model::Item::assessed_at; the reason's time is `reason_at` of its
+//!                    field_changed event, logged since 2026-11-06, else model::reason_time)
+//!   waiting          matched, not pruned, at the cut-off still in Triage, never read
+//!                    back, or declined without a reason (FR-A2 asks for one; since
+//!                    2026-11-06, as on the dashboard), whatever month it was first seen
+//!                    ("not assessed yet"); funnel.waiting counts those of the period
 //!   open actions     replayed state at the cut-off = accepted (not pruned);
 //!                    overdue = due < Amsterdam date of the cut-off
 //!   resolved         `state_changed` to done ("fixed") / canceled ("closed without
-//!                    fix") / declined ("ruled out by a person") in the period, last
-//!                    one per key; on time = Amsterdam close date <= due
+//!                    fix") in the period, last one per key; on time = Amsterdam close
+//!                    date <= due; declined with a reason at the cut-off ("ruled out by
+//!                    a person") at the later of the decline and the reason's arrival,
+//!                    in the period. A decline without a reason is waiting, not resolved
 //!   exploited        the `decided` event's flag (triage::store::exploited_source),
 //!                    or one of the item's CVEs was logged from CISA KEV or ENISA EUVD
 //!                    by the cut-off
 //!   sources          the feeds of the last writing run of the period that reported
 //!                    feeds; healthy = ok or cached; a fatal run counts as a failure of
 //!                    the core feed its error names
+//!   backlog          open at start + accepted + reopened - fixed - closed without fix
+//!                    (+ other) = open at the end (see build())
+//!   attention        the attention reasons grouped by kind (Group), one line each
 //! KPI and RAG rules: kpis() (printed under Definitions in the PDF). The previous
-//! calendar month is measured with the same code when the log covers it.
+//! calendar month is measured with the same code when the log covers it; its trend
+//! (▲ ▼ =) is left out for a month to date ("partial month").
 //! The cut-off is the end of the period, or now for a period not over yet.
 //! All times are written as Europe/Amsterdam local time with offset.
 
@@ -130,19 +142,6 @@ fn median(mut v: Vec<Duration>) -> Option<Duration> {
     Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2 })
 }
 
-/// 3852 -> "3,852".
-fn thousands(n: usize) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
@@ -213,19 +212,94 @@ impl Rag {
     }
 }
 
+/// The kind of a reason: page 1 groups the attention points by it, one line each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    /// Ordered as listed under "Decisions and attention" within one RAG tier.
+    OverdueExploited,
+    Waiting,
+    Overdue,
+    MissingPlan,
+    Sources,
+    NoRun,
+    Tracker,
+    /// Not attention points: a past slow assessment, the fix target.
+    SlowPast,
+    FixTarget,
+}
+
+impl Group {
+    /// report.json attention[].group.
+    fn key(self) -> &'static str {
+        match self {
+            Group::OverdueExploited => "overdue_exploited",
+            Group::Waiting => "waiting",
+            Group::Overdue => "overdue",
+            Group::MissingPlan => "missing_plan",
+            Group::Sources => "sources",
+            Group::NoRun => "no_run",
+            Group::Tracker => "tracker",
+            Group::SlowPast => "slow_assessment",
+            Group::FixTarget => "fix_target",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Group::OverdueExploited => "Overdue action on a known-exploited vulnerability",
+            Group::Waiting => "Not assessed after 1 business day",
+            Group::Overdue => "Overdue action",
+            Group::MissingPlan => "Open action without owner or due date",
+            Group::Sources => "Source failing or stale in the last run",
+            Group::NoRun => "No scheduled run recorded in the period",
+            Group::Tracker => "Ticket tracker errors",
+            Group::SlowPast => "Assessment took more than 1 business day",
+            Group::FixTarget => "Fixes by due date below 95%",
+        }
+    }
+
+    /// The bottom line's words for this kind of problem (`many`: more than one).
+    fn phrase(self, rag: Rag, many: bool) -> &'static str {
+        match (self, rag, many) {
+            (Group::Sources, Rag::Red, _) => "a core source has been failing for more than 2 days",
+            (Group::Sources, _, _) => "a source was stale or failing in the last run",
+            (Group::OverdueExploited, _, false) => "an action on a known-exploited vulnerability is overdue",
+            (Group::OverdueExploited, _, true) => "actions on known-exploited vulnerabilities are overdue",
+            (Group::Waiting, Rag::Red, false) => "a relevant item has waited more than 3 business days for assessment",
+            (Group::Waiting, Rag::Red, true) => "relevant items have waited more than 3 business days for assessment",
+            (Group::Waiting, _, false) => "a relevant item has waited more than 1 business day for assessment",
+            (Group::Waiting, _, true) => "relevant items have waited more than 1 business day for assessment",
+            (Group::Overdue, _, false) => "an action is overdue",
+            (Group::Overdue, _, true) => "actions are overdue",
+            (Group::MissingPlan, _, false) => "an open action has no owner or due date",
+            (Group::MissingPlan, _, true) => "open actions have no owner or due date",
+            (Group::NoRun, _, _) => "no scheduled run was recorded",
+            (Group::Tracker, _, _) => "the ticket tracker reported errors",
+            (Group::SlowPast, _, false) => "an assessment took more than 1 business day",
+            (Group::SlowPast, _, true) => "assessments took more than 1 business day",
+            (Group::FixTarget, _, _) => "fewer than 95% of fixes met their due date",
+        }
+    }
+}
+
 /// Why a KPI (or the tracker check) is not green.
 #[derive(Debug, Clone)]
 struct Reason {
     rag: Rag,
+    /// Full sentence (report.json status.reasons).
     text: String,
-    /// Listed under "Attention / decisions needed" on page 1.
+    /// Listed under "Decisions and attention" on page 1.
     attention: bool,
     /// A monitoring problem (sources, tracker) rather than a ticket.
     monitoring: bool,
+    group: Group,
+    /// What the attention line lists for it: a ticket id (with a short note), a
+    /// source; "" for none.
+    id: String,
 }
 
-fn reason(rag: Rag, text: String, attention: bool) -> Reason {
-    Reason { rag, text, attention, monitoring: false }
+fn reason(rag: Rag, text: String, attention: bool, group: Group, id: String) -> Reason {
+    Reason { rag, text, attention, monitoring: false, group, id }
 }
 
 /// What the log and runs say about one period, measured at its cut-off.
@@ -239,14 +313,16 @@ struct Facts<'a> {
     relevant: Vec<String>,
     /// Relevant keys of the period with a first triage by the cut-off, and the time it took.
     assessed: Vec<(String, Duration)>,
-    /// Matched keys (any month) not assessed at the cut-off, with the time waited.
+    /// Matched keys (any month) not assessed at the cut-off (model::Item::pending:
+    /// declines without a reason included), with the time waited.
     waiting: Vec<(String, Duration)>,
     open: Vec<String>,
     overdue: BTreeSet<String>,
     fixed: Vec<(String, DateTime<Utc>)>,
     canceled: Vec<(String, DateTime<Utc>)>,
+    /// Declined with a reason, at the later of the decline and the reason's arrival.
     declined: Vec<(String, DateTime<Utc>)>,
-    /// Ruled out by a person without a reason, at the cut-off (any month).
+    /// Waiting keys declined without a reason (any month).
     no_reason: Vec<String>,
     writing: Vec<&'a Run>,
     /// Feeds of the last writing run that reported feeds, with their last status.
@@ -307,12 +383,13 @@ fn facts<'a>(log: &Log, runs: &'a [Run], start: DateTime<Utc>, cut: DateTime<Utc
     let relevant: Vec<String> = decided.iter().filter(|i| i.matched).map(|i| i.key.clone()).collect();
     let assessed: Vec<(String, Duration)> = relevant.iter().filter_map(|k| {
         let i = &items[k];
-        Some((k.clone(), business_time(i.first_seen?, i.first_triaged.as_ref()?.at)))
+        Some((k.clone(), business_time(i.first_seen?, i.assessed_at()?)))
     }).collect();
     let waiting: Vec<(String, Duration)> = items.values()
-        .filter(|i| i.matched && !i.pruned && (i.state == "triage" || (i.state == "none" && i.first_triaged.is_none())))
+        .filter(|i| i.matched && !i.pruned && i.pending())
         .filter_map(|i| Some((i.key.clone(), business_time(i.first_seen?, cut))))
         .collect();
+    let no_reason: Vec<String> = waiting.iter().filter(|(k, _)| items[k].declined_without_reason()).map(|(k, _)| k.clone()).collect();
 
     let today = local_date(cut);
     let mut open: Vec<&Item> = items.values().filter(|i| i.state == "accepted" && !i.pruned).collect();
@@ -326,8 +403,17 @@ fn facts<'a>(log: &Log, runs: &'a [Run], start: DateTime<Utc>, cut: DateTime<Utc
     let mut closed: BTreeMap<&str, BTreeMap<String, DateTime<Utc>>> = BTreeMap::new();
     for e in log.events.iter().filter(|e| e.kind == "state_changed" && in_period(e.at)) {
         let to = e.s("to");
-        if matches!(to, "done" | "canceled" | "declined") && items.get(&e.key).is_some_and(|i| i.state == to) {
+        if matches!(to, "done" | "canceled") && items.get(&e.key).is_some_and(|i| i.state == to) {
             closed.entry(to).or_default().insert(e.key.clone(), e.at);
+        }
+    }
+    // Ruled out by a person: declined with a reason at the cut-off, resolved when both
+    // the decline and its reason were there.
+    for i in items.values().filter(|i| i.state == "declined" && !i.declined_without_reason()) {
+        let Some(at) = i.state_at else { continue };
+        let at = i.reason_since.map_or(at, |r| r.max(at));
+        if in_period(at) {
+            closed.entry("declined").or_default().insert(i.key.clone(), at);
         }
     }
     let list = |to: &str| -> Vec<(String, DateTime<Utc>)> {
@@ -335,9 +421,6 @@ fn facts<'a>(log: &Log, runs: &'a [Run], start: DateTime<Utc>, cut: DateTime<Utc
         v.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         v
     };
-    let no_reason = items.values()
-        .filter(|i| i.matched && i.state == "declined" && i.reason.trim().is_empty())
-        .map(|i| i.key.clone()).collect();
 
     // ------------------------------------------------------------- runs and feeds
     let mut writing: Vec<&Run> = runs.iter().filter(|r| r.is_writing() && in_period(r.at)).collect();
@@ -383,54 +466,62 @@ struct Kpi {
     key: &'static str,
     label: &'static str,
     value: String,
+    /// The number the trend against the previous month compares (None: no value).
+    num: Option<f64>,
     target: &'static str,
     /// None: not rated ("—").
     status: Option<Rag>,
-    /// Printed under the target (e.g. that the target is not agreed yet).
+    /// Printed as a footnote to the target (e.g. that the target is not agreed yet).
     target_note: Option<&'static str>,
 }
 
-/// The KPI rows and every reason a rule fired (RAG rules, printed in the PDF):
+/// The KPI rows and every reason a rule fired (RAG rules, printed in the PDF).
+/// "Waiting" includes declines without a reason (Facts::waiting), with the same
+/// clock as any other waiting item:
 ///   GREEN  none of the below
 ///   AMBER  an assessment took > 1 business day (or an item waits > 1); an open action
-///          lacks owner or due date; ruled out by a person without a reason; a source
-///          stale or failing in the last run (or no run in the period); a tracker
-///          error in the period; an overdue action on a non-exploited item; fewer than
-///          95% of the fixes in the period by their due date
-///   RED    an overdue action on a known-exploited item; a relevant item unassessed
+///          lacks owner or due date; a source stale or failing in the last run (or no
+///          run in the period); a tracker error in the period; an overdue action on a
+///          non-exploited item; fewer than 95% of the fixes in the period by their due date
+///   RED    an overdue action on a known-exploited item; a relevant item waiting
 ///          for > 3 business days at the cut-off; CISA KEV or CVE.org failing > 2 days
 fn kpis(f: &Facts) -> (Vec<Kpi>, Vec<Reason>) {
     let one = Duration::days(1);
     let mut all = Vec::new();
     let worst = |rs: &[Reason]| rs.iter().map(|r| r.rag).max().unwrap_or(Rag::Green);
+    let share = |x: usize, y: usize| (y > 0).then(|| x as f64 * 100.0 / y as f64);
 
     // assessed within 1 business day
     let mut rs = Vec::new();
     for (k, d) in f.assessed.iter().filter(|(_, d)| *d > one) {
         rs.push(reason(Rag::Amber, format!("{}: assessment took {:.1} business days", ticket(f.it(k)),
-                                            d.num_seconds() as f64 / 86400.0), false));
+                                            d.num_seconds() as f64 / 86400.0), false, Group::SlowPast, ticket(f.it(k))));
     }
+    // One line per item waiting more than 1 business day; a decline without a reason
+    // waits like any other item (Henry, 2026-11-06).
     for (k, d) in f.waiting.iter().filter(|(_, d)| *d > one) {
         let i = f.it(k);
+        let no_reason = f.no_reason.contains(k);
         let (rag, n) = if *d > Duration::days(3) { (Rag::Red, 3) } else { (Rag::Amber, 1) };
-        rs.push(reason(rag, format!("{} ({}): relevant item not assessed after more than {} first seen {}",
-                                    ticket(i), vuln(i), plural(n, "business day,", "business days,"),
-                                    i.first_seen.map(|t| day_mon(local_date(t))).unwrap_or_default()), true));
-    }
-    for k in &f.no_reason {
-        rs.push(reason(Rag::Amber, format!("{} ({}): ruled out by a person without a reason", ticket(f.it(k)), vuln(f.it(k))), true));
+        let seen = i.first_seen.map(|t| day_mon(local_date(t))).unwrap_or_default();
+        let after = format!("after more than {} first seen {seen}", plural(n, "business day,", "business days,"));
+        let text = if no_reason {
+            format!("{} ({}): ruled out without a reason, so not assessed {after}", ticket(i), vuln(i))
+        } else {
+            format!("{} ({}): relevant item not assessed {after}", ticket(i), vuln(i))
+        };
+        let notes: Vec<&str> = [(no_reason, "declined without a reason"), (n == 3, "over 3 business days")]
+            .into_iter().filter(|(on, _)| *on).map(|(_, w)| w).collect();
+        let id = if notes.is_empty() { ticket(i) } else { format!("{} ({})", ticket(i), notes.join(", ")) };
+        rs.push(reason(rag, text, true, Group::Waiting, id));
     }
     let late_waiting = f.waiting.iter()
         .filter(|(k, d)| *d > one && f.it(k).first_seen.is_some_and(|t| f.in_period(t))).count();
     let ok = f.assessed.iter().filter(|(_, d)| *d <= one).count();
     let y = f.assessed.len() + late_waiting;
     let assessed = Kpi { key: "assessed", label: "Assessed within 1 business day",
-                         value: match (y, f.no_reason.len()) {
-                             (0, 0) => "—".into(),
-                             (0, n) => format!("—; {n} without a reason"),
-                             (y, 0) => pct(ok, y),
-                             (y, n) => format!("{}; {n} without a reason", pct(ok, y)),
-                         }, target: "100%", target_note: None, status: Some(worst(&rs)) };
+                         value: if y == 0 { "—".into() } else { pct(ok, y) }, num: share(ok, y),
+                         target: "100%", target_note: None, status: Some(worst(&rs)) };
     all.append(&mut rs);
 
     // open actions
@@ -440,21 +531,22 @@ fn kpis(f: &Facts) -> (Vec<Kpi>, Vec<Reason>) {
             let owner = if i.assignee.is_empty() { "no owner".to_string() } else { format!("owner {}", i.assignee) };
             if i.exploited {
                 rs.push(reason(Rag::Red, format!("{} ({}, known exploited): action overdue since {} ({owner})",
-                                                 ticket(i), vuln(i), due_label(&i.due)), true));
+                                                 ticket(i), vuln(i), due_label(&i.due)), true, Group::OverdueExploited, ticket(i)));
             } else {
                 rs.push(reason(Rag::Amber, format!("{} ({}): action overdue since {} ({owner})",
-                                                   ticket(i), vuln(i), due_label(&i.due)), true));
+                                                   ticket(i), vuln(i), due_label(&i.due)), true, Group::Overdue, ticket(i)));
             }
         }
         let missing: Vec<&str> = [(i.assignee.trim().is_empty(), "an owner"), (i.due.trim().is_empty(), "a due date")]
             .into_iter().filter(|(m, _)| *m).map(|(_, w)| w).collect();
         if !missing.is_empty() {
-            rs.push(reason(Rag::Amber, format!("{} ({}): open action without {}", ticket(i), vuln(i), missing.join(" or ")), true));
+            rs.push(reason(Rag::Amber, format!("{} ({}): open action without {}", ticket(i), vuln(i), missing.join(" or ")),
+                           true, Group::MissingPlan, ticket(i)));
         }
     }
     let open = Kpi { key: "open", label: "Open actions (of which overdue)",
-                     value: format!("{} ({} overdue)", f.open.len(), f.overdue.len()), target: "0 overdue", target_note: None,
-                     status: Some(worst(&rs)) };
+                     value: format!("{} ({} overdue)", f.open.len(), f.overdue.len()), num: Some(f.open.len() as f64),
+                     target: "0 overdue", target_note: None, status: Some(worst(&rs)) };
     all.append(&mut rs);
 
     // fixed by due date
@@ -465,124 +557,118 @@ fn kpis(f: &Facts) -> (Vec<Kpi>, Vec<Reason>) {
     } else if on_time as f64 >= FIX_TARGET * n as f64 {
         Some(Rag::Green)
     } else {
-        all.push(reason(Rag::Amber, format!("fixes by due date: {}, below the proposed 95% target", pct(on_time, n)), false));
+        all.push(reason(Rag::Amber, format!("fixes by due date: {}, below the proposed 95% target", pct(on_time, n)), false,
+                        Group::FixTarget, String::new()));
         Some(Rag::Amber)
     };
     let fixed = Kpi { key: "fixed", label: "Fixed by due date", value: if n == 0 { "—".into() } else { pct(on_time, n) },
-                      target: "≥ 95%", target_note: Some(FIX_TARGET_NOTE), status: fixed_status };
+                      num: share(on_time, n), target: "≥ 95%", target_note: Some(FIX_TARGET_NOTE), status: fixed_status };
 
     // known exploited still open (its red reason is listed under open actions)
     let expl: Vec<&String> = f.open.iter().filter(|k| f.it(k).exploited).collect();
     let expl_overdue = expl.iter().any(|k| f.overdue.contains(*k));
     let exploited = Kpi { key: "exploited", label: "Known-exploited items still open", value: expl.len().to_string(),
-                          target: "0 overdue", target_note: None, status: Some(if expl_overdue { Rag::Red } else { Rag::Green }) };
+                          num: Some(expl.len() as f64), target: "0 overdue", target_note: None,
+                          status: Some(if expl_overdue { Rag::Red } else { Rag::Green }) };
 
     // sources
+    let monitoring = |rag, text: String, group, id: String| Reason { rag, text, attention: true, monitoring: true, group, id };
     for (core, since) in &f.core_down {
-        rs.push(Reason { rag: Rag::Red, text: format!("{} failing since {} (more than 2 days)", source_label(core),
-                                                       day_mon(local_date(*since))), attention: true, monitoring: true });
+        let since = day_mon(local_date(*since));
+        rs.push(monitoring(Rag::Red, format!("{} failing since {since} (more than 2 days)", source_label(core)),
+                           Group::Sources, format!("{} (failing since {since})", source_label(core))));
     }
     for (feed, st) in f.sources.iter().filter(|(_, s)| !healthy(s)) {
         if !f.core_down.iter().any(|(c, _)| c == feed) {
-            rs.push(Reason { rag: Rag::Amber, text: format!("{} {} in the last run", source_label(feed),
-                                                             if st == "stale" { "stale (fetch failed, older data used)" } else { "failing" }),
-                             attention: true, monitoring: true });
+            let what = if st == "stale" { "stale" } else { "failing" };
+            rs.push(monitoring(Rag::Amber, format!("{} {} in the last run", source_label(feed),
+                                                   if st == "stale" { "stale (fetch failed, older data used)" } else { "failing" }),
+                               Group::Sources, format!("{} ({what})", source_label(feed))));
         }
     }
     if f.writing.is_empty() {
-        rs.push(Reason { rag: Rag::Amber, text: "no scheduled run recorded in the period".into(), attention: true, monitoring: true });
+        rs.push(monitoring(Rag::Amber, "no scheduled run recorded in the period".into(), Group::NoRun, String::new()));
     }
     let good = f.sources.iter().filter(|(_, s)| healthy(s)).count();
     let sources = Kpi { key: "sources", label: "Sources healthy",
                         value: if f.sources.is_empty() { "no data".into() } else { format!("{good}/{}", f.sources.len()) },
-                        target: "all", target_note: None, status: Some(worst(&rs)) };
+                        num: share(good, f.sources.len()), target: "all", target_note: None, status: Some(worst(&rs)) };
     all.append(&mut rs);
 
     // tracker (not a KPI row; counts for the report status)
     if let Some((last, _)) = f.tracker_errors.last() {
-        all.push(Reason { rag: Rag::Amber, text: format!("Ticket tracker errors in {}, the last on {}",
-                                                         plural(f.tracker_errors.len(), "run", "runs"), day_mon(local_date(*last))),
-                          attention: true, monitoring: true });
+        let runs = plural(f.tracker_errors.len(), "run", "runs");
+        let last = day_mon(local_date(*last));
+        all.push(monitoring(Rag::Amber, format!("Ticket tracker errors in {runs}, the last on {last}"),
+                            Group::Tracker, format!("{runs} (last on {last})")));
     }
 
-    let relevant = Kpi { key: "relevant", label: "Relevant to fairCT", value: f.relevant.len().to_string(), target: "—", target_note: None, status: None };
+    let relevant = Kpi { key: "relevant", label: "Relevant to fairCT", value: f.relevant.len().to_string(),
+                         num: Some(f.relevant.len() as f64), target: "—", target_note: None, status: None };
     (vec![relevant, assessed, open, fixed, exploited, sources], all)
 }
 
-/// The 2–3 sentence summary on page 1.
-fn bottom_line(f: &Facts, reasons: &[Reason], month: &str, mtd: bool) -> Vec<String> {
-    let when = if mtd { format!("So far in {month}") } else { format!("In {month}") };
-    let n = thousands(f.notices);
-    let r = f.relevant.len();
-    let mut out = Vec::new();
-    if r == 0 {
-        out.push(format!("{when}, fairCT's monitoring recorded {n} new public vulnerability {}. No new public vulnerability notice concerned a component on fairCT's list.",
-                         if f.notices == 1 { "notice" } else { "notices" }));
-    } else {
-        out.push(format!("{when}, {r} of {n} new public vulnerability {} fairCT components.",
-                         if f.notices == 1 { "notice concerned" } else { "notices concerned" }));
+/// "Decisions and attention" on page 1: one line per kind of point (Group), worst
+/// first, with the count and the ticket ids (or sources) only.
+fn attention(reasons: &[Reason]) -> Vec<Value> {
+    let mut groups: BTreeMap<Group, (Rag, Vec<String>, bool)> = BTreeMap::new();
+    for r in reasons.iter().filter(|r| r.attention) {
+        let g = groups.entry(r.group).or_insert((r.rag, Vec::new(), r.monitoring));
+        g.0 = g.0.max(r.rag);
+        if !r.id.is_empty() {
+            g.1.push(r.id.clone());
+        }
     }
+    let mut v: Vec<_> = groups.into_iter().collect();
+    v.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.0.cmp(&b.0)));
+    v.into_iter().map(|(g, (rag, ids, monitoring))| {
+        let text = match g {
+            Group::Tracker => format!("{}: {}, see appendix", g.label(), ids.join(", ")),
+            _ if ids.is_empty() => g.label().to_string(),
+            _ => format!("{} ({}): {}", g.label(), ids.len(), ids.join(", ")),
+        };
+        json!({"rag": rag.upper(), "group": g.key(), "count": ids.len(), "items": ids, "monitoring": monitoring, "text": text})
+    }).collect()
+}
 
-    let mut parts = Vec::new();
-    if r > 0 {
-        let ok = f.assessed.iter().filter(|(_, d)| *d <= Duration::days(1)).count();
-        let waiting = f.relevant.iter().filter(|k| f.waiting.iter().any(|(w, _)| w == *k)).count();
-        parts.push(if ok == r {
-            match r { 1 => "It was assessed within 1 business day".to_string(),
-                      2 => "Both were assessed within 1 business day".to_string(),
-                      _ => format!("All {r} were assessed within 1 business day") }
+/// "a", "a and b", "a, b and c"; more than three: the first three, "among others".
+fn and_list(v: &[&str]) -> String {
+    match v {
+        [] => String::new(),
+        [a] => a.to_string(),
+        [a, b] => format!("{a} and {b}"),
+        [a, b, c] => format!("{a}, {b} and {c}"),
+        [a, b, c, ..] => format!("{a}, {b} and {c}, among others"),
+    }
+}
+
+/// At most two sentences under the overall status: why it has that colour, and what
+/// is needed. No figure of the key figures table is repeated.
+fn bottom_line(f: &Facts, reasons: &[Reason]) -> Vec<String> {
+    let rag = reasons.iter().map(|r| r.rag).max().unwrap_or(Rag::Green);
+    let first = if rag == Rag::Green {
+        if f.relevant.is_empty() {
+            "No new public vulnerability notice concerned a component on fairCT's list, and monitoring ran without problems.".to_string()
         } else {
-            let mut s = format!("{ok} of {r} {} assessed within 1 business day", if ok == 1 { "was" } else { "were" });
-            if waiting > 0 {
-                s += &format!(", {waiting} {} still waiting for assessment", if waiting == 1 { "is" } else { "are" });
-            }
-            s
-        });
-    }
-    let open: Vec<&Item> = f.open.iter().map(|k| f.it(k)).collect();
-    match open.as_slice() {
-        [] if r > 0 => parts.push("no fix is pending".into()),
-        [] => {}
-        [i] => {
-            let due = if i.due.trim().is_empty() { ", without a due date".to_string() } else { format!(" by {}", due_label(&i.due)) };
-            let owner = if i.assignee.trim().is_empty() { "no owner".to_string() } else { format!("owner {}", i.assignee) };
-            parts.push(format!("1 fix is planned{due} ({owner})"));
+            "Every relevant item was assessed within 1 business day, no action is overdue and monitoring ran without problems.".to_string()
         }
-        many => {
-            let next = many.iter().find(|i| !i.due.trim().is_empty()).map(|i| format!(", the next by {}", due_label(&i.due)));
-            parts.push(format!("{} fixes are planned{}", many.len(), next.unwrap_or_default()));
-        }
-    }
-    if !open.is_empty() {
-        let m = f.overdue.len();
-        let expl = f.overdue.iter().filter(|k| f.it(k).exploited).count();
-        parts.push(match (m, expl) {
-            (0, _) => "none is overdue".into(),
-            (m, 0) => format!("{m} {} overdue", if m == 1 { "is" } else { "are" }),
-            (m, e) => format!("{m} {} overdue, {e} of them on a known-exploited vulnerability", if m == 1 { "is" } else { "are" }),
-        });
-    }
-    if !parts.is_empty() {
-        let mut s = parts.join("; ");
-        s[..1].make_ascii_uppercase();
-        out.push(s + ".");
-    }
-
-    let att: Vec<&Reason> = reasons.iter().filter(|r| r.attention).collect();
-    let mon = att.iter().filter(|r| r.monitoring).count();
-    if att.is_empty() {
-        out.push("No decision is needed from you.".into());
-    } else if mon == att.len() {
-        out.push("Monitoring needs attention (listed below); no ticket needs a decision from you.".into());
     } else {
-        let k = att.len();
-        let mut s = format!("{} your attention (listed below)", plural(k, "point needs", "points need"));
-        if mon > 0 {
-            s += &format!(", {} of them about monitoring", mon);
+        let mut by: BTreeMap<Group, usize> = BTreeMap::new();
+        for r in reasons.iter().filter(|r| r.rag == rag) {
+            *by.entry(r.group).or_default() += 1;
         }
-        out.push(s + ".");
-    }
-    out
+        let phrases: Vec<&str> = by.iter().map(|(g, n)| g.phrase(rag, *n > 1)).collect();
+        format!("{}: {}.", rag.title(), and_list(&phrases))
+    };
+    let att: Vec<&Reason> = reasons.iter().filter(|r| r.attention).collect();
+    let second = if att.is_empty() {
+        "No decision is needed from you."
+    } else if att.iter().all(|r| r.monitoring) {
+        "Monitoring needs follow-up (below); no ticket needs a decision from you."
+    } else {
+        "The points below need a decision or follow-up."
+    };
+    vec![first, second.to_string()]
 }
 
 /// Bounds of the calendar month before the one `start` lies in.
@@ -604,25 +690,36 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
     let (pstart, pend, pname, plabel) = previous_month(f.start);
     let covered = log.coverage_from < pend;
     let prev = covered.then(|| kpis(&facts(log, runs, pstart, pend)).0);
+    // Trend against the previous month: ▲ ▼ = of the measure's number. A month to date
+    // is a partial month: no arrow against a full one (Henry, 2026-11-06).
     let kpis_json: Vec<Value> = kpi_rows.iter().map(|k| {
-        let previous = match &prev {
-            None => "first period".to_string(),
-            Some(p) => p.iter().find(|q| q.key == k.key).map(|q| q.value.clone()).unwrap_or_else(|| "no data".into()),
+        let p = prev.as_ref().and_then(|p| p.iter().find(|q| q.key == k.key));
+        let previous = match (&prev, p) {
+            (None, _) => "first period".to_string(),
+            (Some(_), Some(q)) => q.value.clone(),
+            (Some(_), None) => "no data".into(),
+        };
+        let trend = match (k.num, p.and_then(|q| q.num)) {
+            _ if f.mtd => "partial month",
+            _ if prev.is_none() => "—",
+            (Some(a), Some(b)) if (a - b).abs() < 0.05 => "=",
+            (Some(a), Some(b)) if a > b => "▲",
+            (Some(_), Some(_)) => "▼",
+            _ => "—",
         };
         json!({"key": k.key, "label": k.label, "value": k.value, "target": k.target,
-               "status": k.status.map_or("—", Rag::title), "previous": previous, "target_note": k.target_note})
+               "status": k.status.map_or("—", Rag::title), "previous": previous, "trend": trend, "target_note": k.target_note})
     }).collect();
     let mut sorted = reasons.clone();
     sorted.sort_by(|a, b| b.rag.cmp(&a.rag));
     let rag = reasons.iter().map(|r| r.rag).max().unwrap_or(Rag::Green);
     let status = json!({"rag": rag.upper(),
                         "reasons": sorted.iter().map(|r| json!({"rag": r.rag.upper(), "text": r.text})).collect::<Vec<_>>()});
-    let attention: Vec<Value> = sorted.iter().filter(|r| r.attention).map(|r| json!({"rag": r.rag.upper(), "text": r.text})).collect();
+    let attention = attention(&reasons);
 
     // ---------------------------------------------------------- title
     let lstart = to_amsterdam(f.start).date();
     let month = lstart.format("%B %Y").to_string();
-    let month_only = lstart.format("%B").to_string();
     let last_day = local_date(f.cut - Duration::seconds(1)).max(lstart);
     let title = if f.mtd {
         format!("Cyber threat report — {month}, month to date (1–{} {})", last_day.day(), lstart.format("%b"))
@@ -630,17 +727,59 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
         format!("Cyber threat report — {month}")
     };
     let subtitle = if f.mtd { "Month-to-date snapshot – not the official monthly report" } else { "Monthly report" };
-    let bottom = bottom_line(&fa, &reasons, &month_only, f.mtd);
+    let bottom = bottom_line(&fa, &reasons);
 
     // ---------------------------------------------------------- open actions
+    // Overdue first, then by due date. Age: Amsterdam calendar days from first seen to
+    // the last day of the period (moves once a day, not with the hour).
     let risk = |i: &Item| json!({"exploited": i.exploited, "exploited_source": i.exploited_source,
                                  "severity": i.severity, "score": i.score});
-    let open_rows: Vec<Value> = fa.open.iter().map(|k| {
+    let age = |i: &Item| i.first_seen.map(|t| (last_day - local_date(t)).num_days().max(0));
+    let carried = |i: &Item| i.first_seen.is_some_and(|t| t < f.start);
+    let mut open_keys: Vec<&String> = fa.open.iter().collect();
+    open_keys.sort_by_key(|k| !fa.overdue.contains(*k)); // stable: due-date order kept within each part
+    let open_rows: Vec<Value> = open_keys.into_iter().map(|k| {
         let i = fa.it(k);
         with(with(row(i), risk(i)).as_object().cloned().unwrap_or_default(),
-             json!({"owner": i.assignee, "due": i.due, "state_name": i.state_name, "overdue": fa.overdue.contains(k)}))
+             json!({"owner": i.assignee, "due": i.due, "state_name": i.state_name, "overdue": fa.overdue.contains(k),
+                    "first_seen": local_opt(i.first_seen), "age_days": age(i), "carried_over": carried(i)}))
     }).collect();
     let open_actions = json!({"count": open_rows.len(), "overdue": fa.overdue.len(), "items": open_rows});
+
+    // ---------------------------------------------------------- action backlog
+    // open at start + accepted in the period + reopened - fixed - closed without fix
+    // (+ other) = open at the end. Fixed / closed without fix: as in Closed in the
+    // month (closed in the period and still closed). Of the keys not open at the start
+    // that are open at the end or closed in the period: reopened when first accepted
+    // before the period, otherwise accepted in the period (also a ticket accepted and
+    // closed between two read-backs, whose `accepted` state was never logged).
+    // Accepted in the period and moved back to Triage counts too. `other` is what is
+    // left (for example a ticket moved back to Triage); it is 0 in a normal month.
+    let at_start = replay(&log.events, f.start);
+    let open_then = |k: &str| at_start.get(k).is_some_and(|i| i.state == "accepted" && !i.pruned);
+    let mut first_accept: BTreeMap<&str, DateTime<Utc>> = BTreeMap::new();
+    for e in log.events.iter().take_while(|e| e.at < f.cut).filter(|e| e.kind == "state_changed" && e.s("to") == "accepted") {
+        first_accept.entry(e.key.as_str()).or_insert(e.at);
+    }
+    let open_start = at_start.keys().filter(|k| open_then(k)).count();
+    let mut came: BTreeSet<&str> = fa.open.iter().chain(fa.fixed.iter().map(|(k, _)| k)).chain(fa.canceled.iter().map(|(k, _)| k))
+        .map(String::as_str).filter(|k| !open_then(k)).collect();
+    came.extend(first_accept.iter().filter(|(k, at)| fa.in_period(**at) && !open_then(k)).map(|(k, _)| *k));
+    let reopened = came.iter().filter(|k| first_accept.get(**k).is_some_and(|t| *t < f.start)).count();
+    let accepted = came.len() - reopened;
+    let other = fa.open.len() as i64 - (open_start + accepted + reopened) as i64 + (fa.fixed.len() + fa.canceled.len()) as i64;
+    let backlog = json!({"open_start": open_start, "accepted": accepted, "reopened": reopened, "fixed": fa.fixed.len(),
+                         "closed_without_fix": fa.canceled.len(), "other": other, "open_end": fa.open.len()});
+
+    // ---------------------------------------------------------- waiting at the cut-off
+    let mut waiting_rows: Vec<(Option<DateTime<Utc>>, Value)> = fa.waiting.iter().map(|(k, d)| {
+        let i = fa.it(k);
+        (i.first_seen, with(row(i), json!({"first_seen": local_opt(i.first_seen), "overdue": *d > Duration::days(1),
+                                           "over_three_days": *d > Duration::days(3),
+                                           "declined_without_reason": fa.no_reason.contains(k), "carried_over": carried(i)})))
+    }).collect();
+    waiting_rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1["key"].as_str().cmp(&b.1["key"].as_str())));
+    let waiting_items: Vec<Value> = waiting_rows.into_iter().map(|(_, v)| v).collect();
 
     // ---------------------------------------------------------- resolved
     let mut resolved: Vec<(DateTime<Utc>, Value)> = Vec::new();
@@ -654,8 +793,10 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
             ttr.push(*at - seen);
         }
         let when = match ok { Some(true) => "on time", Some(false) => "late", None => "no due date" };
+        let detail = if ok.is_some() { format!("{when} (due {})", due_label(&i.due)) } else { when.to_string() };
         resolved.push((*at, with(row(i), json!({"outcome": format!("fixed on {} ({when})", day_mon(local_date(*at))),
-                                                 "warn": ok != Some(true)}))));
+                                                 "warn": ok != Some(true), "kind": "fixed", "by": i.assignee,
+                                                 "detail": detail, "date": local(*at)}))));
         fixed_rows.push(with(row(i), json!({"owner": i.assignee, "due": i.due, "closed_at": local(*at), "on_time": ok,
                                             "first_seen": local_opt(i.first_seen)})));
     }
@@ -663,7 +804,8 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
     for (k, at) in &fa.canceled {
         let i = fa.it(k);
         resolved.push((*at, with(row(i), json!({"outcome": format!("closed without fix on {}", day_mon(local_date(*at))),
-                                                 "warn": false}))));
+                                                 "warn": false, "kind": "closed_without_fix", "by": i.assignee,
+                                                 "detail": "", "date": local(*at)}))));
         canceled_rows.push(with(row(i), json!({"owner": i.assignee, "due": i.due, "closed_at": local(*at)})));
     }
     let mut declined_rows = Vec::new();
@@ -671,9 +813,10 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
         let i = fa.it(k);
         let actor = i.first_triaged.as_ref().map(|t| t.actor.clone()).unwrap_or_default();
         let who = if actor.trim().is_empty() { "a person (not recorded)".to_string() } else { actor.clone() };
-        let no_reason = i.reason.trim().is_empty();
-        let what = if no_reason { "no reason given".to_string() } else { clip(&i.reason, 80) };
-        resolved.push((*at, with(row(i), json!({"outcome": format!("ruled out by {who}: {what}"), "warn": no_reason}))));
+        // Only declines with a reason are here; one without is waiting (Facts::waiting).
+        resolved.push((*at, with(row(i), json!({"outcome": format!("ruled out by {who}: {}", clip(&i.reason, 80)), "warn": false,
+                                                 "kind": "ruled_out", "by": actor, "detail": clip(&i.reason, 120),
+                                                 "date": local(*at)}))));
         declined_rows.push(with(row(i), json!({"reason": i.reason, "actor": actor, "declined_at": local(*at)})));
     }
     resolved.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1["key"].as_str().cmp(&b.1["key"].as_str())));
@@ -695,16 +838,19 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
     let mut over: Vec<(DateTime<Utc>, Value)> = Vec::new();
     for (k, d) in fa.assessed.iter().filter(|(_, d)| *d > Duration::days(1)) {
         let i = fa.it(k);
-        let (Some(seen), Some(t)) = (i.first_seen, &i.first_triaged) else { continue };
-        over.push((seen, with(row(i), json!({"first_seen": local(seen), "assessed_at": local(t.at), "business_hours": hours(*d)}))));
+        let (Some(seen), Some(t)) = (i.first_seen, i.assessed_at()) else { continue };
+        over.push((seen, with(row(i), json!({"first_seen": local(seen), "assessed_at": local(t), "business_hours": hours(*d),
+                                              "declined_without_reason": false}))));
     }
     for (k, _) in fa.waiting.iter().filter(|(_, d)| *d > Duration::days(1)) {
         let i = fa.it(k);
         let Some(seen) = i.first_seen else { continue };
         // No duration for a waiting item: it would move with the clock.
-        over.push((seen, with(row(i), json!({"first_seen": local(seen), "assessed_at": null, "business_hours": null}))));
+        over.push((seen, with(row(i), json!({"first_seen": local(seen), "assessed_at": null, "business_hours": null,
+                                              "declined_without_reason": fa.no_reason.contains(k)}))));
     }
     over.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1["key"].as_str().cmp(&b.1["key"].as_str())));
+    // Relevant items of the period not assessed at the cut-off: not triaged, or declined without a reason.
     let relevant_waiting = fa.relevant.iter().filter(|k| fa.waiting.iter().any(|(w, _)| w == *k)).count();
     let funnel = json!({
         "notices": fa.notices,
@@ -714,6 +860,7 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
         "action_planned": planned,
         "ruled_out_by_person": fa.assessed.len() - planned,
         "waiting": relevant_waiting,
+        "waiting_without_reason": fa.relevant.iter().filter(|k| fa.no_reason.contains(k)).count(),
         "time_to_assess": {"count": times.len(), "median_business_hours": median(times.clone()).map(hours),
                            "max_business_hours": times.iter().max().copied().map(hours)},
         "over_one_day": over.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
@@ -725,14 +872,15 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
     let ids = |keys: Vec<&String>| -> Vec<Value> {
         keys.into_iter().map(|k| { let i = fa.it(k); json!({"identifier": i.identifier, "title": clip(&i.title, 100), "key": i.key}) }).collect()
     };
-    let assessed_keys: BTreeSet<&String> = fa.assessed.iter().map(|(k, _)| k).collect();
+    // Relevant items of the period out of Triage (assessed, or declined without a reason).
+    let triaged_keys: BTreeSet<&String> = fa.relevant.iter().filter(|k| fa.it(k).first_triaged.is_some()).collect();
     let exceptions = json!({
         "overdue": ids(fa.open.iter().filter(|k| fa.overdue.contains(*k)).collect()),
         "open_without_owner": ids(fa.open.iter().filter(|k| fa.it(k).assignee.trim().is_empty()).collect()),
         "open_without_due": ids(fa.open.iter().filter(|k| fa.it(k).due.trim().is_empty()).collect()),
         "unassessed_over_one_day": ids(fa.waiting.iter().filter(|(_, d)| *d > Duration::days(1)).map(|(k, _)| k).collect()),
         "declined_without_reason": ids(fa.no_reason.iter().collect()),
-        "triaged_without_actor": ids(assessed_keys.into_iter()
+        "triaged_without_actor": ids(triaged_keys.into_iter()
             .filter(|k| fa.it(k).first_triaged.as_ref().is_some_and(|t| t.actor.trim().is_empty())).collect()),
         "sources_unhealthy": fa.sources.iter().filter(|(_, s)| !healthy(s))
             .map(|(n, s)| json!({"feed": n, "status": s})).collect::<Vec<_>>(),
@@ -846,6 +994,8 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
         "resolved": resolved.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
         "outcomes": outcomes,
         "funnel": funnel,
+        "backlog": backlog,
+        "waiting_items": waiting_items,
         "exceptions": exceptions,
         "monitoring": {"sources": listed.iter().map(|n| source_label(n)).collect::<Vec<_>>(),
                        "scheduled_runs": fa.writing.len(), "sentence": sentence},

@@ -78,13 +78,18 @@ fn november_figures() {
 
     let fu = &j["funnel"];
     assert_eq!((fu["notices"].clone(), fu["auto_ruled_out"].clone(), fu["relevant"].clone()), (json!(7), json!(1), json!(6)));
-    // A was assessed in October: counted there although it closed in November
+    // A was assessed in October: counted there although it closed in November.
+    // D, declined without a reason, is waiting (since 2026-11-06), not ruled out by a person.
     assert_eq!((fu["assessed"].clone(), fu["action_planned"].clone(), fu["ruled_out_by_person"].clone(), fu["waiting"].clone()),
-               (json!(5), json!(3), json!(2), json!(1)));
-    assert_eq!(fu["time_to_assess"], json!({"count": 5, "median_business_hours": 1.0, "max_business_hours": 49.0}));
-    assert_eq!(idents(&fu["over_one_day"]), ["MOCK-5", "MOCK-7"]);
-    assert_eq!(fu["over_one_day"][0]["business_hours"], json!(49.0));
-    assert_eq!(fu["over_one_day"][1]["assessed_at"], Value::Null, "still waiting");
+               (json!(4), json!(3), json!(1), json!(2)));
+    assert_eq!(fu["waiting_without_reason"], json!(1));
+    assert_eq!(fu["time_to_assess"], json!({"count": 4, "median_business_hours": 1.5, "max_business_hours": 49.0}));
+    assert_eq!(idents(&fu["over_one_day"]), ["MOCK-4", "MOCK-5", "MOCK-7"]);
+    assert_eq!((fu["over_one_day"][0]["assessed_at"].clone(), fu["over_one_day"][0]["declined_without_reason"].clone()),
+               (Value::Null, json!(true)), "D waits for its reason");
+    assert_eq!(fu["over_one_day"][1]["business_hours"], json!(49.0));
+    assert_eq!(fu["over_one_day"][2]["assessed_at"], Value::Null, "still waiting");
+    assert_eq!(fu["over_one_day"][2]["declined_without_reason"], json!(false));
     assert_eq!(fu["by_source"], json!([
         {"source": "CISA KEV", "total": 6, "relevant": 6, "auto_ruled_out": 0},
         {"source": "GitHub Advisory", "total": 1, "relevant": 0, "auto_ruled_out": 1}]));
@@ -94,26 +99,27 @@ fn november_figures() {
     assert_eq!((o["fixed"][0]["on_time"].clone(), o["fixed"][0]["owner"].clone()), (json!(true), json!("Ann")));
     assert_eq!((o["on_time"].clone(), o["late"].clone(), o["mttr_median_days"].clone()), (json!(1), json!(0), json!(7.0)));
     assert_eq!(idents(&o["closed_without_fix"]), ["MOCK-5"]);
-    assert_eq!(idents(&o["ruled_out"]), ["MOCK-3", "MOCK-4"]);
+    assert_eq!(idents(&o["ruled_out"]), ["MOCK-3"], "D has no reason: waiting, not resolved");
     assert_eq!(o["ruled_out"][0]["reason"], json!("component not deployed"));
+    assert_eq!(o["ruled_out"][0]["declined_at"], json!("2026-11-03T11:00:00+01:00"), "reason logged with the decline");
     let outcome: Vec<&str> = j["resolved"].as_array().unwrap().iter().map(|r| r["outcome"].as_str().unwrap()).collect();
-    assert_eq!(outcome, ["ruled out by Henry: component not deployed", "ruled out by a person (not recorded): no reason given",
-                         "fixed on 4 Nov (on time)", "closed without fix on 12 Nov"]);
-    assert_eq!(j["resolved"][1]["warn"], json!(true));
+    assert_eq!(outcome, ["ruled out by Henry: component not deployed", "fixed on 4 Nov (on time)", "closed without fix on 12 Nov"]);
+    assert_eq!(j["resolved"][0]["warn"], json!(false));
 
     let oa = &j["open_actions"];
     assert_eq!(idents(&oa["items"]), ["MOCK-2", "MOCK-6"]);
     assert_eq!((oa["count"].clone(), oa["overdue"].clone()), (json!(2), json!(1)));
     let b = &oa["items"][0];
     assert_eq!((b["owner"].clone(), b["overdue"].clone(), b["state_name"].clone()), (json!("Bob"), json!(true), json!("In Progress")));
+    assert_eq!((b["age_days"].clone(), b["carried_over"].clone()), (json!(28), json!(false)), "first seen 2 Nov, to 30 Nov");
     assert_eq!((b["vulnerability"].clone(), b["exploited"].clone(), b["exploited_source"].clone(), b["severity"].clone(), b["score"].clone()),
                (json!("CVE-2026-0002"), json!(true), json!("CISA KEV"), json!("HIGH"), json!(7.5)));
     assert_eq!(oa["items"][1]["exploited"], json!(false), "no risk fields and no triage.json");
     assert!(oa["items"][1]["title"].as_str().unwrap().ends_with('…'), "titles are cut to 60 characters");
 
-    // KPIs and status: B is overdue and exploited, F waits 6.6 business days -> RED
+    // KPIs and status: B is overdue and exploited, F waits 6.6 business days, D (no reason) longer -> RED
     assert_eq!(kpi(j, "relevant"), ("6".into(), "—".into(), "1".into()));
-    assert_eq!(kpi(j, "assessed"), ("4 of 6 (67%); 1 without a reason".into(), "Red".into(), "1 of 1 (100%)".into()));
+    assert_eq!(kpi(j, "assessed"), ("3 of 6 (50%)".into(), "Red".into(), "1 of 1 (100%)".into()));
     assert_eq!(kpi(j, "open"), ("2 (1 overdue)".into(), "Red".into(), "1 (0 overdue)".into()));
     assert_eq!(kpi(j, "fixed"), ("1 of 1 (100%)".into(), "Green".into(), "—".into()));
     assert_eq!(kpi(j, "exploited"), ("1".into(), "Red".into(), "0".into()));
@@ -121,25 +127,48 @@ fn november_figures() {
     assert_eq!(j["previous"], json!({"month": "2026-10", "label": "October 2026", "covered": true, "partial": true}));
     assert_eq!(j["status"]["rag"], json!("RED"));
     assert_eq!(texts(&j["status"]["reasons"]), [
+        "MOCK-4 (x): ruled out without a reason, so not assessed after more than 3 business days, first seen 4 Nov",
         "MOCK-7 (x): relevant item not assessed after more than 3 business days, first seen 20 Nov",
         "MOCK-2 (CVE-2026-0002, known exploited): action overdue since 3 Nov (owner Bob)",
         "MOCK-5: assessment took 2.0 business days",
-        "MOCK-4 (x): ruled out by a person without a reason",
         "MOCK-6 (x): open action without an owner or a due date",
         "Ticket tracker errors in 1 run, the last on 15 Nov",
     ]);
-    assert_eq!(j["attention"].as_array().unwrap().len(), 5, "a past slow assessment is not an attention point");
+    // Grouped by kind, worst first, ticket ids only; a past slow assessment is not an attention point.
+    assert_eq!(texts(&j["attention"]), [
+        "Overdue action on a known-exploited vulnerability (1): MOCK-2",
+        "Not assessed after 1 business day (2): MOCK-4 (declined without a reason, over 3 business days), MOCK-7 (over 3 business days)",
+        "Open action without owner or due date (1): MOCK-6",
+        "Ticket tracker errors: 1 run (last on 15 Nov), see appendix",
+    ]);
+    assert_eq!((j["attention"][1]["group"].clone(), j["attention"][1]["count"].clone(), j["attention"][1]["rag"].clone()),
+               (json!("waiting"), json!(2), json!("RED")));
+    // Two sentences, no figure of the key figures table.
     assert_eq!(j["bottom_line"], json!([
-        "In November, 6 of 7 new public vulnerability notices concerned fairCT components.",
-        "4 of 6 were assessed within 1 business day, 1 is still waiting for assessment; 2 fixes are planned, the next by 3 Nov; 1 is overdue, 1 of them on a known-exploited vulnerability.",
-        "5 points need your attention (listed below), 1 of them about monitoring.",
+        "Red: an action on a known-exploited vulnerability is overdue and relevant items have waited more than 3 business days for assessment.",
+        "The points below need a decision or follow-up.",
     ]));
+    let trend: Vec<&str> = j["kpis"].as_array().unwrap().iter().map(|k| k["trend"].as_str().unwrap()).collect();
+    assert_eq!(trend, ["▲", "▼", "▲", "—", "▲", "="], "against October; no fix in October");
+
+    // The month in review: backlog reconciles, waiting at the end, merged closed list.
+    assert_eq!(j["backlog"], json!({"open_start": 1, "accepted": 3, "reopened": 0, "fixed": 1, "closed_without_fix": 1,
+                                    "other": 0, "open_end": 2}));
+    assert_eq!(idents(&j["waiting_items"]), ["MOCK-4", "MOCK-7"]);
+    let w = &j["waiting_items"][0];
+    assert_eq!((w["overdue"].clone(), w["over_three_days"].clone(), w["declined_without_reason"].clone(), w["carried_over"].clone()),
+               (json!(true), json!(true), json!(true), json!(false)));
+    let kinds: Vec<&str> = j["resolved"].as_array().unwrap().iter().map(|r| r["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["ruled_out", "fixed", "closed_without_fix"]);
+    assert_eq!((j["resolved"][1]["by"].clone(), j["resolved"][1]["detail"].clone(), j["resolved"][1]["date"].clone()),
+               (json!("Ann"), json!("on time (due 10 Nov)"), json!("2026-11-04T11:00:00+01:00")));
+    assert_eq!((j["resolved"][0]["by"].clone(), j["resolved"][0]["detail"].clone()), (json!("Henry"), json!("component not deployed")));
 
     let e = &j["exceptions"];
     assert_eq!(idents(&e["overdue"]), ["MOCK-2"]);
     assert_eq!(idents(&e["open_without_owner"]), ["MOCK-6"]);
     assert_eq!(idents(&e["open_without_due"]), ["MOCK-6"]);
-    assert_eq!(idents(&e["unassessed_over_one_day"]), ["MOCK-7"]);
+    assert_eq!(idents(&e["unassessed_over_one_day"]), ["MOCK-4", "MOCK-7"]);
     assert_eq!(idents(&e["declined_without_reason"]), ["MOCK-4"]);
     assert_eq!(idents(&e["triaged_without_actor"]), ["MOCK-4"]);
     assert_eq!(e["tracker_errors"], json!([{"run_at": "2026-11-15T11:00:00+01:00",
@@ -201,7 +230,11 @@ fn october_starts_before_coverage_and_is_reconstructed() {
     assert_eq!(j["previous"]["covered"], json!(false));
     assert_eq!(kpi(j, "relevant").2, "first period");
     assert_eq!(j["status"]["rag"], json!("GREEN"));
-    assert_eq!(j["bottom_line"][1], json!("It was assessed within 1 business day; 1 fix is planned by 10 Nov (owner Ann); none is overdue."));
+    assert_eq!(j["bottom_line"], json!([
+        "Every relevant item was assessed within 1 business day, no action is overdue and monitoring ran without problems.",
+        "No decision is needed from you."]));
+    assert_eq!(j["backlog"], json!({"open_start": 0, "accepted": 1, "reopened": 0, "fixed": 0, "closed_without_fix": 0,
+                                    "other": 0, "open_end": 1}));
 }
 
 #[test]
@@ -257,12 +290,18 @@ fn month_to_date_runs_to_now() {
         "prepared_by": "Exploit Watch job, operated by the ISB Vietnam team",
         "distribution": "fairCT COO; others on a need-to-know basis (TLP:AMBER+STRICT)",
         "retention": "to be agreed with fairCT"}));
-    assert!(j["bottom_line"][0].as_str().unwrap().starts_with("So far in November, 5 of 6 "));
+    assert_eq!(j["bottom_line"].as_array().unwrap().len(), 2);
+    // A partial month against a full one: the previous value as a reference, no trend arrow.
+    for k in j["kpis"].as_array().unwrap() {
+        assert_eq!(k["trend"], json!("partial month"), "{k}");
+    }
+    assert_eq!(kpi(j, "relevant").2, "1", "October's value is still shown");
     assert_eq!((j["period"]["kind"].clone(), j["period"]["complete"].clone()), (json!("month-to-date"), json!(true)));
     assert_eq!(j["period"]["end"], json!("2026-11-10T13:00:00+01:00"));
-    // E is canceled on the 12th: still open on the 10th; F is decided on the 20th
+    // E is canceled on the 12th: still open on the 10th; F is decided on the 20th;
+    // D, declined without a reason on the 4th, is waiting (was 0 before 2026-11-06)
     assert_eq!(idents(&j["open_actions"]["items"]), ["MOCK-2", "MOCK-5", "MOCK-6"]);
-    assert_eq!(j["funnel"]["waiting"], json!(0));
+    assert_eq!(j["funnel"]["waiting"], json!(1));
     assert_eq!(j["funnel"]["notices"], json!(6));
 }
 
@@ -393,16 +432,17 @@ fn due(d: &str) -> String {
     line("field_changed", KEY, "2026-11-02T10:00:02Z", json!({"field": "due", "from": "2026-11-20", "to": d}))
 }
 
+const ALL_GOOD: [&str; 2] = [
+    "Every relevant item was assessed within 1 business day, no action is overdue and monitoring ran without problems.",
+    "No decision is needed from you.",
+];
+
 #[test]
 fn rag_green_and_bottom_line_all_good() {
     let j = Case::good().build();
     assert_eq!(j["status"], json!({"rag": "GREEN", "reasons": []}));
     assert_eq!(j["attention"], json!([]));
-    assert_eq!(j["bottom_line"], json!([
-        "In November, 1 of 2 new public vulnerability notices concerned fairCT components.",
-        "It was assessed within 1 business day; 1 fix is planned by 20 Nov (owner Henry); none is overdue.",
-        "No decision is needed from you.",
-    ]));
+    assert_eq!(j["bottom_line"], json!(ALL_GOOD));
     assert_eq!(kpi(&j, "assessed").0, "1 of 1 (100%)");
     assert_eq!(kpi(&j, "sources"), ("7/7".into(), "Green".into(), "first period".into()));
     assert_eq!(j["monitoring"]["sentence"], json!(
@@ -411,6 +451,7 @@ fn rag_green_and_bottom_line_all_good() {
          checked; affected versions are not checked."));
     let i = &j["open_actions"]["items"][0];
     assert_eq!((i["vulnerability"].clone(), i["severity"].clone(), i["exploited"].clone()), (json!("CVE-2026-1"), json!("CRITICAL"), json!(false)));
+    assert_eq!(j["kpis"][0]["trend"], json!("—"), "no previous month in the log");
 }
 
 #[test]
@@ -423,31 +464,48 @@ fn rag_amber_rules() {
     };
     // overdue on a non-exploited item
     let j = amber(Case::good().with(due("2026-11-05")), "MOCK-1 (CVE-2026-1): action overdue since 5 Nov (owner Henry)");
-    assert_eq!(j["bottom_line"][1], json!("It was assessed within 1 business day; 1 fix is planned by 5 Nov (owner Henry); 1 is overdue."));
-    assert_eq!(j["bottom_line"][2], json!("1 point needs your attention (listed below)."));
+    assert_eq!(j["bottom_line"], json!(["Amber: an action is overdue.", "The points below need a decision or follow-up."]));
+    assert_eq!(texts(&j["attention"]), ["Overdue action (1): MOCK-1"]);
     assert_eq!(kpi(&j, "open"), ("1 (1 overdue)".into(), "Amber".into(), "first period".into()));
     // open action without an owner
-    amber(Case::good().without("field_changed|CVE.org cvelistV5:CVE-2026-1|2026-11-02T10:00:00Z"), "open action without an owner");
+    let j = amber(Case::good().without("field_changed|CVE.org cvelistV5:CVE-2026-1|2026-11-02T10:00:00Z"), "open action without an owner");
+    assert_eq!(texts(&j["attention"]), ["Open action without owner or due date (1): MOCK-1"]);
     // assessment after more than one business day (Mon 09:00 -> Tue 10:00 Amsterdam)
     let slow = Case::good().without("triaged|").with(line("triaged", KEY, "2026-11-03T09:00:00Z", json!({"state": "accepted", "actor": "Henry"})));
     let j = amber(slow, "assessment took 1.0 business days");
     assert_eq!(j["attention"], json!([]), "a past slow assessment is not an attention point");
-    // ruled out by a person without a reason
-    let declined = Case::good().without("triaged|").without("state_changed|")
-        .with(line("triaged", KEY, "2026-11-02T09:00:00Z", json!({"state": "declined", "actor": "Henry"})))
-        .with(line("state_changed", KEY, "2026-11-02T09:00:00Z", json!({"from": "none", "to": "declined", "state_name": "Canceled"})));
-    let j = amber(declined, "ruled out by a person without a reason");
-    assert_eq!(j["resolved"][0]["outcome"], json!("ruled out by Henry: no reason given"));
-    assert_eq!(j["bottom_line"][1], json!("It was assessed within 1 business day; no fix is pending."));
+    assert_eq!(j["bottom_line"], json!(["Amber: an assessment took more than 1 business day.", "No decision is needed from you."]));
     // a source stale in the last run; a tracker error
     let mut stale = Case::good();
     stale.runs = vec![run("2026-11-09T10:00:00Z", &[("CISA KEV", "ok"), ("CVE.org cvelistV5", "ok"), ("GitHub Advisory", "stale")], &[])];
     let j = amber(stale, "GitHub Advisory stale");
     assert_eq!(kpi(&j, "sources").0, "2/3");
-    assert_eq!(j["bottom_line"][2], json!("Monitoring needs attention (listed below); no ticket needs a decision from you."));
+    assert_eq!(texts(&j["attention"]), ["Source failing or stale in the last run (1): GitHub Advisory (stale)"]);
+    assert_eq!(j["bottom_line"], json!(["Amber: a source was stale or failing in the last run.",
+                                        "Monitoring needs follow-up (below); no ticket needs a decision from you."]));
     let mut tracker = Case::good();
     tracker.runs = vec![run("2026-11-09T10:00:00Z", &ok_feeds(), &["read issue states: HTTP 500"])];
-    amber(tracker, "Ticket tracker errors in 1 run, the last on 9 Nov");
+    let j = amber(tracker, "Ticket tracker errors in 1 run, the last on 9 Nov");
+    assert_eq!(texts(&j["attention"]), ["Ticket tracker errors: 1 run (last on 9 Nov), see appendix"]);
+}
+
+/// A decline without a reason waits like any other item (Henry, 2026-11-06): no
+/// status rule and no attention line within 1 business day.
+#[test]
+fn decline_without_reason_within_one_business_day_is_green() {
+    let mut c = declined_case();
+    c.now = "2026-11-02T12:00:00Z";
+    c.runs = vec![run("2026-11-02T10:00:00Z", &ok_feeds(), &[])];
+    let j = c.build();
+    assert_eq!(j["status"], json!({"rag": "GREEN", "reasons": []}));
+    assert_eq!(j["attention"], json!([]));
+    assert_eq!(assessed_waiting(&j), (json!(0), json!(0), json!(1)), "it still counts as waiting");
+    assert_eq!(j["resolved"], json!([]), "waiting, not resolved");
+    assert_eq!(kpi(&j, "assessed"), ("—".into(), "Green".into(), "first period".into()));
+    assert_eq!(idents(&j["waiting_items"]), ["MOCK-1"]);
+    assert_eq!((j["waiting_items"][0]["overdue"].clone(), j["waiting_items"][0]["declined_without_reason"].clone()),
+               (json!(false), json!(true)));
+    assert_eq!(idents(&j["exceptions"]["declined_without_reason"]), ["MOCK-1"]);
 }
 
 #[test]
@@ -463,11 +521,13 @@ fn rag_red_rules() {
     let j = red(Case::good().with(due("2026-11-05")).with(decided("CISA KEV:CVE-2026-1", "2026-11-03T08:00:00Z", false, &["CVE-2026-1"])),
                 "MOCK-1 (CVE-2026-1, known exploited): action overdue since 5 Nov");
     assert_eq!(kpi(&j, "exploited"), ("1".into(), "Red".into(), "first period".into()));
-    assert_eq!(j["bottom_line"][1], json!("It was assessed within 1 business day; 1 fix is planned by 5 Nov (owner Henry); 1 is overdue, 1 of them on a known-exploited vulnerability."));
+    assert_eq!(j["bottom_line"][0], json!("Red: an action on a known-exploited vulnerability is overdue."));
+    assert_eq!(texts(&j["attention"]), ["Overdue action on a known-exploited vulnerability (1): MOCK-1"]);
     // a relevant item not assessed for more than 3 business days
     let waiting = Case::good().without("triaged|").without("state_changed|").without("field_changed|");
     let j = red(waiting, "MOCK-1 (CVE-2026-1): relevant item not assessed after more than 3 business days, first seen 2 Nov");
-    assert_eq!(j["bottom_line"][1], json!("0 of 1 were assessed within 1 business day, 1 is still waiting for assessment; no fix is pending."));
+    assert_eq!(j["bottom_line"][0], json!("Red: a relevant item has waited more than 3 business days for assessment."));
+    assert_eq!(texts(&j["attention"]), ["Not assessed after 1 business day (1): MOCK-1 (over 3 business days)"]);
     assert_eq!(kpi(&j, "assessed").0, "0 of 1 (0%)");
     // a core source failing for more than two days (fatal runs name it)
     let mut down = Case::good();
@@ -475,6 +535,108 @@ fn rag_red_rules() {
     down.runs = vec![run("2026-11-02T10:00:00Z", &ok_feeds(), &[]), fatal("2026-11-03T10:00:00Z"), fatal("2026-11-09T10:00:00Z")];
     let j = red(down, "CISA KEV failing since 3 Nov (more than 2 days)");
     assert_eq!(kpi(&j, "sources").0, "6/7", "the fatal run marks CISA KEV failing");
+    assert_eq!(texts(&j["attention"]), ["Source failing or stale in the last run (1): CISA KEV (failing since 3 Nov)"]);
+    assert_eq!(j["bottom_line"][0], json!("Red: a core source has been failing for more than 2 days."));
+}
+
+/// The good case declined in Linear (Mon 2 Nov 10:00 Amsterdam, first seen 09:00), no reason yet.
+fn declined_case() -> Case {
+    Case::good().without("triaged|").without("state_changed|").without("field_changed|")
+        .with(line("triaged", KEY, "2026-11-02T09:00:00Z", json!({"state": "declined", "actor": "Henry"})))
+        .with(line("state_changed", KEY, "2026-11-02T09:00:00Z", json!({"from": "none", "to": "declined", "state_name": "Canceled"})))
+}
+
+/// The reason read back at `at` (log write `ts`), with the comment's time when given.
+fn reason_line(at: &str, ts: &str, reason_at: Option<&str>) -> String {
+    let mut extra = json!({"field": "reason", "from": "", "to": "not deployed", "ts": ts});
+    if let Some(r) = reason_at {
+        extra["reason_at"] = json!(r);
+    }
+    line("field_changed", KEY, at, extra)
+}
+
+/// (assessed, ruled out by a person, waiting) of the funnel.
+fn assessed_waiting(j: &Value) -> (Value, Value, Value) {
+    let f = &j["funnel"];
+    (f["assessed"].clone(), f["ruled_out_by_person"].clone(), f["waiting"].clone())
+}
+
+/// One definition of waiting (Henry, 2026-11-06): a decline without a reason is not
+/// assessed; it waits, and turns overdue after 1 business day like any waiting item.
+#[test]
+fn decline_without_reason_waits_and_turns_overdue() {
+    let mut c = declined_case();
+    c.now = "2026-11-03T12:00:00Z"; // Tue 13:00 Amsterdam: 28 business hours since first seen
+    c.runs = vec![run("2026-11-03T10:00:00Z", &ok_feeds(), &[])];
+    let j = c.build();
+    assert_eq!(assessed_waiting(&j), (json!(0), json!(0), json!(1)));
+    assert_eq!(j["funnel"]["waiting_without_reason"], json!(1));
+    assert_eq!(j["funnel"]["time_to_assess"]["count"], json!(0));
+    assert_eq!(idents(&j["funnel"]["over_one_day"]), ["MOCK-1"]);
+    let row = &j["funnel"]["over_one_day"][0];
+    assert_eq!((row["assessed_at"].clone(), row["declined_without_reason"].clone()), (Value::Null, json!(true)));
+    assert_eq!(idents(&j["exceptions"]["unassessed_over_one_day"]), ["MOCK-1"]);
+    assert_eq!(idents(&j["exceptions"]["declined_without_reason"]), ["MOCK-1"]);
+    assert_eq!(idents(&j["exceptions"]["triaged_without_actor"]), Vec::<&str>::new());
+    assert_eq!(kpi(&j, "assessed"), ("0 of 1 (0%)".into(), "Amber".into(), "first period".into()));
+    assert_eq!(j["status"]["rag"], json!("AMBER"));
+    assert_eq!(texts(&j["status"]["reasons"]),
+               ["MOCK-1 (CVE-2026-1): ruled out without a reason, so not assessed after more than 1 business day, first seen 2 Nov"]);
+    assert_eq!(texts(&j["attention"]), ["Not assessed after 1 business day (1): MOCK-1 (declined without a reason)"]);
+    assert_eq!((j["resolved"].clone(), j["outcomes"]["ruled_out"].clone()), (json!([]), json!([])));
+    // more than 3 business days: red, as for an item still in Triage
+    let mut late = declined_case();
+    late.now = "2026-11-10T11:00:00Z";
+    let j = late.build();
+    assert_eq!(j["status"]["rag"], json!("RED"));
+    assert_eq!(texts(&j["status"]["reasons"]),
+               ["MOCK-1 (CVE-2026-1): ruled out without a reason, so not assessed after more than 3 business days, first seen 2 Nov"]);
+}
+
+/// A reason added later: assessed when it arrived (comment written Tue 14:00
+/// Amsterdam, read back at 15:00), not at the decline; resolved then too.
+#[test]
+fn reason_added_later_assesses_at_the_reason_time() {
+    let c = declined_case().with(reason_line("2026-11-03T14:00:00Z", "2026-11-03T14:00:00Z", Some("2026-11-03T13:00:00Z")));
+    let j = c.build();
+    assert_eq!(assessed_waiting(&j), (json!(1), json!(1), json!(0)));
+    assert_eq!(j["funnel"]["time_to_assess"], json!({"count": 1, "median_business_hours": 29.0, "max_business_hours": 29.0}));
+    let row = &j["funnel"]["over_one_day"][0];
+    assert_eq!((row["assessed_at"].clone(), row["business_hours"].clone()), (json!("2026-11-03T14:00:00+01:00"), json!(29.0)));
+    assert_eq!(kpi(&j, "assessed"), ("0 of 1 (0%)".into(), "Amber".into(), "first period".into()));
+    assert_eq!(texts(&j["status"]["reasons"]), ["MOCK-1: assessment took 1.2 business days"]);
+    assert_eq!(j["attention"], json!([]), "a past slow assessment is not an attention point");
+    assert_eq!(j["resolved"][0]["outcome"], json!("ruled out by Henry: not deployed"));
+    assert_eq!(j["outcomes"]["ruled_out"][0]["declined_at"], json!("2026-11-03T14:00:00+01:00"));
+    assert_eq!(j["exceptions"]["declined_without_reason"], json!([]));
+    assert_eq!(j["bottom_line"][0], json!("Amber: an assessment took more than 1 business day."));
+    assert_eq!(j["resolved"][0]["detail"], json!("not deployed"));
+
+    // Written but not read back yet at the cut-off: still waiting.
+    let mut before = declined_case().with(reason_line("2026-11-03T14:00:00Z", "2026-11-03T14:00:00Z", Some("2026-11-03T13:00:00Z")));
+    before.now = "2026-11-03T13:30:00Z";
+    assert_eq!(assessed_waiting(&before.build()), (json!(0), json!(0), json!(1)));
+
+    // An event logged before 2026-11-06 has no reason_at: the read-back that first saw it.
+    let old = declined_case().with(reason_line("2026-11-03T14:00:00Z", "2026-11-03T14:00:00Z", None));
+    assert_eq!(old.build()["funnel"]["time_to_assess"]["max_business_hours"], json!(30.0));
+}
+
+/// A reason written with the decline (a comment up to 5 s before it counts):
+/// assessed at the triage time, whether the event has reason_at or not.
+#[test]
+fn reason_with_the_decline_assesses_at_triage_time() {
+    for reason_at in [Some("2026-11-02T08:59:57Z"), Some(""), None] {
+        // Same log write as the triage (Case lines share one `ts`).
+        let c = declined_case().with(reason_line("2026-11-02T10:00:00Z", "2026-11-01T00:00:00Z", reason_at));
+        let j = c.build();
+        assert_eq!(assessed_waiting(&j), (json!(1), json!(1), json!(0)), "{reason_at:?}");
+        assert_eq!(j["funnel"]["time_to_assess"], json!({"count": 1, "median_business_hours": 1.0, "max_business_hours": 1.0}));
+        assert_eq!(j["outcomes"]["ruled_out"][0]["declined_at"], json!("2026-11-02T10:00:00+01:00"));
+        assert_eq!(j["status"], json!({"rag": "GREEN", "reasons": []}));
+        assert_eq!(kpi(&j, "assessed").0, "1 of 1 (100%)");
+        assert_eq!(j["bottom_line"], json!(ALL_GOOD));
+    }
 }
 
 /// Canceled, then reopened: the reopen carries the triage time, earlier than the
@@ -488,6 +650,63 @@ fn reopened_ticket_is_open() {
     assert_eq!(idents(&j["open_actions"]["items"]), ["MOCK-1"]);
     assert_eq!(j["resolved"], json!([]));
     assert_eq!(j["status"]["rag"], json!("GREEN"));
+    assert_backlog(&j, [0, 1, 0, 0, 0, 1]);
+}
+
+/// [open at start, accepted, reopened, fixed, closed without fix, open at end]; the
+/// backlog reconciles with no "other" change, and open at end is the open actions.
+fn assert_backlog(j: &Value, want: [i64; 6]) {
+    let b = &j["backlog"];
+    let n = |k: &str| b[k].as_i64().unwrap();
+    assert_eq!([n("open_start"), n("accepted"), n("reopened"), n("fixed"), n("closed_without_fix"), n("open_end")], want, "{b}");
+    assert_eq!(n("other"), 0, "{b}");
+    assert_eq!(n("open_start") + n("accepted") + n("reopened") - n("fixed") - n("closed_without_fix") + n("other"), n("open_end"));
+    assert_eq!(json!(n("open_end")), j["open_actions"]["count"]);
+}
+
+/// Action backlog: open at start + accepted + reopened - fixed - closed without fix
+/// = open at end, from the event log.
+#[test]
+fn action_backlog_reconciles() {
+    // The fixture month: A open from October and fixed; B, E, I accepted; E canceled.
+    let _t = lab("report-backlog");
+    let j = generate(&nov(), utc("2026-12-03T08:00:00Z"), &no_pdf()).unwrap().json;
+    assert_backlog(&j, [1, 3, 0, 1, 1, 2]);
+
+    // Accepted and done between two read-backs: no `accepted` state was ever logged.
+    let quick = Case::good().without("state_changed|")
+        .with(line("state_changed", KEY, "2026-11-04T09:00:00Z", json!({"from": "none", "to": "done", "state_name": "Done"})));
+    assert_backlog(&quick.build(), [0, 1, 0, 1, 0, 0]);
+
+    // Accepted and fixed in October, reopened in November: carried in as reopened.
+    let oct = |s: &str| s.replace("2026-11-02", "2026-10-05");
+    let mut re = Case::good();
+    re.events = re.events.iter().map(|l| oct(l)).collect();
+    let re = re
+        .with(line("state_changed", KEY, "2026-10-06T09:00:00Z", json!({"from": "accepted", "to": "done", "state_name": "Done"})))
+        .with(line("state_changed", KEY, "2026-11-03T09:00:00Z", json!({"from": "done", "to": "accepted", "state_name": "Todo"})));
+    let j = re.build();
+    assert_backlog(&j, [0, 0, 1, 0, 0, 1]);
+    assert_eq!(j["open_actions"]["items"][0]["carried_over"], json!(true));
+
+    // Open from October, canceled in November.
+    let oct_open = Case { events: Case::good().events.iter().map(|l| oct(l)).collect(), ..Case::good() }
+        .with(line("state_changed", KEY, "2026-11-04T09:00:00Z", json!({"from": "accepted", "to": "canceled", "state_name": "Canceled"})));
+    assert_backlog(&oct_open.build(), [1, 0, 0, 0, 1, 0]);
+}
+
+/// The review reminder of a closed month is printed in the appendix when review.json
+/// already names its issue; a month to date never carries it.
+#[test]
+fn review_issue_from_review_json() {
+    let t = lab("report-review-issue");
+    let now = utc("2026-12-03T08:00:00Z");
+    assert!(generate(&nov(), now, &no_pdf()).unwrap().json.get("review_issue").is_none());
+    std::fs::write(t.dir.join("reports/2026-11/review.json"),
+                   json!({"month": "2026-11", "issue": {"id": "u", "identifier": "MOCK-9", "url": "x"}}).to_string()).unwrap();
+    assert_eq!(generate(&nov(), now, &no_pdf()).unwrap().json["review_issue"], json!("MOCK-9"));
+    let mtd = utc("2026-11-20T08:00:00Z");
+    assert!(generate(&Period::MonthToDate, mtd, &no_pdf()).unwrap().json.get("review_issue").is_none());
 }
 
 #[test]
@@ -498,7 +717,7 @@ fn bottom_line_zero_relevant() {
     let j = c.build();
     assert_eq!(j["status"]["rag"], json!("GREEN"));
     assert_eq!(j["bottom_line"], json!([
-        "In November, fairCT's monitoring recorded 2 new public vulnerability notices. No new public vulnerability notice concerned a component on fairCT's list.",
+        "No new public vulnerability notice concerned a component on fairCT's list, and monitoring ran without problems.",
         "No decision is needed from you.",
     ]));
     assert_eq!(kpi(&j, "assessed").0, "—");
@@ -592,6 +811,9 @@ fn marking_in_report_json_and_fix_target_note() {
     assert!(t.contains("#let mark = d.marking.label") && t.contains("k.target_note"));
     assert!(t.contains("team proposal pending agreement") && t.contains("NIST SP 800-40r4"));
     assert!(t.contains("Quality check sample — automatically ruled-out items"));
+    // Review is reminder-only: no signature lines; the footer carries no data sha.
+    assert!(!t.contains("Reviewed by") && !t.contains("Acknowledged by"));
+    assert!(!t.contains("== Exceptions") && !t.contains("Resolved in the period"));
 }
 
 /// The monthly close appends report_frozen, sample_drawn and review_issue_created

@@ -423,10 +423,10 @@ fn run(args: &Args) -> Result<(), Fatal> {
     let mut regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health, triage.tracker.as_ref(),
                                             &triage.view, start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
     let serve_url = std::env::var("SERVE_PUBLIC_URL").ok();
-    // Linear section summary: this run's month-to-date report, else the last one on
-    // disk (dry run, --out, or a report error).
+    // Linear section tiles: the triage view ("now") and this run's month-to-date report,
+    // else the last one on disk (dry run, --out, or a report error) ("this month").
     let report_json = report_json.or_else(|| state::load_json::<Value>("reports/month-to-date/report.json"));
-    regions.html = render::linear_regions(report_json.as_ref(), serve_url.as_deref());
+    regions.html = render::linear_regions(&triage.view, end, report_json.as_ref(), serve_url.as_deref());
     let pdf_href = uploaded.as_ref().map(|(p, sha, _)| format!("{p}?v={}", &sha[..sha.len().min(12)]));
     let as_of = uploaded.as_ref().map(|(_, _, a)| a.as_str()).unwrap_or("");
     let monthly_link = monthly.and_then(|m| {
@@ -632,7 +632,7 @@ mod tests {
             tbody: vec![("t-health".into(), win.into()), ("t-kev".into(), kev.into())],
             text: vec![("winlabel".into(), win.into()), ("s-kev".into(), "1".into())],
             stamp: win.into(),
-            html: vec![("l-refresh".into(), format!("as of {win}")), ("l-summary".into(), "Waiting 1".into())],
+            html: vec![("l-refresh".into(), format!("as of {win}")), ("l-kpis".into(), "Waiting 1".into())],
         };
         let health = |status: &str| vec![HealthRow { source: "CISA KEV".into(), status: status.into(), ..Default::default() }];
         let linear = |status: &str, note: &str| HealthRow { source: "Linear".into(), status: status.into(), note: note.into(), ..Default::default() };
@@ -647,7 +647,7 @@ mod tests {
         assert_ne!(ok, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), Some(&linear("error", "HTTP 500")), "", ""));
         // A new report PDF on the wiki (its content sha) is news for the page link.
         assert_ne!(a, fingerprint(&regions("<tr>CVE-1</tr>", "06:03"), &health("ok"), None, "abc", ""));
-        // The Linear summary counts; its "as of" (l-refresh) does not.
+        // The Linear tiles count; the "as of" (l-refresh) does not.
         let mut r = regions("<tr>CVE-1</tr>", "06:03");
         r.html[1].1 = "Waiting 2".into();
         assert_ne!(a, fingerprint(&r, &health("ok"), None, "", ""));

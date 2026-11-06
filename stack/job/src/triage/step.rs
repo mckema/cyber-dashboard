@@ -191,6 +191,7 @@ pub(crate) fn view(store: &Store, items: &[Item], now: DateTime<Utc>, mode_note:
             issue_url: issue.map(|i| i.url.clone()).unwrap_or_default(),
             overdue: u.overdue,
             note: if u.no_reason { NO_REASON_NOTE.to_string() } else { String::new() },
+            no_reason: u.no_reason,
         })
     }).collect();
     let tickets = store.open_tickets().into_iter().filter_map(|(_, r)| {
@@ -256,6 +257,7 @@ mod tests {
         let rows: Vec<(&str, &str, bool, &str)> =
             v.untriaged.iter().map(|r| (r.item_id.as_str(), r.issue_identifier.as_str(), r.overdue, r.note.as_str())).collect();
         assert_eq!(rows, [("CVE-2026-0", "TRI-0", true, ""), ("CVE-2026-1", "TRI-1", true, NO_REASON_NOTE)]);
+        assert_eq!(v.untriaged.iter().map(|r| r.no_reason).collect::<Vec<_>>(), [false, true], "counted by the page tile");
         assert!(v.tickets.is_empty());
         assert_eq!(s.gaps().missing_reason, 1);
     }

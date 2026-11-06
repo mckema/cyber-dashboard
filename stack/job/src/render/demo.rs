@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use super::{HealthRow, Regions, SKELETON_PATH, STYLE_PATH, TriageView, apply_regions, build_regions, thousands};
+use super::{
+    HealthRow, Regions, SKELETON_PATH, STYLE_PATH, TriageView, apply_regions, build_regions, linear_regions, thousands,
+};
 use crate::feeds::common::{Fatal, Item, parse_iso};
 
 #[derive(clap::Args)]
@@ -42,14 +44,21 @@ pub(super) struct Fixture {
     now: DateTime<Utc>,
     kev_catalog: String,
     cap: usize,
+    /// The parts of a month-to-date report.json the Linear tiles read; None: no report.
+    report: Option<Value>,
 }
 
 impl Fixture {
     pub(super) fn regions(&self) -> Regions {
-        build_regions(
+        let mut r = build_regions(
             &self.kev, &self.adv, &self.dep, &self.cve, &self.health, self.tracker.as_ref(), &self.triage,
             self.start, self.end, self.now, &self.kev_catalog, self.cap,
-        )
+        );
+        // The month tiles and "as of" from the fixture's report.json part, as run.rs does.
+        if self.report.is_some() {
+            r.html = linear_regions(&self.triage, self.end, self.report.as_ref(), None);
+        }
+        r
     }
 }
 
@@ -102,6 +111,7 @@ pub(super) fn load_fixture(path: &Path) -> Result<Fixture, Fatal> {
         kev_catalog: d.get("kev_catalog").and_then(Value::as_str).unwrap_or("").to_string(),
         // Missing: 300 rows, as the job's default. Anything but a positive integer: no cap.
         cap: d.get("cap").map_or(300, |v| v.as_u64().unwrap_or(0) as usize),
+        report: d.get("report").cloned(),
     })
 }
 

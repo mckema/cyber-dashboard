@@ -19,12 +19,15 @@
 //!   text   s-kev s-crit s-high s-dep s-adv s-untriaged s-auto
 //!          n-health n-kev n-adv n-dep n-nvd n-cvecap n-untriaged n-tickets winlabel
 //!   stamp  rstat   (inner HTML, contains <b>; must never contain a <div>)
-//!   html   l-summary l-refresh   (inner HTML of a <div>, spans and links only, never a <div>)
+//!   html   l-kpis l-refresh   (inner HTML of a <div>, spans and links only, never a <div>)
 //!
-//! The Linear section (since 2026-11-06 above the feed health table) opens with a
-//! summary line of the month-to-date report (`l-summary`, numbers from report.json so
-//! that the page and the PDF agree) and the "Refresh tickets" link with the tickets'
-//! "as of" time (`l-refresh`, changes every run).
+//! The Linear section (first on the page, above the "Threat feeds — last 7 days"
+//! group) has the "Refresh tickets" link with the tickets' "as of" time in its heading
+//! (`l-refresh`, changes every run) and opens with four tiles (`l-kpis`, since
+//! 2026-11-06): two "now" tiles counted from the triage view, so they always equal
+//! the two tables below them, and two "this month" tiles from the month-to-date
+//! report (report.json), so they equal the PDF. One number per concept, each label
+//! with its scope (now / this month / last 7 days).
 //!
 //! The triage tables take a TriageView, built by the caller from the triage
 //! store and the tracker; render does not depend on the triage module's types.
@@ -66,7 +69,7 @@ pub const TEXT_IDS: [&str; 16] = [
 ];
 pub const STAMP_ID: &str = "rstat";
 /// <div> regions with inline markup (spans, b, a), never a nested <div>.
-pub const HTML_IDS: [&str; 2] = ["l-summary", "l-refresh"];
+pub const HTML_IDS: [&str; 2] = ["l-kpis", "l-refresh"];
 
 /// Page content and scriptCss, relative to the repo root (the job and demo run from there).
 pub const SKELETON_PATH: &str = "stack/wiki/page/skeleton.html";
@@ -91,6 +94,7 @@ pub struct HealthRow {
 /// first_seen: ISO 8601 UTC. issue_identifier "" means the issue is not created yet ("pending").
 /// overdue: set by the caller when the item has waited more than one business day.
 /// note: shown under the issue, e.g. "declined in Linear without a reason"; "" for none.
+/// no_reason: the issue was declined without a reason (counted as "need a reason").
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TriageRow {
@@ -104,6 +108,7 @@ pub struct TriageRow {
     pub issue_url: String,
     pub overdue: bool,
     pub note: String,
+    pub no_reason: bool,
 }
 
 /// One row of the open tickets table: an accepted issue that is not closed.
@@ -288,56 +293,99 @@ pub fn report_links(monthly: Option<&MonthlyLink>, mtd_href: Option<&str>, ticke
     )
 }
 
-// ---------------------------------------------------------------- Linear summary
+// ---------------------------------------------------------------- Linear tiles
 
-/// "<b>3</b>" and, when given, " (k overdue)" with a non-zero k in red.
-fn figure(label: &str, n: u64, overdue: Option<u64>) -> String {
-    let late = match overdue {
-        None => String::new(),
-        Some(0) => " (0 overdue)".into(),
-        Some(k) => format!(" <span class=\"lbad\">({} overdue)</span>", thousands(k as usize)),
-    };
-    format!("<span class=\"lfig\">{label} <b>{}</b>{late}</span>", thousands(n as usize))
+/// One tile of the Linear section: label, scope, number, detail line. With `href` the
+/// whole tile links to the table it counts, else it is a plain span. `state` (class
+/// kpi-<state>): "bad" overdue or missing items (red), "ok" nothing pending (green),
+/// "open" pending but nothing late, "info" a month figure, "none" no figures yet.
+fn kpi_tile(label: &str, scope: &str, n: &str, detail: &str, state: &str, href: Option<&str>) -> String {
+    let inner = format!(
+        "<span class=\"kpi-h\"><span class=\"kpi-l\">{label}</span><span class=\"kpi-sc\">{scope}</span></span>\
+         <span class=\"kpi-n\">{n}</span><span class=\"kpi-d\">{detail}</span>"
+    );
+    match href {
+        Some(h) => format!("<a class=\"kpi kpi-{state}\" href=\"{h}\">{inner}</a>"),
+        None => format!("<span class=\"kpi kpi-{state}\">{inner}</span>"),
+    }
 }
 
-/// The four figures of the Linear section for the month to date, from the report's
-/// data (report.json) so that the page and the PDF agree:
-///   Assessed       funnel.assessed: relevant items of the month assessed in Linear
-///   Waiting        funnel.waiting: relevant items of the month not assessed yet; overdue =
-///                  those of them over 1 business day (funnel.over_one_day, not assessed)
-///   Actions open   open_actions.count, overdue = open_actions.overdue
-///   Actions closed outcomes.fixed_count + outcomes.closed_without_fix (closed in the month)
-/// Without a report: one line saying so.
-pub fn linear_summary(report: Option<&Value>) -> String {
+/// The non-zero parts as "2 overdue &middot; 1 needs a reason", each in red, and
+/// whether there was one; `none` when every part is zero. Parts: (n, singular, plural).
+fn kpi_detail(parts: &[(usize, &str, &str)], none: &str) -> (String, bool) {
+    let bad: Vec<String> = parts.iter().filter(|(n, ..)| *n > 0)
+        .map(|(n, one, many)| format!("<span class=\"kpi-late\">{} {}</span>", thousands(*n), if *n == 1 { one } else { many }))
+        .collect();
+    if bad.is_empty() { (none.to_string(), false) } else { (bad.join(" &middot; "), true) }
+}
+
+/// The scope of the month tiles: the Amsterdam month of the report's tickets-as-of
+/// time ("November"); "month to date" without a usable as_of. Not the day: l-kpis is
+/// part of the page fingerprint, and a daily change would write a page version a day.
+fn month_scope(r: &Value) -> String {
+    r.get("as_of").and_then(Value::as_str).and_then(parse_iso)
+        .map(|t| crate::triage::store::to_amsterdam(t).format("%B").to_string())
+        .unwrap_or_else(|| "month to date".into())
+}
+
+/// "4 of 6 (67%)…", the value of the report's "assessed" KPI (assessed within 1 business day).
+static KPI_WITHIN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(\d+) of \d+").unwrap());
+
+/// The four tiles of the Linear section (`l-kpis`), one number per concept:
+///   Waiting for triage  now: the rows of the untriaged table (store view: no decision
+///                       in Linear yet, or declined without a reason); overdue = waiting
+///                       more than 1 business day; need a reason = declined without one
+///   Open tickets        now: the rows of the open-tickets table; overdue = due date
+///                       before `today`; no owner; no due date
+///   Triaged this month  report funnel.assessed (the PDF's "assessed"); the detail is the
+///                       x of the "assessed" KPI ("x of y (z%)", within 1 business day)
+///   Closed this month   report outcomes.fixed_count + closed_without_fix
+/// The "now" tiles use the same view and `today` as the tables, so they always agree
+/// with them. Without a report (no `funnel`), the month tiles show "&mdash;".
+pub fn linear_kpis(view: &TriageView, today: &str, report: Option<&Value>) -> String {
+    let state = |n: usize, bad: bool| if bad { "bad" } else if n == 0 { "ok" } else { "open" };
+    let u = &view.untriaged;
+    let late = u.iter().filter(|r| r.overdue).count();
+    let reason = u.iter().filter(|r| r.no_reason).count();
+    let (d, bad) = kpi_detail(&[(late, "overdue", "overdue"), (reason, "needs a reason", "need a reason")],
+                              if u.is_empty() { "none waiting" } else { "none overdue" });
+    let mut s = kpi_tile("Waiting for triage", "now", &thousands(u.len()), &d, state(u.len(), bad), Some("#untriaged"));
+    let t = &view.tickets;
+    let (no_owner, no_due) = tickets_missing(t);
+    let (d, bad) = kpi_detail(
+        &[(tickets_past_due(t, today), "overdue", "overdue"), (no_owner, "no owner", "no owner"),
+          (no_due, "no due date", "no due date")],
+        if t.is_empty() { "none open" } else { "none overdue" },
+    );
+    s.push_str(&kpi_tile("Open tickets", "now", &thousands(t.len()), &d, state(t.len(), bad), Some("#tickets")));
     let Some(r) = report.filter(|r| r.get("funnel").is_some()) else {
-        return "<span class=\"lper\">Month to date</span><span class=\"lfig\">No report figures yet: \
-                they appear after the first scheduled run of the month.</span>".into();
+        for label in ["Triaged this month", "Closed this month"] {
+            s.push_str(&kpi_tile(label, "month to date", "&mdash;", "no month-to-date report yet", "none", None));
+        }
+        return s;
     };
-    let n = |p: &str| r.pointer(p).and_then(Value::as_u64).unwrap_or(0);
-    let len = |p: &str| r.pointer(p).and_then(Value::as_array).map_or(0, |a| a.len() as u64);
-    // Waiting items of the month over 1 business day: over_one_day rows with no
-    // assessment, first seen on or after the period start.
-    let start = r.pointer("/period/start").and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok());
-    let late_waiting = r.pointer("/funnel/over_one_day").and_then(Value::as_array).map_or(0, |rows| {
-        rows.iter()
-            .filter(|row| row.get("assessed_at").is_none_or(Value::is_null))
-            .filter(|row| {
-                let seen = row.get("first_seen").and_then(Value::as_str).and_then(|s| DateTime::parse_from_rfc3339(s).ok());
-                matches!((seen, start), (Some(s), Some(b)) if s >= b)
-            })
-            .count() as u64
-    });
-    let month = r.pointer("/period/month").and_then(Value::as_str).unwrap_or("");
-    let label = if month.is_empty() { "Month to date".to_string() } else { format!("{}, month to date", esc(month)) };
-    [
-        format!("<span class=\"lper\">{label}</span>"),
-        figure("Assessed", n("/funnel/assessed"), None),
-        figure("Waiting", n("/funnel/waiting"), Some(late_waiting)),
-        figure("Actions open", n("/open_actions/count"), Some(n("/open_actions/overdue"))),
-        figure("Actions closed", n("/outcomes/fixed_count") + len("/outcomes/closed_without_fix"), None),
-    ]
-    .join("")
+    let n = |p: &str| r.pointer(p).and_then(Value::as_u64).unwrap_or(0) as usize;
+    let len = |p: &str| r.pointer(p).and_then(Value::as_array).map_or(0, Vec::len);
+    let scope = month_scope(r);
+    let assessed = n("/funnel/assessed");
+    let within = r.get("kpis").and_then(Value::as_array)
+        .and_then(|ks| ks.iter().find(|k| k.get("key").and_then(Value::as_str) == Some("assessed")))
+        .and_then(|k| k.get("value")).and_then(Value::as_str)
+        .and_then(|v| KPI_WITHIN.captures(v)).and_then(|c| c[1].parse::<usize>().ok());
+    let d = match (assessed, within) {
+        (0, _) => "none yet".to_string(),
+        (_, Some(x)) => format!("{} within 1 business day", thousands(x)),
+        (_, None) => String::new(),
+    };
+    s.push_str(&kpi_tile("Triaged this month", &scope, &thousands(assessed), &d, "info", None));
+    let (fixed, without) = (n("/outcomes/fixed_count"), len("/outcomes/closed_without_fix"));
+    let d = if fixed + without == 0 {
+        "none yet".to_string()
+    } else {
+        format!("{} fixed &middot; {} without fix", thousands(fixed), thousands(without))
+    };
+    s.push_str(&kpi_tile("Closed this month", &scope, &thousands(fixed + without), &d, "info", None));
+    s
 }
 
 /// The "Refresh tickets" link to `serve` (none without SERVE_PUBLIC_URL) and "as of
@@ -359,9 +407,14 @@ pub fn linear_refresh(report: Option<&Value>, serve_url: Option<&str>) -> String
     s
 }
 
-/// The html regions (HTML_IDS order) for a month-to-date report's data.
-pub fn linear_regions(report: Option<&Value>, serve_url: Option<&str>) -> Vec<(String, String)> {
-    HTML_IDS.iter().map(|s| s.to_string()).zip([linear_summary(report), linear_refresh(report, serve_url)]).collect()
+/// The html regions (HTML_IDS order): the tiles for the triage view and a month-to-date
+/// report's data, and the refresh link. `now`: the time the tables are rendered for
+/// (its UTC date decides "overdue" for tickets, as in the tables).
+pub fn linear_regions(view: &TriageView, now: DateTime<Utc>, report: Option<&Value>, serve_url: Option<&str>)
+                      -> Vec<(String, String)> {
+    let today = now.format("%Y-%m-%d").to_string();
+    HTML_IDS.iter().map(|s| s.to_string())
+        .zip([linear_kpis(view, &today, report), linear_refresh(report, serve_url)]).collect()
 }
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
@@ -421,26 +474,30 @@ pub fn build_regions(
         tbody: TBODY_IDS.iter().map(|s| s.to_string()).zip(tbody).collect(),
         text: TEXT_IDS.iter().map(|s| s.to_string()).zip(text).collect(),
         stamp: build_stamp(now, kev_catalog, health),
-        // The caller puts in the month-to-date report's figures (linear_regions).
-        html: linear_regions(None, None),
+        // Without a report: the caller puts the month-to-date report in (linear_regions).
+        html: linear_regions(triage, end, None, None),
     }
 }
 
-/// s-untriaged: "3", or "3 &middot; 1 overdue".
+/// s-untriaged: "3", or "3 &middot; 1 overdue &middot; 1 need a reason" (the words of the tile).
 fn untriaged_summary(triage: &TriageView) -> String {
     let mut s = thousands(triage.untriaged.len());
     let late = triage.untriaged.iter().filter(|r| r.overdue).count();
+    let reason = triage.untriaged.iter().filter(|r| r.no_reason).count();
     if late > 0 {
         s.push_str(&format!(" &middot; {} overdue", thousands(late)));
+    }
+    if reason > 0 {
+        s.push_str(&format!(" &middot; {} {}", thousands(reason), if reason == 1 { "needs a reason" } else { "need a reason" }));
     }
     s
 }
 
-/// n-tickets: "2 tickets", plus past due / no owner / no due date counts when non-zero.
+/// n-tickets: "2 tickets", plus overdue / no owner / no due date counts when non-zero.
 fn tickets_summary(triage: &TriageView, today: &str) -> String {
     let (no_owner, no_due) = tickets_missing(&triage.tickets);
     let mut s = plural(triage.tickets.len(), "ticket", None);
-    for (n, what) in [(tickets_past_due(&triage.tickets, today), "past due"), (no_owner, "no owner"), (no_due, "no due date")] {
+    for (n, what) in [(tickets_past_due(&triage.tickets, today), "overdue"), (no_owner, "no owner"), (no_due, "no due date")] {
         if n > 0 {
             s.push_str(&format!(" &middot; {} {what}", thousands(n)));
         }
@@ -453,13 +510,12 @@ fn tickets_summary(triage: &TriageView, today: &str) -> String {
 pub const TICKET_TBODY_IDS: [&str; 2] = ["t-untriaged", "t-tickets"];
 pub const TICKET_TEXT_IDS: [&str; 3] = ["s-untriaged", "n-untriaged", "n-tickets"];
 
-/// The two triage tables and their counters only, exactly as build_regions renders
-/// them for the same view and `now` (end of the window), for `serve`'s partial
-/// re-splice. `stamp` is left empty: the caller puts back the page's own stamp
-/// (stamp_of), since apply_regions always writes it. `html` is left empty too: the
-/// caller adds linear_regions() once it has the report (apply_regions leaves the
-/// page's summary as it is otherwise).
-pub fn ticket_regions(view: &TriageView, now: DateTime<Utc>) -> Regions {
+/// The Linear section only: the two triage tables, their counters and the html
+/// regions (tiles, refresh link), exactly as build_regions plus linear_regions render
+/// them for the same view, `now` (end of the window), report and serve URL, for
+/// `serve`'s partial re-splice. `stamp` is left empty: the caller puts back the page's
+/// own stamp (stamp_of), since apply_regions always writes it.
+pub fn ticket_regions(view: &TriageView, now: DateTime<Utc>, report: Option<&Value>, serve_url: Option<&str>) -> Regions {
     let today = now.format("%Y-%m-%d").to_string();
     let note = view.mode_note.as_deref();
     let tbody = [build_untriaged_rows(&view.untriaged, note), build_ticket_rows(&view.tickets, &today, note)];
@@ -468,7 +524,7 @@ pub fn ticket_regions(view: &TriageView, now: DateTime<Utc>) -> Regions {
         tbody: TICKET_TBODY_IDS.iter().map(|s| s.to_string()).zip(tbody).collect(),
         text: TICKET_TEXT_IDS.iter().map(|s| s.to_string()).zip(text).collect(),
         stamp: String::new(),
-        html: Vec::new(),
+        html: linear_regions(view, now, report, serve_url),
     }
 }
 
@@ -597,6 +653,7 @@ mod test_support {
                 item_id: EVIL.into(), item_url: "javascript:alert(3)".into(), title: EVIL.into(),
                 component: EVIL.into(), rule: EVIL.into(), first_seen: EVIL.into(),
                 issue_identifier: EVIL.into(), issue_url: "javascript:alert(4)".into(), overdue: true, note: EVIL.into(),
+                no_reason: true,
             }],
             tickets: vec![TicketRow {
                 issue_identifier: EVIL.into(), issue_url: "javascript:alert(5)".into(), item_id: EVIL.into(),
@@ -750,19 +807,30 @@ mod tests {
                          Some(("TRI-31".into(), "https://linear.app/x/issue/TRI-31".into()))).unwrap()
     }
 
-    /// The parts of a month-to-date report.json the summary reads.
+    /// The parts of a month-to-date report.json the tiles read (and some they must not:
+    /// funnel.waiting and open_actions count other sets than the tables).
     fn report_fixture() -> Value {
         serde_json::json!({
             "as_of": "2026-11-06T13:05:00Z",
             "period": {"start": "2026-11-01T00:00:00+01:00", "month": "November 2026"},
-            "funnel": {"assessed": 5, "waiting": 3, "over_one_day": [
+            "funnel": {"assessed": 5, "waiting": 9, "over_one_day": [
                 {"key": "a", "first_seen": "2026-11-02T10:00:00+01:00", "assessed_at": null, "business_hours": null},
-                {"key": "b", "first_seen": "2026-10-28T10:00:00+01:00", "assessed_at": null, "business_hours": null},
                 {"key": "c", "first_seen": "2026-11-03T10:00:00+01:00", "assessed_at": "2026-11-05T10:00:00+01:00",
                  "business_hours": 48.0}]},
-            "open_actions": {"count": 4, "overdue": 2, "items": []},
+            "kpis": [{"key": "relevant", "value": "7"},
+                     {"key": "assessed", "value": "4 of 6 (67%); 1 without a reason"}],
+            "open_actions": {"count": 8, "overdue": 7, "items": []},
             "outcomes": {"fixed_count": 2, "closed_without_fix": [{"key": "d"}]},
         })
+    }
+
+    /// The tile with this label: (class, scope, number, detail), from a tiles region.
+    fn tile(html: &str, label: &str) -> (String, String, String, String) {
+        let p = format!(
+            r#"<(?:a|span) class="kpi ([a-z-]+)"(?: href="[^"]*")?><span class="kpi-h"><span class="kpi-l">{}</span><span class="kpi-sc">([^<]*)</span></span><span class="kpi-n">([^<]*)</span><span class="kpi-d">((?:[^<]|<span class="kpi-late">[^<]*</span>)*)</span></(?:a|span)>"#,
+            regex::escape(label));
+        let c = re(&p).captures(html).unwrap_or_else(|| panic!("{label}: {html}"));
+        (c[1].to_string(), c[2].to_string(), c[3].to_string(), c[4].to_string())
     }
 
     #[test]
@@ -807,78 +875,171 @@ mod tests {
         assert!(evil.contains("Review: &lt;script&gt;</span>"), "{evil}");
     }
 
+    fn t4(a: &str, b: &str, c: &str, d: &str) -> (String, String, String, String) {
+        (a.into(), b.into(), c.into(), d.into())
+    }
+
     #[test]
-    fn linear_summary_from_the_report() {
+    fn month_tiles_from_the_report() {
         let r = report_fixture();
-        let s = linear_summary(Some(&r));
-        assert_eq!(s, concat!(
-            r#"<span class="lper">November 2026, month to date</span>"#,
-            r#"<span class="lfig">Assessed <b>5</b></span>"#,
-            r#"<span class="lfig">Waiting <b>3</b> <span class="lbad">(1 overdue)</span></span>"#,
-            r#"<span class="lfig">Actions open <b>4</b> <span class="lbad">(2 overdue)</span></span>"#,
-            r#"<span class="lfig">Actions closed <b>3</b></span>"#));
+        let s = linear_kpis(&TriageView::default(), "2026-11-06", Some(&r));
+        assert_eq!(tile(&s, "Triaged this month"), t4("kpi-info", "November", "5", "4 within 1 business day"));
+        assert_eq!(tile(&s, "Closed this month"), t4("kpi-info", "November", "3", "2 fixed &middot; 1 without fix"));
+        // funnel.waiting (9) and open_actions (8, 7 overdue) count other sets than the tables: not shown.
+        assert!(!s.contains('9') && !s.contains('8') && !s.contains('7'), "{s}");
+        // An empty view: both "now" tiles green, and links to their tables; the month tiles are not links.
+        assert_eq!(tile(&s, "Waiting for triage"), t4("kpi-ok", "now", "0", "none waiting"));
+        assert_eq!(tile(&s, "Open tickets"), t4("kpi-ok", "now", "0", "none open"));
+        assert!(s.starts_with(r##"<a class="kpi kpi-ok" href="#untriaged">"##), "{s}");
+        assert!(s.contains(r##"<a class="kpi kpi-ok" href="#tickets">"##), "{s}");
+        assert_eq!(s.matches(r#"<span class="kpi kpi-info">"#).count(), 2, "{s}");
+        assert!(!s.contains("<div"), "an html region holds no div: {s}");
+        // Nothing triaged or closed yet.
         let mut calm = r.clone();
-        calm["open_actions"]["overdue"] = serde_json::json!(0);
-        calm["funnel"]["over_one_day"] = serde_json::json!([]);
-        let s = linear_summary(Some(&calm));
-        assert!(s.contains("Waiting <b>3</b> (0 overdue)</span>") && s.contains("Actions open <b>4</b> (0 overdue)</span>"), "{s}");
-        assert!(!s.contains("lbad"), "{s}");
-        assert!(linear_summary(None).contains("No report figures yet"));
-        assert!(linear_summary(Some(&serde_json::json!({"error": "x"}))).contains("No report figures yet"));
+        calm["funnel"]["assessed"] = serde_json::json!(0);
+        calm["outcomes"] = serde_json::json!({"fixed_count": 0, "closed_without_fix": []});
+        let s = linear_kpis(&TriageView::default(), "2026-11-06", Some(&calm));
+        assert_eq!(tile(&s, "Triaged this month"), t4("kpi-info", "November", "0", "none yet"));
+        assert_eq!(tile(&s, "Closed this month"), t4("kpi-info", "November", "0", "none yet"));
+        // A KPI value without "x of y": the number stays, the detail is left out.
+        let mut odd = r.clone();
+        odd["kpis"] = serde_json::json!([{"key": "assessed", "value": "—; 1 without a reason"}]);
+        assert_eq!(tile(&linear_kpis(&TriageView::default(), "2026-11-06", Some(&odd)), "Triaged this month").3, "");
+        // Scope: the Amsterdam month of as_of (00:30 on 1 Nov there); no as_of.
+        let mut first = r.clone();
+        first["as_of"] = serde_json::json!("2026-10-31T23:30:00Z");
+        assert_eq!(tile(&linear_kpis(&TriageView::default(), "2026-11-01", Some(&first)), "Closed this month").1, "November");
+        first.as_object_mut().unwrap().remove("as_of");
+        assert_eq!(tile(&linear_kpis(&TriageView::default(), "2026-11-01", Some(&first)), "Closed this month").1, "month to date");
+    }
+
+    #[test]
+    fn month_tiles_without_a_report() {
+        for rep in [None, Some(serde_json::json!({"error": "x"}))] {
+            let s = linear_kpis(&TriageView::default(), "2026-11-06", rep.as_ref());
+            for label in ["Triaged this month", "Closed this month"] {
+                assert_eq!(tile(&s, label), t4("kpi-none", "month to date", "&mdash;", "no month-to-date report yet"));
+            }
+            assert_eq!(tile(&s, "Waiting for triage").2, "0");
+        }
+        // A run without a report (dry run with none on disk) renders the same tiles.
+        let t = parse_iso("2026-11-03T02:45:00Z").unwrap();
+        let r = build_regions(&[], &[], &[], &[], &[], None, &TriageView::default(), t, t, t, "", 300);
+        assert_eq!(r.get("l-kpis"), linear_kpis(&TriageView::default(), "2026-11-03", None));
+        assert_eq!(r.get("l-refresh"), "");
+    }
+
+    /// The "now" tiles count exactly the rows of the two tables, in the words of
+    /// their counters; the month tiles come from the fixture's report part.
+    #[test]
+    fn now_tiles_equal_the_tables() {
+        let r = load();
+        let k = r.get("l-kpis");
+        let rows = |id: &str| r.get(id).matches("<tr").count().to_string();
+        let (cls, scope, n, d) = tile(k, "Waiting for triage");
+        assert_eq!((cls.as_str(), scope.as_str(), n.as_str()), ("kpi-bad", "now", rows("t-untriaged").as_str()));
+        assert_eq!(format!("{n} items"), r.get("n-untriaged"));
+        assert_eq!(r.get("t-untriaged").matches(r#"<tr class="overdue">"#).count(), 2);
+        assert_eq!(r.get("t-untriaged").matches("declined in Linear without a reason").count(), 1);
+        assert_eq!(d, r#"<span class="kpi-late">2 overdue</span> &middot; <span class="kpi-late">1 needs a reason</span>"#);
+        assert_eq!(r.get("s-untriaged"), "4 &middot; 2 overdue &middot; 1 needs a reason");
+        let (cls, scope, n, d) = tile(k, "Open tickets");
+        assert_eq!((cls.as_str(), scope.as_str(), n.as_str()), ("kpi-bad", "now", rows("t-tickets").as_str()));
+        assert_eq!(d, concat!(r#"<span class="kpi-late">1 overdue</span> &middot; <span class="kpi-late">1 no owner</span>"#,
+                              r#" &middot; <span class="kpi-late">1 no due date</span>"#));
+        assert_eq!(r.get("n-tickets"), "3 tickets &middot; 1 overdue &middot; 1 no owner &middot; 1 no due date");
+        assert_eq!(tile(k, "Triaged this month"), t4("kpi-info", "November", "13", "11 within 1 business day"));
+        assert_eq!(tile(k, "Closed this month"), t4("kpi-info", "November", "2", "1 fixed &middot; 1 without fix"));
+        // Pending but nothing late or missing: neutral.
+        let calm = TriageView {
+            untriaged: vec![TriageRow { item_id: "A".into(), ..Default::default() }],
+            tickets: vec![TicketRow { issue_identifier: "T-1".into(), assignee: "Ann".into(), due: "2026-12-01".into(),
+                                      ..Default::default() }],
+            ..Default::default()
+        };
+        let s = linear_kpis(&calm, "2026-11-06", None);
+        assert_eq!(tile(&s, "Waiting for triage"), t4("kpi-open", "now", "1", "none overdue"));
+        assert_eq!(tile(&s, "Open tickets"), t4("kpi-open", "now", "1", "none overdue"));
+        // Hostile text in the view and the report never reaches the tiles unescaped.
+        let evil = linear_regions(&evil_triage(), t_now(),
+                                  Some(&serde_json::json!({"funnel": {}, "as_of": super::test_support::EVIL,
+                                                           "kpis": [{"key": "assessed", "value": super::test_support::EVIL}]})),
+                                  Some(super::test_support::EVIL));
+        assert!(!evil.iter().any(|(_, v)| v.contains("<script") || v.contains("<div")), "{evil:?}");
+    }
+
+    /// "Refresh tickets" (lab only) and the tickets' "as of" time in Amsterdam time.
+    #[test]
+    fn refresh_link_and_as_of() {
+        let r = report_fixture();
         // 13:05 UTC is 14:05 in Amsterdam in November (CET), 15:05 in summer (CEST).
         let f = linear_refresh(Some(&r), Some("http://localhost:8090/"));
-        assert!(f.starts_with(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/refresh" title="#), "{f}");
+        assert!(f.starts_with(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/refresh" title="Reads the tickets back from Linear (a few seconds) and updates this section. Feeds are not fetched again.">"#), "{f}");
         assert!(f.contains("Refresh tickets</a>") && f.ends_with(r#"<span class="lasof">as of 14:05 CET</span>"#), "{f}");
         let mut summer = r.clone();
         summer["as_of"] = serde_json::json!("2026-07-01T13:05:00Z");
         assert!(linear_refresh(Some(&summer), None).ends_with("as of 15:05 CEST</span>"));
         assert_eq!(linear_refresh(Some(&r), None), r#"<span class="lasof">as of 14:05 CET</span>"#);
         assert_eq!(linear_refresh(None, None), "");
-        let regions = linear_regions(Some(&r), None);
+        let regions = linear_regions(&TriageView::default(), t_now(), Some(&r), None);
         assert_eq!(regions.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), HTML_IDS);
-        for (_, v) in &regions {
-            assert!(!v.contains("<div"), "{v}");
-        }
-        let evil = linear_regions(Some(&serde_json::json!({"funnel": {}, "period": {"month": super::test_support::EVIL}})),
-                                  Some(super::test_support::EVIL));
-        assert!(!evil.iter().any(|(_, v)| v.contains("<script")), "{evil:?}");
     }
 
-    /// Spliced into the page; an html region left out of Regions is not touched.
+    /// Spliced into the page: the tiles under the Linear heading, the refresh link on
+    /// the heading's right; a partial refresh (ticket_regions) leaves the rest alone.
     #[test]
     fn html_regions_splice() {
-        let mut r = load();
-        r.html = linear_regions(Some(&report_fixture()), Some("http://localhost:8090"));
+        let r = load();
         let page = apply_regions(&skel(), &r).unwrap();
         assert_eq!(apply_regions(&page, &r).unwrap(), page, "idempotent");
-        assert!(page.contains(r#"<div class="lsum" id="l-summary"><span class="lper">November 2026"#), "summary spliced");
-        assert!(page.contains(r#"<div class="lact" id="l-refresh"><a class="rbtn rbtn-2" href="http://localhost:8090/refresh""#));
-        let mut part = ticket_regions(&TriageView::default(), t_now());
+        assert!(page.contains(r##"<div class="kpis" id="l-kpis"><a class="kpi kpi-bad" href="#untriaged">"##), "tiles spliced");
+        let mut part = ticket_regions(&TriageView::default(), t_now(), Some(&report_fixture()), Some("http://localhost:8090"));
         part.stamp = stamp_of(&page).unwrap();
         let out = apply_regions(&page, &part).unwrap();
-        let inner = |d: &str, id: &str| find_element(d, id, true).map(|(_, a, b, _)| d[a..b].to_string()).unwrap();
-        for id in HTML_IDS {
+        assert!(out.contains(concat!(
+            r#"<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lact" id="l-refresh">"#,
+            r#"<a class="rbtn rbtn-2" href="http://localhost:8090/refresh" "#)), "refresh link in the heading");
+        assert!(out.contains(r#"<span class="lasof">as of 14:05 CET</span></div></div>"#));
+        assert!(out.contains(r##"<div class="kpis" id="l-kpis"><a class="kpi kpi-ok" href="#untriaged">"##), "now tiles refreshed");
+        let inner = |d: &str, id: &str| find_element(d, id, false).map(|(_, a, b, _)| d[a..b].to_string()).unwrap();
+        for id in ["s-auto", "s-kev", "n-health", "t-kev", "rstat"] {
             assert_eq!(inner(&out, id), inner(&page, id), "{id}");
         }
         assert!(apply_regions(&skel().replace(r#"id="l-refresh""#, ""), &r).is_err());
+        assert!(apply_regions(&skel().replace(r#"id="l-kpis""#, ""), &r).is_err());
     }
 
-    /// The Linear section (summary, untriaged, open tickets) sits right above feed
-    /// health, under one heading; tiles and status strip stay above it; long tables scroll.
+    /// The Linear section (tiles, untriaged, open tickets) comes first, then the group
+    /// "Threat feeds — last 7 days" (five tiles, feed health, KEV, advisories, deps,
+    /// CVEs as h3 subsections), then sources and terminal; long tables scroll.
     #[test]
     fn page_order_and_scrolling_tables() {
         let s = skel();
         let at = |needle: &str| s.find(needle).unwrap_or_else(|| panic!("{needle}"));
-        let order = [r#"id="rstat""#, r#"<div class="triage">"#, r#"<section class="block" id="linear">"#,
-                     "Triage and actions (Linear)", r#"id="l-summary""#, r#"<section class="block" id="untriaged">"#,
-                     r#"<section class="block" id="tickets">"#, r#"<section class="block" id="health">"#,
-                     r#"id="kev""#, r#"id="adv""#, r#"id="deps""#, r#"id="nvd""#, r#"id="sources""#, r#"id="terminal""#];
+        let order = [r#"id="rstat""#, r#"<section class="block" id="linear">"#,
+                     "Triage and actions (Linear)", r#"id="l-refresh""#, r#"id="l-kpis""#,
+                     r#"<section class="block" id="untriaged">"#, r#"<section class="block" id="tickets">"#,
+                     r#"<section class="block" id="feeds">"#, "<h2>Threat feeds &mdash; last 7 days</h2>",
+                     r#"<div class="triage">"#, r#"id="s-kev""#, r#"id="s-adv""#,
+                     r#"<section class="block" id="health">"#, r#"id="kev""#, r#"id="adv""#, r#"id="deps""#,
+                     r#"id="nvd""#, r#"<section class="block" id="sources">"#, r#"<section class="block" id="terminal">"#];
         for w in order.windows(2) {
             assert!(at(w[0]) < at(w[1]), "{} before {}", w[0], w[1]);
         }
-        // Nothing but the closing tags of the Linear section between it and feed health.
-        let between = &s[at(r#"<tbody id="t-tickets">"#)..at(r#"<section class="block" id="health">"#)];
-        assert_eq!(re(r"\s+").replace_all(between.split_once("</tbody>").unwrap().1, ""), "</table></div></div></section></section>");
+        assert!(s.contains(r#"<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lact" id="l-refresh"></div></div>"#));
+        assert!(!s.contains("lbar") && !s.contains("l-summary"), "no separate summary bar");
+        // Each group closes right after its last table.
+        let squash = |a: &str, b: &str| re(r"\s+").replace_all(s[at(a)..at(b)].split_once("</tbody>").unwrap().1, "").to_string();
+        assert_eq!(squash(r#"<tbody id="t-tickets">"#, r#"<section class="block" id="feeds">"#),
+                   "</table></div></div></section></section>");
+        assert_eq!(squash(r#"<tbody id="t-nvd">"#, r#"<section class="block" id="sources">"#),
+                   "</table></div></div></section></section>");
+        // The feed tables are h3 subsections of the group, like the Linear tables.
+        for id in ["health", "kev", "adv", "deps", "nvd", "untriaged", "tickets"] {
+            let open = format!("<section class=\"block\" id=\"{id}\">\n<div class=\"shead\"><h3>");
+            assert!(s.contains(&open), "{id}");
+        }
+        assert_eq!(s.matches("<h2>").count(), 4, "Linear, threat feeds, sources, terminal");
         for t in ["t-kev", "t-adv", "t-dep", "t-nvd", "t-untriaged", "t-tickets"] {
             let before = &s[..at(&format!("<tbody id=\"{t}\">"))];
             let open = before.rfind("<div class=\"tscroll\"><div class=\"scroller\"><table>").unwrap_or(0);
@@ -948,8 +1109,8 @@ mod tests {
         }
     }
 
-    /// serve's partial refresh renders the triage regions exactly as a full run does,
-    /// and nothing else (no s-auto, no stamp).
+    /// serve's partial refresh renders the Linear section exactly as a full run does
+    /// (tables, counters, tiles, refresh link), and nothing else (no s-auto, no stamp).
     #[test]
     fn ticket_regions_match_build_regions() {
         let t = crate::feeds::common::parse_iso("2026-11-03T02:45:00Z").unwrap();
@@ -970,17 +1131,22 @@ mod tests {
         ];
         for v in &views {
             let full = build_regions(&[], &[], &[], &[], &[], None, v, t, t, t, "", 300);
-            let part = ticket_regions(v, t);
-            let ids: Vec<&str> = part.tbody.iter().chain(part.text.iter()).map(|(k, _)| k.as_str()).collect();
-            assert_eq!(ids, ["t-untriaged", "t-tickets", "s-untriaged", "n-untriaged", "n-tickets"]);
+            let part = ticket_regions(v, t, None, None);
+            let ids: Vec<&str> =
+                part.tbody.iter().chain(part.text.iter()).chain(part.html.iter()).map(|(k, _)| k.as_str()).collect();
+            assert_eq!(ids, ["t-untriaged", "t-tickets", "s-untriaged", "n-untriaged", "n-tickets", "l-kpis", "l-refresh"]);
             for id in &ids {
                 assert_eq!(part.get(id), full.get(id), "{id}");
             }
             assert_eq!(part.stamp, "");
+            // With a report: the tiles and link that run.rs puts in (linear_regions).
+            let rep = report_fixture();
+            assert_eq!(ticket_regions(v, t, Some(&rep), Some("http://x")).html,
+                       linear_regions(v, t, Some(&rep), Some("http://x")));
         }
-        let busy = ticket_regions(&views[2], t);
+        let busy = ticket_regions(&views[2], t, None, None);
         assert_eq!(busy.get("s-untriaged"), "2 &middot; 1 overdue");
-        assert_eq!(busy.get("n-tickets"), "3 tickets &middot; 1 past due &middot; 1 no owner &middot; 1 no due date");
+        assert_eq!(busy.get("n-tickets"), "3 tickets &middot; 1 overdue &middot; 1 no owner &middot; 1 no due date");
         // Spliced into the skeleton with the page's stamp put back, the rest of the page is untouched.
         let page = apply_regions(&skel(), &load()).unwrap();
         let mut r = busy.clone();
@@ -1025,10 +1191,10 @@ mod tests {
         assert_eq!(r.get("n-cvecap"), "All 4 shown.");
         assert_eq!(r.get("n-kev"), "3 entries &middot; 1 past deadline");
         assert_eq!(r.get("winlabel"), "27 Oct 02:45 &rarr; 3 Nov 02:45 UTC");
-        assert_eq!(r.get("s-untriaged"), "4 &middot; 2 overdue");
+        assert_eq!(r.get("s-untriaged"), "4 &middot; 2 overdue &middot; 1 needs a reason");
         assert_eq!(r.get("s-auto"), "412");
         assert_eq!(r.get("n-untriaged"), "4 items");
-        assert_eq!(r.get("n-tickets"), "3 tickets &middot; 1 past due &middot; 1 no owner &middot; 1 no due date");
+        assert_eq!(r.get("n-tickets"), "3 tickets &middot; 1 overdue &middot; 1 no owner &middot; 1 no due date");
     }
 
     #[test]
@@ -1062,10 +1228,17 @@ mod tests {
         evil.push_str(&build_ticket_rows(&t.tickets, "2026-11-03", None));
         evil.push_str(&report_links(Some(&monthly()), Some("/x.pdf?v=1"), "2026-11-05T07:57:00Z", None, t_now()));
         evil.push_str(&report_links(None, None, "", Some("http://localhost:8090"), t_now()));
-        for h in linear_regions(Some(&report_fixture()), Some("http://localhost:8090")) {
+        for h in linear_regions(&t, t_now(), Some(&report_fixture()), Some("http://localhost:8090")) {
             evil.push_str(&h.1);
         }
-        evil.push_str(&linear_summary(None));
+        // Every tile state: ok and none (empty view, no report), open (pending, nothing late).
+        evil.push_str(&linear_kpis(&TriageView::default(), "2026-11-06", None));
+        let open = TriageView { untriaged: vec![TriageRow::default()], ..Default::default() };
+        evil.push_str(&linear_kpis(&open, "2026-11-06", None));
+        for state in ["bad", "ok", "open", "info", "none"] {
+            let c = format!("kpi kpi-{state}");
+            assert!(evil.contains(&c) || page.contains(&c), "{state}");
+        }
         let css = read(STYLE_PATH);
         let fallback = ["sm", "score-other", "pi-L", "pi-X", "sv-MEDIUM", "sv-LOW"];
         for c in re(r#"class="([^"]*)""#).captures_iter(&(page + &evil)) {
@@ -1073,7 +1246,8 @@ mod tests {
                 if fallback.contains(&cls) || c[1].contains('&') {
                     continue;
                 }
-                assert!(re(&format!(r"\.{}\b", regex::escape(cls))).is_match(&css), "no rule for .{cls}");
+                // The name followed by anything but a name character (.kpi is not .kpi-n).
+                assert!(re(&format!(r"\.{}([^\w-]|$)", regex::escape(cls))).is_match(&css), "no rule for .{cls}");
             }
         }
     }
@@ -1085,5 +1259,6 @@ mod tests {
         assert!(apply_regions(&skel().replace(r#"id="n-cvecap""#, ""), &r).is_err());
         assert!(apply_regions(&skel().replace(r#"id="t-tickets""#, r#"id="t-gone""#), &r).is_err());
         assert!(apply_regions(&skel().replace(r#"id="s-auto""#, ""), &r).is_err());
+        assert!(apply_regions(&skel().replace(r#"id="l-kpis""#, ""), &r).is_err());
     }
 }
