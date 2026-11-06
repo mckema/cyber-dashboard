@@ -139,9 +139,9 @@ fn closes_once_and_a_second_call_changes_nothing() {
     assert_eq!(rs["items"][0]["url"], json!("https://example.invalid/g1"), "no triage.json record: the event's url");
 
     // upload: once, under the month's name
-    assert_eq!(*wiki.calls.borrow(), [("report-2026-11.pdf".to_string(), pdf.len())]);
+    assert_eq!(*wiki.calls.borrow(), [("cyber-threat-report-2026-11.pdf".to_string(), pdf.len())]);
     let up = read(&t, UPLOAD);
-    assert_eq!((up["path"].clone(), up["pdf_sha"].clone()), (json!("/exploit-watch/report-2026-11.pdf"), frozen["pdf_sha"].clone()));
+    assert_eq!((up["path"].clone(), up["pdf_sha"].clone()), (json!("/exploit-watch/cyber-threat-report-2026-11.pdf"), frozen["pdf_sha"].clone()));
 
     // review.json: sample, the create id kept, the issue
     let review = read(&t, REVIEW);
@@ -158,7 +158,7 @@ fn closes_once_and_a_second_call_changes_nothing() {
     assert_eq!((i.assignee.as_str(), i.due.as_str()), ("", ""), "no assignee or due date unless configured");
     let d = &i.description;
     for want in ["- Dashboard: [Exploit Watch dashboard](http://localhost:3000/en/exploit-watch)",
-                 "- Report PDF: [report-2026-11.pdf](http://localhost:3000/exploit-watch/report-2026-11.pdf)",
+                 "- Report PDF: [cyber-threat-report-2026-11.pdf](http://localhost:3000/exploit-watch/cyber-threat-report-2026-11.pdf)",
                  "- [ ] Check the figures and the exceptions in the PDF against the dashboard",
                  "- [ ] Download the PDF", "- [ ] Send it to the fairCT COO via the Shared Drive", "- [ ] Close this issue",
                  "**Quality check sample — really not relevant?**", "add a comment on this issue",
@@ -186,7 +186,7 @@ fn closes_once_and_a_second_call_changes_nothing() {
     // what the card reads
     let m = latest_monthly().unwrap();
     assert_eq!(m, MonthlyUpload {
-        month: "2026-11".into(), title: "November 2026".into(), path: "/exploit-watch/report-2026-11.pdf".into(),
+        month: "2026-11".into(), title: "November 2026".into(), path: "/exploit-watch/cyber-threat-report-2026-11.pdf".into(),
         pdf_sha: frozen["pdf_sha"].as_str().unwrap().into(), frozen_at: "2026-12-01T05:00:00Z".into(),
         review: Some(ReviewRef { identifier: "FAKE-1".into(), url: "https://linear.invalid/fake/issue/FAKE-1".into() }),
     });
@@ -267,7 +267,7 @@ fn failed_upload_is_retried_without_refreezing() {
     assert!(c.frozen && !c.uploaded && c.has_error());
     assert_eq!(c.upload_error.as_deref(), Some("wiki asset upload: cannot reach Wiki.js"));
     assert!(c.review_created, "the reminder does not wait for the upload");
-    assert!(FakeTracker::load().unwrap().issues[0].description.contains("`/exploit-watch/report-2026-11.pdf` on the wiki"),
+    assert!(FakeTracker::load().unwrap().issues[0].description.contains("`/exploit-watch/cyber-threat-report-2026-11.pdf` on the wiki"),
             "no WIKI_PUBLIC_URL: the asset path");
     assert!(!t.dir.join("reports/2026-11").join(UPLOAD).exists());
     assert!(latest_monthly().is_none(), "nothing on the wiki yet");
@@ -412,7 +412,7 @@ fn sample_items_are_enriched_from_triage_json() {
                (json!("key"), json!("https://advisories.ncsc.nl/2026/ncsc-2026-0464.html")));
     assert_eq!(i[3]["url"], json!("https://cert.europa.eu/publications/security-advisories/2026-018/"));
     let spec = reminder_spec(&ReminderInput { month: "2026-11", frozen: &json!({"data_sha": "abc"}), sample: &s,
-                                              asset_path: "/exploit-watch/report-2026-11.pdf", test_run: false }, &|_| None);
+                                              asset_path: "/exploit-watch/cyber-threat-report-2026-11.pdf", test_run: false }, &|_| None);
     assert!(spec.description.contains("- [ ] [CISA KEV:CVE-2026-0101](https://kev.example/0101) — Acme Router RCE · Acme / Router"),
             "{}", spec.description);
 }

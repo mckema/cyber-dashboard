@@ -22,7 +22,7 @@
 //!   html   l-kpis l-refresh   (inner HTML of a <div>, spans and links only, never a <div>)
 //!
 //! The Linear section (first on the page, above the "Threat feeds — last 7 days"
-//! group) has the "Refresh tickets" link with the tickets' "as of" time in its heading
+//! group) has the "Sync with Linear" link with the tickets' "as of" time in its heading
 //! (`l-refresh`, changes every run) and opens with four tiles (`l-kpis`, since
 //! 2026-11-06): two "now" tiles counted from the triage view, so they always equal
 //! the two tables below them, and two "this month" tiles from the month-to-date
@@ -69,7 +69,7 @@ pub const TEXT_IDS: [&str; 16] = [
 ];
 pub const STAMP_ID: &str = "rstat";
 /// <div> regions with inline markup (spans, b, a), never a nested <div>.
-pub const HTML_IDS: [&str; 2] = ["l-kpis", "l-refresh"];
+pub const HTML_IDS: [&str; 3] = ["l-kpis", "l-refresh", "f-status"];
 
 /// Page content and scriptCss, relative to the repo root (the job and demo run from there).
 pub const SKELETON_PATH: &str = "stack/wiki/page/skeleton.html";
@@ -239,9 +239,10 @@ fn serve_base(serve_url: Option<&str>) -> Option<&str> {
 /// words) and two buttons, plain links styled as buttons (the wiki strips scripts):
 ///   "Monthly report · <Month YYYY>": the latest frozen monthly PDF (`monthly`), with
 ///     the review issue as a small link; without one, "First monthly report: 1 <Mon YYYY>".
-///   "Export snapshot": a month-to-date PDF, fresh from Linear through `serve`
-///     (SERVE_PUBLIC_URL) or else the one the last run uploaded (`mtd_href`, with its
-///     "as of" time `tickets_as_of`).
+///   "Generate current report": the month so far, built on the click from the latest
+///     Linear data through `serve` (SERVE_PUBLIC_URL); without serve, "Download current
+///     report" links the one the last run uploaded (`mtd_href`, as of `tickets_as_of`).
+/// Both download buttons carry the class `dl` (download icon in style.css, 2026-11-06).
 /// The word "official" is not used: the monthly report is final (frozen), not approved.
 /// "" when there is no button at all.
 pub fn report_links(monthly: Option<&MonthlyLink>, mtd_href: Option<&str>, tickets_as_of: &str,
@@ -251,7 +252,7 @@ pub fn report_links(monthly: Option<&MonthlyLink>, mtd_href: Option<&str>, ticke
     match monthly {
         Some(m) => {
             let tip = if m.frozen_on.is_empty() { "Final, frozen".to_string() } else { format!("Final, frozen on {}", esc(&m.frozen_on)) };
-            buttons.push(format!("<a class=\"rbtn\" href=\"{}\" title=\"{tip}\">&darr;&nbsp; Monthly report &middot; {}</a>",
+            buttons.push(format!("<a class=\"rbtn dl\" href=\"{}\" title=\"{tip}\">Monthly report &middot; {}</a>",
                                  esc(&m.href), esc(&m.title)));
             if let Some((id, url)) = m.review.as_ref().filter(|(id, _)| !id.trim().is_empty()) {
                 let link = if url.starts_with("https://") || url.starts_with("http://") {
@@ -264,20 +265,21 @@ pub fn report_links(monthly: Option<&MonthlyLink>, mtd_href: Option<&str>, ticke
         }
         None => notes.push(format!("<span class=\"rreport-a\">First monthly report: {}</span>", next_first(now))),
     }
+    let so_far = crate::triage::store::to_amsterdam(now).format("%B %Y").to_string();
     if let Some(u) = serve_base(serve_url) {
         buttons.push(format!(
-            "<a class=\"rbtn rbtn-2\" href=\"{}/report/month-to-date.pdf\" \
-             title=\"Month to date, fresh from Linear. Not the monthly report.\">&darr;&nbsp; Export snapshot</a>",
+            "<a class=\"rbtn rbtn-2 dl\" href=\"{}/report/month-to-date.pdf\" \
+             title=\"{so_far} so far, generated now from the latest Linear data. Not the monthly report.\">Generate current report</a>",
             esc(u)
         ));
     } else if let Some(h) = mtd_href.filter(|h| !h.is_empty()) {
         buttons.push(format!(
-            "<a class=\"rbtn rbtn-2\" href=\"{}\" title=\"Month to date, as of the last scheduled run. \
-             Not the monthly report.\">&darr;&nbsp; Export snapshot</a>",
+            "<a class=\"rbtn rbtn-2 dl\" href=\"{}\" title=\"{so_far} so far, as of the last scheduled run. \
+             Not the monthly report.\">Download current report</a>",
             esc(h)
         ));
         if let Some(t) = parse_iso(tickets_as_of) {
-            notes.push(format!("<span class=\"rreport-a\">Snapshot data as of <b>{} {} UTC</b></span>", day(&t, false), hm(&t)));
+            notes.push(format!("<span class=\"rreport-a\">Current report data as of <b>{} {} UTC</b></span>", day(&t, false), hm(&t)));
         }
     }
     if buttons.is_empty() {
@@ -388,14 +390,14 @@ pub fn linear_kpis(view: &TriageView, today: &str, report: Option<&Value>) -> St
     s
 }
 
-/// The "Refresh tickets" link to `serve` (none without SERVE_PUBLIC_URL) and "as of
+/// The "Sync with Linear" link to `serve` (none without SERVE_PUBLIC_URL) and "as of
 /// HH:MM <CET|CEST>", the report's tickets-as-of time in Amsterdam time.
 pub fn linear_refresh(report: Option<&Value>, serve_url: Option<&str>) -> String {
     let mut s = String::new();
     if let Some(u) = serve_base(serve_url) {
         s.push_str(&format!(
-            "<a class=\"rbtn rbtn-2\" href=\"{}/refresh\" title=\"Reads the tickets back from Linear (a few seconds) \
-             and updates this section. Feeds are not fetched again.\">&#8635;&nbsp; Refresh tickets</a>",
+            "<a class=\"rbtn rbtn-2\" href=\"{}/refresh\" title=\"Pulls the latest ticket status, owners and due dates \
+             from Linear (a few seconds) and updates this section. The threat feeds update every 6 hours.\">&#8635;&nbsp; Sync with Linear</a>",
             esc(u)
         ));
     }
@@ -407,14 +409,22 @@ pub fn linear_refresh(report: Option<&Value>, serve_url: Option<&str>) -> String
     s
 }
 
-/// The html regions (HTML_IDS order): the tiles for the triage view and a month-to-date
-/// report's data, and the refresh link. `now`: the time the tables are rendered for
-/// (its UTC date decides "overdue" for tickets, as in the tables).
+/// The Linear html regions (the first two of HTML_IDS): the tiles for the triage view and
+/// a month-to-date report's data, and the refresh link. `now`: the time the tables are
+/// rendered for (its UTC date decides "overdue" for tickets, as in the tables). The third
+/// html region, `f-status`, is the feeds' status strip (feeds_status); a splice without it
+/// (report-serve's refresh) leaves it as it is on the page.
 pub fn linear_regions(view: &TriageView, now: DateTime<Utc>, report: Option<&Value>, serve_url: Option<&str>)
                       -> Vec<(String, String)> {
     let today = now.format("%Y-%m-%d").to_string();
     HTML_IDS.iter().map(|s| s.to_string())
         .zip([linear_kpis(view, &today, report), linear_refresh(report, serve_url)]).collect()
+}
+
+/// The `f-status` region: since 2026-11-06 the feeds / updated / KEV catalog strip sits at
+/// the top of "Threat feeds — last 7 days", no longer in the page's top bar (Henry).
+pub fn feeds_status(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) -> (String, String) {
+    (HTML_IDS[2].to_string(), build_stamp(now, kev_catalog, health))
 }
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
@@ -473,9 +483,11 @@ pub fn build_regions(
     Regions {
         tbody: TBODY_IDS.iter().map(|s| s.to_string()).zip(tbody).collect(),
         text: TEXT_IDS.iter().map(|s| s.to_string()).zip(text).collect(),
-        stamp: build_stamp(now, kev_catalog, health),
+        // The top bar holds the report card only (the caller appends it, report_links).
+        stamp: String::new(),
         // Without a report: the caller puts the month-to-date report in (linear_regions).
-        html: linear_regions(triage, end, None, None),
+        html: linear_regions(triage, end, None, None).into_iter()
+            .chain([feeds_status(now, kev_catalog, health)]).collect(),
     }
 }
 
@@ -848,21 +860,23 @@ mod tests {
         assert_eq!(report_links(None, None, "", None, t_now()), "");
         assert_eq!(report_links(None, Some(""), "", Some("  "), t_now()), "");
         // Lab: a frozen month and serve.
-        let lab = report_links(Some(&monthly()), Some("/exploit-watch/report-month-to-date.pdf?v=abc"),
+        let lab = report_links(Some(&monthly()), Some("/exploit-watch/cyber-threat-report-to-date.pdf?v=abc"),
                                "2026-11-05T07:31:00Z", Some("http://localhost:8090/"), t_now());
         assert!(lab.starts_with(r#"<span class="rreport">"#), "{lab}");
-        assert!(lab.contains(r#"<a class="rbtn" href="/exploit-watch/report-2026-10.pdf?v=0123456789ab" title="Final, frozen on 1 Nov 2026">&darr;&nbsp; Monthly report &middot; October 2026</a>"#), "{lab}");
+        assert!(lab.contains(r#"<a class="rbtn dl" href="/exploit-watch/report-2026-10.pdf?v=0123456789ab" title="Final, frozen on 1 Nov 2026">Monthly report &middot; October 2026</a>"#), "{lab}");
         assert!(lab.contains(r#"<span class="rreport-a">Review: <a class="rrev" href="https://linear.app/x/issue/TRI-31">TRI-31</a></span>"#), "{lab}");
-        assert!(lab.contains(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/report/month-to-date.pdf" title="Month to date, fresh from Linear. Not the monthly report.">&darr;&nbsp; Export snapshot</a>"#), "{lab}");
-        assert!(!lab.contains("report-month-to-date.pdf"), "serve wins over the uploaded asset: {lab}");
-        assert!(!lab.contains("First monthly report") && !lab.contains("Snapshot data as of"), "{lab}");
+        assert!(lab.contains(r#"<a class="rbtn rbtn-2 dl" href="http://localhost:8090/report/month-to-date.pdf" title="November 2026 so far, generated now from the latest Linear data. Not the monthly report.">Generate current report</a>"#), "{lab}");
+        assert!(!lab.contains("cyber-threat-report-to-date.pdf"), "serve wins over the uploaded asset: {lab}");
+        assert!(!lab.contains("First monthly report") && !lab.contains("Current report data as of"), "{lab}");
         assert!(!lab.contains("Download report") && !lab.to_lowercase().contains("official"), "{lab}");
+        assert!(!lab.contains("&darr;") && !lab.contains("snapshot"), "icons come from the dl class; no 'snapshot' wording: {lab}");
         assert!(!lab.contains("<div"), "the stamp may not hold a div");
         // No monthly report yet, no serve: the uploaded asset with its time (option B).
-        let b = report_links(None, Some("/exploit-watch/report-month-to-date.pdf?v=abc"), "2026-11-05T07:31:00Z", None, t_now());
+        let b = report_links(None, Some("/exploit-watch/cyber-threat-report-to-date.pdf?v=abc"), "2026-11-05T07:31:00Z", None, t_now());
         assert!(b.contains(r#"<span class="rreport-a">First monthly report: 1 Dec 2026</span>"#), "{b}");
-        assert!(b.contains(r#"<a class="rbtn rbtn-2" href="/exploit-watch/report-month-to-date.pdf?v=abc""#), "{b}");
-        assert!(b.contains("Snapshot data as of <b>5 Nov 07:31 UTC</b>") && !b.contains("Monthly report &middot;"), "{b}");
+        assert!(b.contains(r#"<a class="rbtn rbtn-2 dl" href="/exploit-watch/cyber-threat-report-to-date.pdf?v=abc""#), "{b}");
+        assert!(b.contains(">Download current report</a>"), "{b}");
+        assert!(b.contains("Current report data as of <b>5 Nov 07:31 UTC</b>") && !b.contains("Monthly report &middot;"), "{b}");
         // December rolls over to January; Amsterdam time decides the month.
         let dec = report_links(None, None, "", Some("http://x"), parse_iso("2026-12-31T23:30:00Z").unwrap());
         assert!(dec.contains("First monthly report: 1 Feb 2027"), "{dec}");
@@ -968,21 +982,21 @@ mod tests {
         assert!(!evil.iter().any(|(_, v)| v.contains("<script") || v.contains("<div")), "{evil:?}");
     }
 
-    /// "Refresh tickets" (lab only) and the tickets' "as of" time in Amsterdam time.
+    /// "Sync with Linear" (lab only) and the tickets' "as of" time in Amsterdam time.
     #[test]
     fn refresh_link_and_as_of() {
         let r = report_fixture();
         // 13:05 UTC is 14:05 in Amsterdam in November (CET), 15:05 in summer (CEST).
         let f = linear_refresh(Some(&r), Some("http://localhost:8090/"));
-        assert!(f.starts_with(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/refresh" title="Reads the tickets back from Linear (a few seconds) and updates this section. Feeds are not fetched again.">"#), "{f}");
-        assert!(f.contains("Refresh tickets</a>") && f.ends_with(r#"<span class="lasof">as of 14:05 CET</span>"#), "{f}");
+        assert!(f.starts_with(r#"<a class="rbtn rbtn-2" href="http://localhost:8090/refresh" title="Pulls the latest ticket status, owners and due dates from Linear (a few seconds) and updates this section. The threat feeds update every 6 hours.">"#), "{f}");
+        assert!(f.contains("Sync with Linear</a>") && f.ends_with(r#"<span class="lasof">as of 14:05 CET</span>"#), "{f}");
         let mut summer = r.clone();
         summer["as_of"] = serde_json::json!("2026-07-01T13:05:00Z");
         assert!(linear_refresh(Some(&summer), None).ends_with("as of 15:05 CEST</span>"));
         assert_eq!(linear_refresh(Some(&r), None), r#"<span class="lasof">as of 14:05 CET</span>"#);
         assert_eq!(linear_refresh(None, None), "");
         let regions = linear_regions(&TriageView::default(), t_now(), Some(&r), None);
-        assert_eq!(regions.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), HTML_IDS);
+        assert_eq!(regions.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), HTML_IDS[..2]);
     }
 
     /// Spliced into the page: the tiles under the Linear heading, the refresh link on
@@ -1028,12 +1042,12 @@ mod tests {
         }
         assert!(s.contains(r#"<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lact" id="l-refresh"></div></div>"#));
         assert!(!s.contains("lbar") && !s.contains("l-summary"), "no separate summary bar");
-        // Each group closes right after its last table.
+        // Each group closes right after its last table (and its full-width band's wrap).
         let squash = |a: &str, b: &str| re(r"\s+").replace_all(s[at(a)..at(b)].split_once("</tbody>").unwrap().1, "").to_string();
         assert_eq!(squash(r#"<tbody id="t-tickets">"#, r#"<section class="block" id="feeds">"#),
-                   "</table></div></div></section></section>");
+                   "</table></div></div></section></div></section>");
         assert_eq!(squash(r#"<tbody id="t-nvd">"#, r#"<section class="block" id="sources">"#),
-                   "</table></div></div></section></section>");
+                   "</table></div></div></section></div></section>");
         // The feed tables are h3 subsections of the group, like the Linear tables.
         for id in ["health", "kev", "adv", "deps", "nvd", "untriaged", "tickets"] {
             let open = format!("<section class=\"block\" id=\"{id}\">\n<div class=\"shead\"><h3>");
@@ -1086,8 +1100,9 @@ mod tests {
         for (k, v) in &r.text {
             assert!(!v.contains('<'), "{k}");
         }
-        assert!(!r.stamp.contains("<div"));
-        assert!(r.stamp.contains(r#"<span class="rv">"#), "the stamp carries inline markup");
+        assert!(r.stamp.is_empty(), "the top bar holds the report card only, appended by the caller");
+        let strip = &r.html.iter().find(|(k, _)| k == "f-status").unwrap().1;
+        assert!(!strip.contains("<div") && strip.contains(r#"<span class="rv">"#), "the feeds strip carries inline markup");
     }
 
     #[test]

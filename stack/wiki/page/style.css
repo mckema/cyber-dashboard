@@ -54,6 +54,7 @@
    report card (name, what it covers, data time, two link buttons) */
 #ew .rstat{flex:1 1 100%}
 #ew .rstat .rmeta{display:flex;flex-wrap:wrap;gap:10px 44px;align-items:flex-start}
+#ew .fstat{margin:6px 0 18px}
 #ew .rstat .rkv{display:flex;flex-direction:column;gap:3px}
 #ew .rstat .rk{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
 #ew .rstat .rv{display:inline-flex;align-items:center;gap:7px;font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;font-weight:600;color:var(--ink)}
@@ -79,6 +80,8 @@
 #ew .rstat a.rbtn-2,#ew .lact a.rbtn-2{background:var(--surface);color:var(--accent)}
 #ew .rstat a.rbtn-2:hover,#ew .lact a.rbtn-2:hover{background:var(--accent-soft);filter:none}
 #ew .rstat a.rbtn::after,#ew .lact a.rbtn::after{content:none!important;display:none!important} /* Wiki.js external-link icon */
+/* Download icon for the report buttons (class dl, 2026-11-06): a tray with a down arrow, drawn as a CSS mask so it takes the button's text colour in both themes. */
+#ew .rstat a.rbtn.dl::before{content:"";flex:none;width:16px;height:16px;margin-right:8px;background-color:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3v11m0 0l-4.5-4.5M12 14l4.5-4.5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3v11m0 0l-4.5-4.5M12 14l4.5-4.5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
 @media (max-width:640px){#ew .rstat .rbtns{flex:1 1 100%}#ew .rstat a.rbtn{flex:1 1 100%;justify-content:center}}
 
 #ew .triage{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--rule);border-bottom:1px solid var(--rule)}
@@ -158,7 +161,7 @@
    the "Refresh tickets" link and the tickets' "as of" time on its right (#l-refresh). */
 #ew section.block section.block{padding:30px 0 0}
 /* Divider between the large parts of the page (Henry, 2026-11-06): only top-level sections, not the subsections inside them. */
-#ew main>section.block+section.block{border-top:2px solid var(--rule);margin-top:34px;padding-top:40px}
+#ew main>section.block+section.block{border-top:1px solid var(--rule)}
 #ew .shead h3{font-size:19px;font-weight:600;letter-spacing:-.01em}
 #ew .shead h3.toc-header{font-size:19px!important;font-weight:600!important}
 #ew .lact{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}

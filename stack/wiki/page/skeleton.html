@@ -6,11 +6,11 @@
 <div class="stamp"><span>Window <b id="winlabel">not generated yet</b></span> <span>Sources <b>CISA KEV &middot; ENISA EUVD &middot; CVE.org &middot; NVD &middot; GitHub &middot; CERT-EU &middot; NCSC-NL</b></span> <span>Auth required <b>none</b></span></div>
 </div></header>
 <div class="refresh"><div class="wrap"><div class="rstat" id="rstat">Not generated yet.</div></div></div>
-<main class="wrap">
+<main>
 
-<section class="block" id="linear">
+<section class="block" id="linear"><div class="wrap">
 <div class="shead"><h2>Triage and actions (Linear)</h2><div class="lact" id="l-refresh"></div></div>
-<p class="snote">What needs a person now, and what was triaged and closed this month. <span class="tip" tabindex="0" title="Waiting for triage (now): matched items with no decision in Linear yet, and issues declined without a reason (FR-A2 asks for one); the rows of the first table below; overdue after one business day. Open tickets (now): issues accepted in Linear and not closed; the rows of the second table; overdue after their due date. Triaged this month: relevant items first seen this month (Europe/Amsterdam) that have been triaged in Linear, which the report calls assessed (a decline counts once it has a reason), and how many of them within one business day. Closed this month: tickets fixed, or closed without fix, this month. The two month figures come from the month-to-date report (the Export snapshot PDF). Refresh tickets reads Linear again and updates this section; the feeds are fetched by the scheduled job only.">&#9432;<span class="tiptext"><b>Waiting for triage</b> (now): matched items with no decision in Linear yet, and issues declined without a reason (FR-A2 asks for one); the rows of the first table below; overdue after one business day. <b>Open tickets</b> (now): issues accepted in Linear and not closed; the rows of the second table; overdue after their due date. <b>Triaged this month</b>: relevant items first seen this month (Europe/Amsterdam) that have been triaged in Linear, which the report calls <em>assessed</em> (a decline counts once it has a reason), and how many of them within one business day. <b>Closed this month</b>: tickets fixed, or closed without fix, this month. The two month figures come from the month-to-date report (the <b>Export snapshot</b> PDF). <b>Refresh tickets</b> reads Linear again and updates this section; the feeds are fetched by the scheduled job only.</span></span></p>
+<p class="snote">What needs a person now, and what was triaged and closed this month. <span class="tip" tabindex="0" title="Waiting for triage (now): matched items with no decision in Linear yet, and issues declined without a reason (FR-A2 asks for one); the rows of the first table below; overdue after one business day. Open tickets (now): issues accepted in Linear and not closed; the rows of the second table; overdue after their due date. Triaged this month: relevant items first seen this month (Europe/Amsterdam) that have been triaged in Linear, which the report calls assessed (a decline counts once it has a reason), and how many of them within one business day. Closed this month: tickets fixed, or closed without fix, this month. The two month figures come from the month-to-date report (the Export snapshot PDF). Sync with Linear pulls the latest ticket status from Linear and updates this section; the feeds are fetched by the scheduled job only.">&#9432;<span class="tiptext"><b>Waiting for triage</b> (now): matched items with no decision in Linear yet, and issues declined without a reason (FR-A2 asks for one); the rows of the first table below; overdue after one business day. <b>Open tickets</b> (now): issues accepted in Linear and not closed; the rows of the second table; overdue after their due date. <b>Triaged this month</b>: relevant items first seen this month (Europe/Amsterdam) that have been triaged in Linear, which the report calls <em>assessed</em> (a decline counts once it has a reason), and how many of them within one business day. <b>Closed this month</b>: tickets fixed, or closed without fix, this month. The two month figures come from the month-to-date report (the <b>Export snapshot</b> PDF). <b>Sync with Linear</b> pulls the latest ticket status from Linear and updates this section; the feeds are fetched by the scheduled job only.</span></span></p>
 <div class="kpis" id="l-kpis">Not generated yet.</div>
 
 <section class="block" id="untriaged">
@@ -32,10 +32,11 @@
 <tbody id="t-tickets"><tr><td colspan="6" class="empty">Not generated yet.</td></tr></tbody>
 </table></div></div>
 </section>
-</section>
+</div></section>
 
-<section class="block" id="feeds">
+<section class="block" id="feeds"><div class="wrap">
 <div class="shead"><h2>Threat feeds &mdash; last 7 days</h2></div>
+<div class="rstat fstat" id="f-status"></div>
 <p class="snote">What the seven public feeds published in the rolling seven-day window shown at the top; every count in this part is for that window.</p>
 <div class="triage">
 <div class="tile t-exp"><div class="n" id="s-kev">0</div><div class="l">Confirmed exploited in the wild (CISA KEV, ENISA EUVD)</div></div>
@@ -97,9 +98,9 @@
 <tbody id="t-nvd"><tr><td colspan="4" class="empty">Not generated yet.</td></tr></tbody>
 </table></div></div>
 </section>
-</section>
+</div></section>
 
-<section class="block" id="sources">
+<section class="block" id="sources"><div class="wrap">
 <div class="shead"><h2>The seven feeds behind this page</h2></div>
 <p class="snote">All seven are operated by a government body, an EU agency, a national CERT or a platform, and are free to query without an account. None of them will ever ask you to talk to a sales team.</p>
 <div class="srcgrid">
@@ -132,9 +133,9 @@
 <div class="terms"><span class="term">No key</span><span class="term">CSAF 2.0</span><span class="term role">EU and national table</span></div>
 <div class="ep">advisories.ncsc.nl/csaf/v2/changes.csv</div></div>
 </div>
-</section>
+</div></section>
 
-<section class="block" id="terminal">
+<section class="block" id="terminal"><div class="wrap">
 <div class="shead"><h2>Reproduce this from a terminal</h2></div>
 <p class="snote">These need only <code>curl</code> and <code>jq</code> and work the same on Linux, macOS and Windows (Git Bash). They show raw feed data, not the merged page.</p>
 <pre class="sh"><span class="c"># 1 — CISA KEV entries added in the last 7 days (GitHub mirror of the catalog)</span>
@@ -150,7 +151,7 @@ curl -s "https://api.github.com/advisories?type=reviewed&amp;severity=critical&a
 
 <span class="c"># 3 — the ten most recently changed NCSC-NL advisories</span>
 curl -s https://advisories.ncsc.nl/csaf/v2/changes.csv | head -n 10</pre>
-</section>
+</div></section>
 
 </main>
 <footer><div class="wrap">

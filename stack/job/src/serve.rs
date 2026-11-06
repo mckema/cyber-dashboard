@@ -1,5 +1,5 @@
-//! Local lab only: a small HTTP service behind two links on the dashboard. "Export
-//! snapshot" (GET /report/month-to-date.pdf) and "Refresh tickets" (GET /refresh)
+//! Local lab only: a small HTTP service behind two links on the dashboard. "Generate current
+//! report" (GET /report/month-to-date.pdf) and "Sync with Linear" (GET /refresh)
 //! both read the tracker back, rebuild the month-to-date report (FR-A4 on demand) and
 //! re-splice the Linear section of the wiki page (two ticket tables, their counters,
 //! the four tiles, the "as of" time); the first returns the PDF, the second sends the browser back
@@ -67,8 +67,15 @@ pub struct Args {
 pub const HEALTH_PATH: &str = "/healthz";
 pub const REPORT_PATH: &str = "/report/month-to-date.pdf";
 pub const REFRESH_PATH: &str = "/refresh";
-/// File name the browser saves the PDF as.
-pub const DOWNLOAD_NAME: &str = "fairct-resolution-report-month-to-date.pdf";
+/// File name the browser saves the PDF as: "cyber-threat-report-<YYYY-MM>-to-date.pdf"
+/// for the Amsterdam month of the tickets' "as of" time (Henry, 2026-11-06), or without
+/// the month when that time is unknown.
+pub fn download_name(as_of: &str) -> String {
+    match crate::feeds::common::parse_iso(as_of) {
+        Some(t) => format!("cyber-threat-report-{}-to-date.pdf", crate::triage::store::to_amsterdam(t).format("%Y-%m")),
+        None => "cyber-threat-report-to-date.pdf".into(),
+    }
+}
 /// Retry-After (seconds) on a 503 while a run holds the lock and no PDF exists yet.
 pub const RETRY_AFTER_SECS: u64 = 120;
 /// Seconds between two attempts at the run lock.
@@ -103,7 +110,7 @@ impl Reply {
     fn pdf(bytes: Vec<u8>, as_of: &str, stale: Option<&str>) -> Self {
         let mut headers = vec![
             ("Content-Type", "application/pdf".to_string()),
-            ("Content-Disposition", format!("attachment; filename=\"{DOWNLOAD_NAME}\"")),
+            ("Content-Disposition", format!("attachment; filename=\"{}\"", download_name(as_of))),
             ("Cache-Control", "no-store".into()),
             ("X-Report-Refreshed", stale.is_none().to_string()),
         ];
@@ -626,7 +633,7 @@ mod tests {
         assert_eq!(r.body, b"%PDF-new");
         assert_eq!(r.header("content-type"), Some("application/pdf"));
         assert_eq!(r.header("Content-Disposition"),
-                   Some(r#"attachment; filename="fairct-resolution-report-month-to-date.pdf""#));
+                   Some(r#"attachment; filename="cyber-threat-report-2026-11-to-date.pdf""#));
         assert_eq!(r.header("Cache-Control"), Some("no-store"));
         assert_eq!(r.header("X-Report-Refreshed"), Some("true"));
         assert_eq!(r.header("X-Report-Reason"), None);

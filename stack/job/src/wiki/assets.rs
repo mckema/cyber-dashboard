@@ -25,7 +25,7 @@ use crate::feeds::common::{self, Fatal};
 /// Asset folder the job writes to (created by bootstrap). Served as /<folder>/<file>.
 pub const ASSET_FOLDER: &str = "exploit-watch";
 /// File name of the month-to-date report PDF.
-pub const MTD_REPORT_NAME: &str = "report-month-to-date.pdf";
+pub const MTD_REPORT_NAME: &str = "cyber-threat-report-to-date.pdf";
 /// Wiki.js uploads.maxFileSize default (5 MiB); larger uploads are cut off by multer.
 pub const MAX_ASSET_BYTES: usize = 5 * 1024 * 1024;
 
@@ -143,8 +143,8 @@ mod tests {
     fn upload_ok_sends_multipart_in_order_and_reads_back() {
         let pdf = "%PDF-1.7 fake\n";
         let (r, seen) = upload(vec![canned(200, FOLDERS_OK), canned(200, "ok"), canned(200, pdf)],
-                               "IAPTOK", "Report-Month-To-Date.PDF", pdf.as_bytes());
-        assert_eq!(r.unwrap(), "/exploit-watch/report-month-to-date.pdf");
+                               "IAPTOK", "Cyber-Threat-Report-To-Date.PDF", pdf.as_bytes());
+        assert_eq!(r.unwrap(), "/exploit-watch/cyber-threat-report-to-date.pdf");
         assert_eq!(seen.len(), 3);
 
         let q = seen[0].to_lowercase();
@@ -159,14 +159,14 @@ mod tests {
         assert!(low.contains("content-type: multipart/form-data; boundary="), "{up}");
         let meta = up.find("Content-Disposition: form-data; name=\"mediaUpload\"\r\n\r\n{\"folderId\":7}\r\n")
             .unwrap_or_else(|| panic!("folder part missing: {up}"));
-        let file = up.find("Content-Disposition: form-data; name=\"mediaUpload\"; filename=\"report-month-to-date.pdf\"")
+        let file = up.find("Content-Disposition: form-data; name=\"mediaUpload\"; filename=\"cyber-threat-report-to-date.pdf\"")
             .unwrap_or_else(|| panic!("file part missing: {up}"));
         assert!(meta < file, "folder part must come first");
         assert!(up[file..].contains("Content-Type: application/pdf\r\n\r\n%PDF-1.7 fake\n\r\n--"), "{up}");
         assert_eq!(up.matches("name=\"mediaUpload\"").count(), 2);
 
         let get = seen[2].to_lowercase();
-        assert!(get.starts_with("get /exploit-watch/report-month-to-date.pdf "), "{get}");
+        assert!(get.starts_with("get /exploit-watch/cyber-threat-report-to-date.pdf "), "{get}");
         assert!(get.contains("authorization: bearer key\r\n") && get.contains("proxy-authorization: bearer iaptok\r\n"));
     }
 
@@ -222,7 +222,7 @@ mod tests {
         let (base, rx) = serve(vec![]);
         let big = vec![0u8; MAX_ASSET_BYTES + 1];
         let e = upload_asset_with(&client(), &base, "KEY", "", MTD_REPORT_NAME, &big).unwrap_err().0;
-        assert_eq!(e, format!("wiki asset /exploit-watch/report-month-to-date.pdf: {} bytes is over the Wiki.js \
+        assert_eq!(e, format!("wiki asset /exploit-watch/cyber-threat-report-to-date.pdf: {} bytes is over the Wiki.js \
                                upload limit of 5242880 bytes (uploads.maxFileSize)", MAX_ASSET_BYTES + 1));
         for bad in ["", "a b.pdf", "../x.pdf", ".hidden", "x#1.pdf"] {
             let e = upload_asset_with(&client(), &base, "KEY", "", bad, b"x").unwrap_err().0;

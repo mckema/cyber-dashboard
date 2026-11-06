@@ -230,9 +230,9 @@
 ]
 
 // ================================================================== appendix
-// No forced page break: when the month's tables spill over by a few rows, the
-// appendix follows them instead of leaving a near-empty page.
-#v(10pt)
+// The appendix starts on its own page (Henry, 2026-11-06), even when the month's
+// tables spill over by a few rows.
+#pagebreak()
 = Appendix (audit)
 
 // Monthly close only (close.rs): the random sample of automatically ruled-out items.

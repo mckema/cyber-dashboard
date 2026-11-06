@@ -55,8 +55,9 @@ impl Fixture {
             self.start, self.end, self.now, &self.kev_catalog, self.cap,
         );
         // The month tiles and "as of" from the fixture's report.json part, as run.rs does.
+        // Only the two Linear regions; the feeds strip (f-status) stays.
         if self.report.is_some() {
-            r.html = linear_regions(&self.triage, self.end, self.report.as_ref(), None);
+            r.html.splice(0..2, linear_regions(&self.triage, self.end, self.report.as_ref(), None));
         }
         r
     }

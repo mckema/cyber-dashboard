@@ -71,7 +71,7 @@ fn rel(month: &str, file: &str) -> String {
 
 /// Wiki asset name of a month's final PDF.
 pub fn asset_name(month: &str) -> String {
-    format!("report-{month}.pdf")
+    format!("cyber-threat-report-{month}.pdf")
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
