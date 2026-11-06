@@ -69,7 +69,7 @@ pub const TEXT_IDS: [&str; 16] = [
 ];
 pub const STAMP_ID: &str = "rstat";
 /// <div> regions with inline markup (spans, b, a), never a nested <div>.
-pub const HTML_IDS: [&str; 3] = ["l-kpis", "l-refresh", "f-status"];
+pub const HTML_IDS: [&str; 4] = ["l-kpis", "l-refresh", "f-status", "l-conn"];
 
 /// Page content and scriptCss, relative to the repo root (the job and demo run from there).
 pub const SKELETON_PATH: &str = "stack/wiki/page/skeleton.html";
@@ -411,10 +411,28 @@ pub fn linear_regions(view: &TriageView, now: DateTime<Utc>, report: Option<&Val
         .zip([linear_kpis(view, &today, report), linear_refresh(report, serve_url)]).collect()
 }
 
-/// The `f-status` region: since 2026-11-06 the feeds / updated / KEV catalog strip sits at
-/// the top of "Threat feeds — last 7 days", no longer in the page's top bar (Henry).
+/// The `f-status` region: since 2026-11-06 the "Updated" line sits at the top of
+/// "Threat feeds — last 7 days", no longer in the page's top bar (Henry).
 pub fn feeds_status(now: DateTime<Utc>) -> (String, String) {
     (HTML_IDS[2].to_string(), build_stamp(now))
+}
+
+/// The `l-conn` region (2026-11-06): the tracker connection in the Linear heading, next to
+/// "Sync with Linear"; until then it was the last row of Feed health, which now lists the
+/// seven feeds only (Henry). "" without a tracker row (`--dry-run`, `--out`).
+pub fn linear_conn(tracker: Option<&HealthRow>) -> (String, String) {
+    let html = match tracker {
+        None => String::new(),
+        Some(t) if t.status == "ok" => r#"<span class="lc lc-ok"><span class="ldot"></span>Linear connected</span>"#.into(),
+        Some(t) if t.status == "off" => r#"<span class="lc"><span class="ldot"></span>Linear off</span>"#.into(),
+        Some(t) => {
+            let short: String = t.note.chars().take(80).collect();
+            let more = if t.note.chars().count() > 80 { "…" } else { "" };
+            format!(r#"<span class="lc lc-bad" title="{}"><span class="ldot"></span>Linear error: {}{more}</span>"#,
+                    esc(&t.note), esc(&short))
+        }
+    };
+    (HTML_IDS[3].to_string(), html)
 }
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
@@ -436,7 +454,8 @@ pub fn build_regions(
     let note = triage.mode_note.as_deref();
 
     let tbody = [
-        build_health_rows(health, tracker),
+        // The tracker row moved to the Linear heading (l-conn, 2026-11-06).
+        build_health_rows(health, None),
         build_kev_rows(kev, &today),
         build_adv_rows(adv),
         build_dep_rows(dep),
@@ -477,7 +496,7 @@ pub fn build_regions(
         stamp: String::new(),
         // Without a report: the caller puts the month-to-date report in (linear_regions).
         html: linear_regions(triage, end, None, None).into_iter()
-            .chain([feeds_status(now)]).collect(),
+            .chain([feeds_status(now), linear_conn(tracker)]).collect(),
     }
 }
 
@@ -1000,9 +1019,16 @@ mod tests {
         let mut part = ticket_regions(&TriageView::default(), t_now(), Some(&report_fixture()), Some("http://localhost:8090"));
         part.stamp = stamp_of(&page).unwrap();
         let out = apply_regions(&page, &part).unwrap();
-        assert!(out.contains(concat!(
-            r#"<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lact" id="l-refresh">"#,
-            r#"<a class="rbtn rbtn-2" href="http://localhost:8090/refresh" "#)), "refresh link in the heading");
+        assert!(out.contains(r#"<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lconn" id="l-conn">"#),
+                "connection status in the heading");
+        assert!(out.contains(r#"<div class="lact" id="l-refresh"><a class="rbtn rbtn-2" href="http://localhost:8090/refresh" "#),
+                "refresh link in the heading");
+        let between = |s: &str, a: &str, b: &str| -> String {
+            let i = s.find(a).unwrap() + a.len();
+            s[i..i + s[i..].find(b).unwrap()].to_string()
+        };
+        assert_eq!(between(&out, r#"id="l-conn">"#, "</div>"), between(&page, r#"id="l-conn">"#, "</div>"),
+                   "a refresh leaves the connection status as the last run wrote it");
         assert!(out.contains(r#"<span class="lasof">as of 14:05 CET</span></div></div>"#));
         assert!(out.contains(r##"<div class="kpis" id="l-kpis"><a class="kpi kpi-ok" href="#untriaged">"##), "now tiles refreshed");
         let inner = |d: &str, id: &str| find_element(d, id, false).map(|(_, a, b, _)| d[a..b].to_string()).unwrap();
@@ -1030,7 +1056,7 @@ mod tests {
         for w in order.windows(2) {
             assert!(at(w[0]) < at(w[1]), "{} before {}", w[0], w[1]);
         }
-        assert!(s.contains(r#"<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lact" id="l-refresh"></div></div>"#));
+        assert!(s.contains(r#"<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lconn" id="l-conn"></div><div class="lact" id="l-refresh"></div></div>"#));
         assert!(!s.contains("lbar") && !s.contains("l-summary"), "no separate summary bar");
         // Each group closes right after its last table (and its full-width band's wrap).
         let squash = |a: &str, b: &str| re(r"\s+").replace_all(s[at(a)..at(b)].split_once("</tbody>").unwrap().1, "").to_string();
@@ -1164,7 +1190,8 @@ mod tests {
     /// The Linear row goes into the health table only: the health count and the
     /// stamp stay per feed, and its error text is escaped.
     #[test]
-    fn tracker_row_in_health_table_only() {
+    fn tracker_status_in_the_linear_heading() {
+        // Since 2026-11-06 the tracker is not a row of Feed health but l-conn in the Linear heading.
         use super::test_support::{EVIL, assert_clean};
         let t = crate::feeds::common::parse_iso("2026-11-03T02:45:00Z").unwrap();
         let feeds = [HealthRow { source: "CISA KEV".into(), status: "ok".into(), ..Default::default() }];
@@ -1173,13 +1200,17 @@ mod tests {
         let tv = TriageView::default();
         let with = build_regions(&[], &[], &[], &[], &feeds, Some(&linear), &tv, t, t, t, 300);
         let without = build_regions(&[], &[], &[], &[], &feeds, None, &tv, t, t, t, 300);
-        let rows = with.get("t-health");
-        assert!(rows.contains(r#"<span class="feed">Linear</span></td><td><span class="hs hs-error">Error</span>"#));
-        assert_clean(rows);
+        assert_eq!(with.get("t-health"), without.get("t-health"), "Feed health lists the feeds only");
+        assert!(!with.get("t-health").contains("Linear"));
         assert_eq!(with.get("n-health"), "1 feed &middot; 1 ok");
-        assert_eq!(with.get("n-health"), without.get("n-health"));
-        assert_eq!(with.stamp, without.stamp);
-        assert_eq!(first_row_cells(&rows[rows.rfind("<tr>").unwrap()..]), thead_cols("t-health"));
+        let conn = with.get("l-conn");
+        assert!(conn.starts_with(r#"<span class="lc lc-bad" title="create issue for NCSC-NL:"#) && conn.contains("Linear error: "), "{conn}");
+        assert_clean(conn);
+        assert_eq!(without.get("l-conn"), "", "no tracker row (dry run): no status");
+        let ok = HealthRow { status: "ok".into(), note: "0 created".into(), ..linear.clone() };
+        assert_eq!(linear_conn(Some(&ok)).1, r#"<span class="lc lc-ok"><span class="ldot"></span>Linear connected</span>"#);
+        let long = HealthRow { note: "x".repeat(200), ..linear };
+        assert!(linear_conn(Some(&long)).1.contains(&format!("Linear error: {}…</span>", "x".repeat(80))));
     }
 
     #[test]

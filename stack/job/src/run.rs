@@ -52,7 +52,7 @@ const WINDOW_DAYS: i64 = 7;
 // of the "did anything change" fingerprint, otherwise every run writes a new
 // page version (Wiki.js keeps them all).
 // l-refresh carries the tickets' "as of" time.
-const VOLATILE: &[&str] = &["t-health", "n-health", "winlabel", "l-refresh", "f-status"];
+const VOLATILE: &[&str] = &["t-health", "n-health", "winlabel", "l-refresh", "f-status", "l-conn"];
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -426,7 +426,7 @@ fn run(args: &Args) -> Result<(), Fatal> {
     // else the last one on disk (dry run, --out, or a report error) ("this month").
     let report_json = report_json.or_else(|| state::load_json::<Value>("reports/month-to-date/report.json"));
     regions.html = render::linear_regions(&triage.view, end, report_json.as_ref(), serve_url.as_deref())
-        .into_iter().chain([render::feeds_status(now)]).collect();
+        .into_iter().chain([render::feeds_status(now), render::linear_conn(triage.tracker.as_ref())]).collect();
     let pdf_href = uploaded.as_ref().map(|(p, sha, _)| format!("{p}?v={}", &sha[..sha.len().min(12)]));
     let as_of = uploaded.as_ref().map(|(_, _, a)| a.as_str()).unwrap_or("");
     let monthly_link = monthly.and_then(|m| {
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn without_volatile_ignores_per_run_regions_only() {
         let page = |health: &str, kev: &str, win: &str, stamp: &str| format!(
-            r#"<tbody id="t-health">{health}</tbody><tbody id="t-kev">{kev}</tbody><b id="winlabel">{win}</b><span id="n-health">x</span><div class="rstat" id="rstat">{stamp}</div><div class="lact" id="l-refresh"><span>as of {win}</span></div><div class="rstat fstat" id="f-status"><span>Updated {win}</span></div>"#);
+            r#"<tbody id="t-health">{health}</tbody><tbody id="t-kev">{kev}</tbody><b id="winlabel">{win}</b><span id="n-health">x</span><div class="rstat" id="rstat">{stamp}</div><div class="lact" id="l-refresh"><span>as of {win}</span></div><div class="rstat fstat" id="f-status"><span>Updated {win}</span></div><div class="lconn" id="l-conn"><span>Linear connected</span></div>"#);
         let a = without_volatile(&page("<tr>ok 06:03</tr>", "<tr>CVE-1</tr>", "06:03", "Generated <b>06:03</b>")).unwrap();
         let b = without_volatile(&page("<tr>ok 06:33</tr>", "<tr>CVE-1</tr>", "06:33", "Generated <b>06:33</b>")).unwrap();
         let reseeded = without_volatile(&page("", "", "", "")).unwrap();

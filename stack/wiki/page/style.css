@@ -47,7 +47,7 @@
 #ew .stamp b{color:var(--ink-2);font-weight:500}
 
 #ew .refresh{background:var(--surface-2);border-bottom:1px solid var(--rule)}
-#ew .refresh .wrap{display:flex;flex-wrap:wrap;gap:14px 18px;align-items:center;padding-top:14px;padding-bottom:14px}
+#ew .refresh .wrap{display:flex;flex-wrap:wrap;gap:14px 18px;align-items:center;padding-top:20px;padding-bottom:20px}
 #ew .rstat{font-family:"IBM Plex Mono",monospace;font-size:11.5px;line-height:1.5;color:var(--muted)}
 #ew .rstat b{color:var(--ink-2);font-weight:500}
 /* added 2026-11-05: status strip (labelled values, coloured feed dot), then the FR-A4
@@ -65,12 +65,12 @@
 #ew .rstat .rst-warn .rdot{background:var(--high)}
 #ew .rstat .rst-bad .rv{color:var(--exploited)}
 #ew .rstat .rst-bad .rdot{background:var(--exploited)}
-#ew .rstat .rreport{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px 28px;margin-top:16px;padding:16px 20px;background:var(--surface);border:1px solid var(--rule);border-left:4px solid var(--accent);border-radius:8px;box-shadow:var(--shadow)}
+#ew .rstat .rreport{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px 28px;margin-top:0;padding:16px 20px;background:var(--surface);border:1px solid var(--rule);border-left:4px solid var(--accent);border-radius:8px;box-shadow:var(--shadow)}
 #ew .rstat .rreport-txt{display:flex;flex-direction:column;gap:4px;flex:1 1 360px;min-width:260px}
 #ew .rstat .rreport-t{font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:16px;color:var(--ink-2)}
 #ew .rstat .rreport-t b{color:var(--ink);font-weight:700}
 #ew .rstat .rreport-d{font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;line-height:1.45;color:var(--ink-2)}
-#ew .rstat .rreport-a{font-size:11.5px;color:var(--muted)}
+#ew .rstat .rreport-a{display:block;font-size:11.5px;line-height:1.6;color:var(--muted);margin-top:2px}
 #ew .rstat .rbtns{display:flex;flex-wrap:wrap;gap:10px}
 #ew .rstat a.rrev{color:var(--accent);font-weight:600;text-decoration:none;border-bottom:1px solid var(--accent-soft)} /* added 2026-11-06: review issue of the monthly report */
 #ew .rstat a.rrev:hover{border-bottom-color:var(--accent)}
@@ -93,9 +93,24 @@
 #ew .tile.t-exp .n{color:var(--exploited)}
 #ew .tile.t-crit .n{color:var(--crit)}
 #ew .tile.t-high .n{color:var(--high)}
+/* Five feed tiles as links to their tables, with their sources (2026-11-06). */
+#ew a.tile{display:block;color:inherit;text-decoration:none}
+#ew a.tile:hover{background:var(--surface-2)}
+#ew a.tile:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+#ew a.tile::after{content:none!important;display:none!important}
+#ew .tile .s{font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--muted);margin-top:8px;letter-spacing:.02em}
+/* Linear connection next to "Sync with Linear" (l-conn, 2026-11-06; was a Feed health row). */
+#ew .shead .lconn{margin-left:auto}
+#ew .shead .lconn,#ew .shead .lact{align-self:center} /* buttons centred on the heading line, not on its baseline */
+#ew .shead .lconn+.lact{margin-left:0}
+#ew .lconn .lc{display:inline-flex;align-items:center;gap:6px;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted);white-space:nowrap;max-width:46ch;overflow:hidden;text-overflow:ellipsis}
+#ew .lconn .ldot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+#ew .lconn .lc-ok .ldot{background:var(--accent)}
+#ew .lconn .lc-bad{color:var(--crit)}
+#ew .lconn .lc-bad .ldot{background:var(--crit)}
 
 /* ---------- sections */
-#ew section.block{padding:46px 0 10px}
+#ew section.block{padding:44px 0}
 #ew .shead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
 #ew .shead h2{font-size:23px;font-weight:600;letter-spacing:-.01em}
 #ew .count{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
@@ -159,7 +174,7 @@
 /* added 2026-11-06: page groups (the Linear section, then "Threat feeds — last 7 days")
    with their tables as nested sections under h3 headings. The Linear heading carries
    the "Refresh tickets" link and the tickets' "as of" time on its right (#l-refresh). */
-#ew section.block section.block{padding:30px 0 0}
+#ew section.block section.block{padding:32px 0 0}
 /* Divider between the large parts of the page (Henry, 2026-11-06): only top-level sections, not the subsections inside them. */
 #ew main>section.block+section.block{border-top:1px solid var(--rule)}
 #ew .shead h3{font-size:19px;font-weight:600;letter-spacing:-.01em}
@@ -244,7 +259,7 @@
 #ew .term.role{background:none;border:1px solid var(--rule);padding:2px 7px;color:var(--ink-2)} /* added: which table the feed fills */
 #ew pre.sh{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:9px;padding:18px 20px;font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.7;color:var(--ink-2);margin:0;white-space:pre;box-shadow:none}
 #ew pre.sh .c{color:var(--muted)}
-#ew footer{border-top:1px solid var(--rule);margin-top:54px;background:var(--surface)}
+#ew footer{border-top:1px solid var(--rule);margin-top:0;background:var(--surface)}
 #ew footer .wrap{padding:30px 28px 46px}
 #ew footer h4{font-size:14px;font-weight:600;margin-bottom:10px}
 #ew footer p{font-size:13px;color:var(--muted);max-width:74ch;margin:0 0 10px}

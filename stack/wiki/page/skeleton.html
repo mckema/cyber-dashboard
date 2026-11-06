@@ -9,7 +9,7 @@
 <main>
 
 <section class="block" id="linear"><div class="wrap">
-<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lact" id="l-refresh"></div></div>
+<div class="shead"><h2>Triage and actions (Linear)</h2><div class="lconn" id="l-conn"></div><div class="lact" id="l-refresh"></div></div>
 <p class="snote">What needs a person now, and what was triaged and closed this month. <span class="tip" tabindex="0" title="Waiting for triage (now): matched items with no decision in Linear yet, and issues declined without a reason (FR-A2 asks for one); the rows of the first table below; overdue after one business day. Open tickets (now): issues accepted in Linear and not closed; the rows of the second table; overdue after their due date. Triaged this month: relevant items first seen this month (Europe/Amsterdam) that have been triaged in Linear, which the report calls assessed (a decline counts once it has a reason), and how many of them within one business day. Closed this month: tickets fixed, or closed without fix, this month. The two month figures come from the month-to-date report (the Export snapshot PDF). Sync with Linear pulls the latest ticket status from Linear and updates this section; the feeds are fetched by the scheduled job only.">&#9432;<span class="tiptext"><b>Waiting for triage</b> (now): matched items with no decision in Linear yet, and issues declined without a reason (FR-A2 asks for one); the rows of the first table below; overdue after one business day. <b>Open tickets</b> (now): issues accepted in Linear and not closed; the rows of the second table; overdue after their due date. <b>Triaged this month</b>: relevant items first seen this month (Europe/Amsterdam) that have been triaged in Linear, which the report calls <em>assessed</em> (a decline counts once it has a reason), and how many of them within one business day. <b>Closed this month</b>: tickets fixed, or closed without fix, this month. The two month figures come from the month-to-date report (the <b>Export snapshot</b> PDF). <b>Sync with Linear</b> pulls the latest ticket status from Linear and updates this section; the feeds are fetched by the scheduled job only.</span></span></p>
 <div class="kpis" id="l-kpis">Not generated yet.</div>
 
@@ -39,11 +39,11 @@
 <div class="rstat fstat" id="f-status"></div>
 <p class="snote">What the seven public feeds published in the rolling seven-day window shown at the top; every count in this part is for that window.</p>
 <div class="triage">
-<div class="tile t-exp"><div class="n" id="s-kev">0</div><div class="l">Confirmed exploited in the wild (CISA KEV, ENISA EUVD)</div></div>
-<div class="tile t-crit"><div class="n" id="s-crit">0</div><div class="l">Critical CVEs (CVSS 9.0&ndash;10.0)</div></div>
-<div class="tile t-high"><div class="n" id="s-high">0</div><div class="l">High CVEs (CVSS 7.0&ndash;8.9)</div></div>
-<div class="tile"><div class="n" id="s-dep">0</div><div class="l">Advisories mapped to a package and a fixed version</div></div>
-<div class="tile"><div class="n" id="s-adv">0</div><div class="l">EU and national advisories (CERT-EU, NCSC-NL)</div></div>
+<a class="tile t-exp" href="#kev"><div class="n" id="s-kev">0</div><div class="l">Confirmed exploited in the wild</div><div class="s">CISA KEV, ENISA EUVD</div></a>
+<a class="tile t-crit" href="#nvd"><div class="n" id="s-crit">0</div><div class="l">Critical CVEs (CVSS 9.0&ndash;10.0)</div><div class="s">CVE.org; score from CNA, CISA or NVD</div></a>
+<a class="tile t-high" href="#nvd"><div class="n" id="s-high">0</div><div class="l">High CVEs (CVSS 7.0&ndash;8.9)</div><div class="s">CVE.org; score from CNA, CISA or NVD</div></a>
+<a class="tile" href="#deps"><div class="n" id="s-dep">0</div><div class="l">Advisories mapped to a package and a fixed version</div><div class="s">GitHub Advisory</div></a>
+<a class="tile" href="#adv"><div class="n" id="s-adv">0</div><div class="l">EU and national advisories</div><div class="s">CERT-EU, NCSC-NL</div></a>
 </div>
 
 <section class="block" id="health">
