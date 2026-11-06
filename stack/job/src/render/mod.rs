@@ -59,7 +59,7 @@ pub use fmt::{esc, ftime, plural, thousands};
 use fmt::{day, hm};
 use tables::{
     build_adv_rows, build_cve_rows, build_dep_rows, build_health_rows, build_kev_rows, build_ticket_rows,
-    build_untriaged_rows, cve_keep, feed_status, health_summary, kev_overdue, sev, tickets_missing, tickets_past_due,
+    build_untriaged_rows, cve_keep, health_summary, kev_overdue, sev, tickets_missing, tickets_past_due,
 };
 
 pub const TBODY_IDS: [&str; 7] = ["t-health", "t-kev", "t-adv", "t-dep", "t-nvd", "t-untriaged", "t-tickets"];
@@ -171,21 +171,11 @@ fn status_item(label: &str, value: &str, note: &str, extra_class: &str) -> Strin
 /// Inner HTML of <div id="rstat">: a status strip of labelled values (feeds with a
 /// coloured dot, last update, KEV catalog) in <span class="rmeta">; report_links()
 /// may append the report card after it. Spans only, never a <div>.
-pub fn build_stamp(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) -> String {
-    let mut s = String::from("<span class=\"rmeta\">");
-    if !health.is_empty() {
-        let (cls, head) = feed_status(health);
-        let summary = health_summary(health);
-        let detail = summary.split_once(" &middot; ").map_or("", |(_, rest)| rest);
-        s.push_str(&status_item("Feeds", &format!("<span class=\"rdot\"></span>{head}"), detail,
-                                &format!(" rst-{cls}")));
-    }
-    s.push_str(&status_item("Updated", &format!("{}, {} UTC", day(&now, true), hm(&now)), "by the scheduled job", ""));
-    if !kev_catalog.is_empty() {
-        s.push_str(&status_item("CISA KEV catalog", &esc(kev_catalog), "", ""));
-    }
-    s.push_str("</span>");
-    s
+/// The feeds strip: "Updated" only since 2026-11-06 (Henry). The feeds' state is the
+/// Feed health table's header right below; the KEV catalog version is no longer shown.
+pub fn build_stamp(now: DateTime<Utc>) -> String {
+    format!("<span class=\"rmeta\">{}</span>",
+            status_item("Updated", &format!("{}, {} UTC", day(&now, true), hm(&now)), "by the scheduled job", ""))
 }
 
 /// Display name of the FR-A4 report (MS-30 is the "Cyber threat dashboard").
@@ -423,8 +413,8 @@ pub fn linear_regions(view: &TriageView, now: DateTime<Utc>, report: Option<&Val
 
 /// The `f-status` region: since 2026-11-06 the feeds / updated / KEV catalog strip sits at
 /// the top of "Threat feeds — last 7 days", no longer in the page's top bar (Henry).
-pub fn feeds_status(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow]) -> (String, String) {
-    (HTML_IDS[2].to_string(), build_stamp(now, kev_catalog, health))
+pub fn feeds_status(now: DateTime<Utc>) -> (String, String) {
+    (HTML_IDS[2].to_string(), build_stamp(now))
 }
 
 /// Everything the job writes. start/end/now are UTC. cap 0 means no CVE row cap.
@@ -434,7 +424,7 @@ pub fn feeds_status(now: DateTime<Utc>, kev_catalog: &str, health: &[HealthRow])
 #[allow(clippy::too_many_arguments)]
 pub fn build_regions(
     kev: &[Item], adv: &[Item], dep: &[Item], cve: &[Item], health: &[HealthRow], tracker: Option<&HealthRow>,
-    triage: &TriageView, start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>, kev_catalog: &str,
+    triage: &TriageView, start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>,
     cap: usize,
 ) -> Regions {
     let today = end.format("%Y-%m-%d").to_string();
@@ -487,7 +477,7 @@ pub fn build_regions(
         stamp: String::new(),
         // Without a report: the caller puts the month-to-date report in (linear_regions).
         html: linear_regions(triage, end, None, None).into_iter()
-            .chain([feeds_status(now, kev_catalog, health)]).collect(),
+            .chain([feeds_status(now)]).collect(),
     }
 }
 
@@ -938,7 +928,7 @@ mod tests {
         }
         // A run without a report (dry run with none on disk) renders the same tiles.
         let t = parse_iso("2026-11-03T02:45:00Z").unwrap();
-        let r = build_regions(&[], &[], &[], &[], &[], None, &TriageView::default(), t, t, t, "", 300);
+        let r = build_regions(&[], &[], &[], &[], &[], None, &TriageView::default(), t, t, t, 300);
         assert_eq!(r.get("l-kpis"), linear_kpis(&TriageView::default(), "2026-11-03", None));
         assert_eq!(r.get("l-refresh"), "");
     }
@@ -1083,15 +1073,11 @@ mod tests {
 
     #[test]
     fn stamp_status_strip() {
-        let row = |status: &str| HealthRow { source: "X".into(), status: status.into(), ..Default::default() };
+        // "Updated" only (2026-11-06): the feeds' state is the Feed health header below.
         let now = parse_iso("2026-11-05T08:23:00Z").unwrap();
-        let ok = build_stamp(now, "2026.11.04", &[row("ok"), row("cached"), row("not-modified")]);
-        assert!(ok.contains(r#"<span class="rkv rst-ok"><span class="rk">Feeds</span><span class="rv"><span class="rdot"></span>All 3 feeds current</span><span class="rsub">2 ok &middot; 1 cached</span>"#), "{ok}");
-        assert!(ok.contains(r#"<span class="rk">Updated</span><span class="rv">5 Nov 2026, 08:23 UTC</span>"#), "{ok}");
-        assert!(ok.contains(r#"<span class="rk">CISA KEV catalog</span><span class="rv">2026.11.04</span>"#), "{ok}");
-        assert!(!ok.contains("<div"));
-        assert!(build_stamp(now, "", &[row("ok"), row("stale")]).contains("rst-warn\"><span class=\"rk\">Feeds</span><span class=\"rv\"><span class=\"rdot\"></span>1 feed stale"));
-        assert!(build_stamp(now, "", &[row("error"), row("error"), row("stale")]).contains("2 feeds failing"));
+        let s = build_stamp(now);
+        assert_eq!(s, r#"<span class="rmeta"><span class="rkv"><span class="rk">Updated</span><span class="rv">5 Nov 2026, 08:23 UTC</span><span class="rsub">by the scheduled job</span></span></span>"#);
+        assert!(!s.contains("Feeds") && !s.contains("CISA KEV catalog") && !s.contains("<div"));
     }
 
     #[test]
@@ -1108,7 +1094,7 @@ mod tests {
     #[test]
     fn triage_view_default_and_mode_note() {
         let t = crate::feeds::common::parse_iso("2026-11-03T02:45:00Z").unwrap();
-        let r = |v: &TriageView| build_regions(&[], &[], &[], &[], &[], None, v, t, t, t, "", 300);
+        let r = |v: &TriageView| build_regions(&[], &[], &[], &[], &[], None, v, t, t, t, 300);
         let off = r(&TriageView::default());
         assert!(off.get("t-untriaged").contains("No matched item is waiting for triage."));
         assert!(off.get("t-tickets").contains("No open tickets."));
@@ -1145,7 +1131,7 @@ mod tests {
             evil_triage(),
         ];
         for v in &views {
-            let full = build_regions(&[], &[], &[], &[], &[], None, v, t, t, t, "", 300);
+            let full = build_regions(&[], &[], &[], &[], &[], None, v, t, t, t, 300);
             let part = ticket_regions(v, t, None, None);
             let ids: Vec<&str> =
                 part.tbody.iter().chain(part.text.iter()).chain(part.html.iter()).map(|(k, _)| k.as_str()).collect();
@@ -1185,8 +1171,8 @@ mod tests {
         let linear = HealthRow { source: "Linear".into(), status: "error".into(),
                                  note: format!("create issue for NCSC-NL:{EVIL}"), ..Default::default() };
         let tv = TriageView::default();
-        let with = build_regions(&[], &[], &[], &[], &feeds, Some(&linear), &tv, t, t, t, "", 300);
-        let without = build_regions(&[], &[], &[], &[], &feeds, None, &tv, t, t, t, "", 300);
+        let with = build_regions(&[], &[], &[], &[], &feeds, Some(&linear), &tv, t, t, t, 300);
+        let without = build_regions(&[], &[], &[], &[], &feeds, None, &tv, t, t, t, 300);
         let rows = with.get("t-health");
         assert!(rows.contains(r#"<span class="feed">Linear</span></td><td><span class="hs hs-error">Error</span>"#));
         assert_clean(rows);

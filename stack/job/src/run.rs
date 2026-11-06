@@ -363,7 +363,6 @@ fn run(args: &Args) -> Result<(), Fatal> {
     let exploited = merge_exploited(&g("kev"), &g("euvd"));
     let cves = enrich_cves(&g("cvelist"), &g("nvd"));
     let adv: Vec<Item> = g("certeu").into_iter().chain(g("ncscnl")).collect();
-    let catalog = g("kev").first().map(|i| i.x("catalog_version").to_string()).unwrap_or_default();
 
     // FR-A2/A3: every item the page lists goes through the matcher. NVD only adds
     // scores, so it is left out; KEV and EUVD are triaged as published, unmerged.
@@ -421,13 +420,13 @@ fn run(args: &Args) -> Result<(), Fatal> {
         .unwrap_or_default();
 
     let mut regions = render::build_regions(&exploited, &adv, &g("github"), &cves, &health, triage.tracker.as_ref(),
-                                            &triage.view, start, end, now, &catalog, env_num("CVE_ROW_CAP", 300usize));
+                                            &triage.view, start, end, now, env_num("CVE_ROW_CAP", 300usize));
     let serve_url = std::env::var("SERVE_PUBLIC_URL").ok();
     // Linear section tiles: the triage view ("now") and this run's month-to-date report,
     // else the last one on disk (dry run, --out, or a report error) ("this month").
     let report_json = report_json.or_else(|| state::load_json::<Value>("reports/month-to-date/report.json"));
     regions.html = render::linear_regions(&triage.view, end, report_json.as_ref(), serve_url.as_deref())
-        .into_iter().chain([render::feeds_status(now, &catalog, &health)]).collect();
+        .into_iter().chain([render::feeds_status(now)]).collect();
     let pdf_href = uploaded.as_ref().map(|(p, sha, _)| format!("{p}?v={}", &sha[..sha.len().min(12)]));
     let as_of = uploaded.as_ref().map(|(_, _, a)| a.as_str()).unwrap_or("");
     let monthly_link = monthly.and_then(|m| {

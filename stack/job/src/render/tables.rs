@@ -104,21 +104,6 @@ pub fn health_summary(health: &[HealthRow]) -> String {
     parts.join(" &middot; ")
 }
 
-/// Overall feed state for the stamp: ("ok" | "warn" | "bad", headline). A cached
-/// feed counts as current: it is reused within its polling cadence on purpose.
-pub fn feed_status(health: &[HealthRow]) -> (&'static str, String) {
-    let class = |h: &&HealthRow| health_class(&h.status).map_or("stale", |c| c.0);
-    let failing = health.iter().filter(|h| class(h) == "error").count();
-    let stale = health.iter().filter(|h| class(h) == "stale").count();
-    if failing > 0 {
-        ("bad", format!("{} failing", plural(failing, "feed", None)))
-    } else if stale > 0 {
-        ("warn", format!("{} stale", plural(stale, "feed", None)))
-    } else {
-        ("ok", format!("All {} current", plural(health.len(), "feed", None)))
-    }
-}
-
 // ---------------------------------------------------------------- exploited (KEV + EUVD)
 
 /// CISA KEV and ENISA EUVD exploited items, merged by CVE upstream. 5 columns.

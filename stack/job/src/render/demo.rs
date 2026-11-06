@@ -42,7 +42,6 @@ pub(super) struct Fixture {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     now: DateTime<Utc>,
-    kev_catalog: String,
     cap: usize,
     /// The parts of a month-to-date report.json the Linear tiles read; None: no report.
     report: Option<Value>,
@@ -52,7 +51,7 @@ impl Fixture {
     pub(super) fn regions(&self) -> Regions {
         let mut r = build_regions(
             &self.kev, &self.adv, &self.dep, &self.cve, &self.health, self.tracker.as_ref(), &self.triage,
-            self.start, self.end, self.now, &self.kev_catalog, self.cap,
+            self.start, self.end, self.now, self.cap,
         );
         // The month tiles and "as of" from the fixture's report.json part, as run.rs does.
         // Only the two Linear regions; the feeds strip (f-status) stays.
@@ -109,7 +108,6 @@ pub(super) fn load_fixture(path: &Path) -> Result<Fixture, Fatal> {
         start: when("start")?,
         end: when("end")?,
         now: when("now")?,
-        kev_catalog: d.get("kev_catalog").and_then(Value::as_str).unwrap_or("").to_string(),
         // Missing: 300 rows, as the job's default. Anything but a positive integer: no cap.
         cap: d.get("cap").map_or(300, |v| v.as_u64().unwrap_or(0) as usize),
         report: d.get("report").cloned(),
