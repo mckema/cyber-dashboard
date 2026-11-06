@@ -44,7 +44,7 @@
 #let vuln(i, n) = [#i.vulnerability \ #muted(cut(i.title, n))]
 #let carried(i) = if i.at("carried_over", default: false) [ †]
 
-#set document(title: d.title, author: "Exploit Watch (fairCT)")
+#set document(title: d.title, author: "Cyber Threat Dashboard (fairCT)")
 #set text(font: "Libertinus Serif", size: 10pt, lang: "en")
 #set par(justify: false, leading: 0.55em)
 #set page(

@@ -731,7 +731,7 @@ mod tests {
         assert!(be.refreshes.is_empty());
     }
 
-    const PAGE: &str = "http://localhost:3000/en/CTP/run-books/Cyber-Exploit-Watch";
+    const PAGE: &str = "http://localhost:3000/en/CTP/run-books/Cyber-Threat-Dashboard";
 
     fn page_state() -> State {
         State { page_url: Some(PAGE.into()), ..Default::default() }

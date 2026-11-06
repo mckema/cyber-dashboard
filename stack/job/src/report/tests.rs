@@ -287,7 +287,7 @@ fn month_to_date_runs_to_now() {
     assert_eq!(j["subtitle"], json!("Month-to-date snapshot – not the official monthly report"));
     assert_eq!(j["document"], json!({
         "id": "EW-CTR-2026-11-MTD-20261110-1300", "version": "1.0", "status": "Snapshot",
-        "prepared_by": "Exploit Watch job, operated by the ISB Vietnam team",
+        "prepared_by": "Cyber Threat Dashboard job, operated by the ISB Vietnam team",
         "distribution": "fairCT COO; others on a need-to-know basis (TLP:AMBER+STRICT)",
         "retention": "to be agreed with fairCT"}));
     assert_eq!(j["bottom_line"].as_array().unwrap().len(), 2);

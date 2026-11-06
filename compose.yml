@@ -81,7 +81,7 @@ services:
       SERVE_PUBLIC_URL: ${SERVE_PUBLIC_URL:-http://localhost:8090}
       # The page as the browser sees it: report-serve sends the browser back here
       # after "Refresh tickets", and the monthly review issue links to it.
-      WIKI_PUBLIC_URL: ${WIKI_PUBLIC_URL:-http://localhost:3000/en/CTP/run-books/Cyber-Exploit-Watch}
+      WIKI_PUBLIC_URL: ${WIKI_PUBLIC_URL:-http://localhost:3000/en/CTP/run-books/Cyber-Threat-Dashboard}
       # lab | test | production. Anything but production marks reports
       # "LAB DATA" (linear-mock) or "TEST DATA" (a real Linear workspace).
       EW_ENVIRONMENT: ${EW_ENVIRONMENT:-lab}

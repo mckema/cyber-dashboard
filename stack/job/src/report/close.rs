@@ -279,8 +279,8 @@ fn reminder_spec(r: &ReminderInput, var: &dyn Fn(&str) -> Option<String>) -> Tas
         None => format!("`{path}` on the wiki"),
     };
     let dashboard = match &public {
-        Some(u) => format!("[Exploit Watch dashboard]({u})"),
-        None => "the Exploit Watch page on the wiki".to_string(),
+        Some(u) => format!("[Cyber Threat Dashboard]({u})"),
+        None => "the Cyber Threat Dashboard page on the wiki".to_string(),
     };
     let mut d = String::new();
     if r.test_run {
@@ -288,7 +288,7 @@ fn reminder_spec(r: &ReminderInput, var: &dyn Fn(&str) -> Option<String>) -> Tas
     }
     d += &format!(
         "The final monthly cyber threat report for **{title_month}** has been generated and frozen \
-         (document {}, data sha256 `{}`). This issue is a reminder only: Exploit Watch does not read it back \
+         (document {}, data sha256 `{}`). This issue is a reminder only: the dashboard job does not read it back \
          and does not record who reviewed the report.\n\n",
         s(r.frozen, "document_id"), &s(r.frozen, "data_sha")[..s(r.frozen, "data_sha").len().min(12)]);
     d += &format!("- Dashboard: {dashboard}\n- Report PDF: {pdf}\n\n");
@@ -305,7 +305,7 @@ fn reminder_spec(r: &ReminderInput, var: &dyn Fn(&str) -> Option<String>) -> Tas
         d += &format!("{}\n", if note.is_empty() { "No sample was drawn." } else { note });
     } else {
         d += &format!(
-            "Exploit Watch ruled out {candidates} items automatically in {title_month} because no component on the \
+            "The dashboard job ruled out {candidates} items automatically in {title_month} because no component on the \
              list matched them (by name only; affected versions are not checked). {} of them were drawn at random \
              for a check; the PDF lists the same items in its appendix. Tick each item once checked. If one is \
              relevant to fairCT after all, add a comment on this issue naming it, so that the component list can \

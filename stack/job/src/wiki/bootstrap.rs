@@ -41,10 +41,13 @@ use super::assets::{ASSET_FOLDER, FOLDERS, folder_id};
 use super::{Mode, Wiki, err_chain, head};
 use crate::feeds::common::Fatal;
 
-pub const PAGE_PATH: &str = "CTP/run-books/Cyber-Exploit-Watch";
+/// Since 2026-11-06 "Cyber Threat Dashboard", after MS-30 "Cyber threat dashboard v1.0"
+/// (Henry). A page still at OLD_PAGE_PATH is moved here by `bootstrap` (step_page).
+pub const PAGE_PATH: &str = "CTP/run-books/Cyber-Threat-Dashboard";
+pub const OLD_PAGE_PATH: &str = "CTP/run-books/Cyber-Exploit-Watch";
 pub const PAGE_LOCALE: &str = "en";
-const PAGE_TITLE: &str = "Cyber Threat Exploit Watch";
-const PAGE_DESC: &str = "Exploited-in-the-wild vulnerabilities, critical CVEs and dependency advisories from public feeds. Rebuilt on a schedule.";
+const PAGE_TITLE: &str = "Cyber Threat Dashboard";
+const PAGE_DESC: &str = "Triage and actions in Linear, exploited vulnerabilities, critical CVEs and advisories from public feeds, and the monthly cyber threat report. Rebuilt every 6 hours.";
 const PAGE_TAGS: [&str; 2] = ["runbook", "threat-intel"];
 pub const RULE_PATH: &str = "CTP/run-books/";
 pub const GROUP_NAME: &str = "exploit-watch";
@@ -495,12 +498,16 @@ fn step_key(w: &Wiki, jwt: &str, gid: i64, current: &str, pid: i64) -> Result<St
 }
 
 fn find_page(w: &Wiki, jwt: &str) -> Result<Option<i64>, Fatal> {
+    find_page_at(w, jwt, PAGE_PATH)
+}
+
+fn find_page_at(w: &Wiki, jwt: &str, path: &str) -> Result<Option<i64>, Fatal> {
     let d = w.gql("{ pages { list(limit: 100000) { id path locale } } }", Value::Null, Some(jwt), "pages.list")?;
     let mut hits: Vec<i64> = d["pages"]["list"]
         .as_array()
         .map(|a| {
             a.iter()
-                .filter(|p| p["path"] == PAGE_PATH && p["locale"] == PAGE_LOCALE)
+                .filter(|p| p["path"] == path && p["locale"] == PAGE_LOCALE)
                 .filter_map(|p| as_id(&p["id"]))
                 .collect()
         })
@@ -523,8 +530,31 @@ pub fn read_file(path: &Path, what: &str, flag: &str) -> Result<String, Fatal> {
     Ok(data)
 }
 
+/// A page left at OLD_PAGE_PATH (before 2026-11-06) is moved to PAGE_PATH, keeping its id
+/// and history, so the job and the wiki links keep working. None when there is none.
+fn move_old_page(w: &Wiki, jwt: &str) -> Result<Option<i64>, Fatal> {
+    let Some(pid) = find_page_at(w, jwt, OLD_PAGE_PATH)? else { return Ok(None) };
+    let d = w.gql(
+        r#"
+      mutation ($id: Int!, $path: String!, $locale: String!) {
+        pages { move(id: $id, destinationPath: $path, destinationLocale: $locale) {
+          responseResult { succeeded message } } }
+      }"#,
+        json!({"id": pid, "path": PAGE_PATH, "locale": PAGE_LOCALE}),
+        Some(jwt),
+        "pages.move",
+    )?;
+    check(&d["pages"]["move"], "pages.move")?;
+    println!("page       moved {PAGE_LOCALE}/{OLD_PAGE_PATH} -> {PAGE_LOCALE}/{PAGE_PATH} (id {pid})");
+    Ok(Some(pid))
+}
+
 fn step_page(w: &Wiki, jwt: &str, args: &Args) -> Result<i64, Fatal> {
-    let Some(pid) = find_page(w, jwt)? else {
+    let found = match find_page(w, jwt)? {
+        Some(pid) => Some(pid),
+        None => move_old_page(w, jwt)?,
+    };
+    let Some(pid) = found else {
         let content = read_file(&args.skeleton, "page skeleton", "--skeleton")?;
         let css = read_file(&args.css, "page CSS", "--css")?;
         // Do NOT request `page { ... }` in the response: Page.editor serialises to null
@@ -589,8 +619,9 @@ fn step_page(w: &Wiki, jwt: &str, args: &Args) -> Result<i64, Fatal> {
                        scriptCss: $css, scriptJs: $js, isPublished: true) {
           responseResult { succeeded message } } }
       }"#,
+        // Title and description follow PAGE_TITLE / PAGE_DESC (renamed 2026-11-06).
         json!({"id": pid, "content": content, "tags": tags,
-               "title": cur["title"], "desc": cur["description"].as_str().unwrap_or(""),
+               "title": PAGE_TITLE, "desc": PAGE_DESC,
                "css": css, "js": cur["scriptJs"].as_str().unwrap_or("")}),
         Some(jwt),
         "pages.update",

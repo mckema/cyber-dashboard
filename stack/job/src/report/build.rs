@@ -966,7 +966,7 @@ pub fn build(log: &Log, runs: &[Run], f: &Frame) -> Value {
         "id": if f.mtd { format!("EW-CTR-{ym}-MTD-{}", to_amsterdam(f.cut).format("%Y%m%d-%H%M")) } else { format!("EW-CTR-{ym}") },
         "version": "1.0",
         "status": if f.mtd { "Snapshot" } else if complete { "Final monthly" } else { "Interim (period not over)" },
-        "prepared_by": "Exploit Watch job, operated by the ISB Vietnam team",
+        "prepared_by": "Cyber Threat Dashboard job, operated by the ISB Vietnam team",
         "distribution": "fairCT COO; others on a need-to-know basis (TLP:AMBER+STRICT)",
         "retention": "to be agreed with fairCT",
     });

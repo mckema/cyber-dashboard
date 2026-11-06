@@ -125,7 +125,7 @@ fn render_demo(fixture: &Path, dark: bool, root: &Path) -> Result<String, Fatal>
         concat!(
             r#"<!doctype html><html lang="en"><head><meta charset="utf-8">"#,
             r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#,
-            "<title>Exploit Watch preview</title><style>{}\n{}</style></head>",
+            "<title>Cyber Threat Dashboard preview</title><style>{}\n{}</style></head>",
             r#"<body><div class="v-application {}">"#,
             r#"<div class="preview-note">Preview only: fixture data from stack/job/tests/fixtures/render_items.json. "#,
             "On the wiki, stack/wiki/page/skeleton.html is the page content and stack/wiki/page/style.css is scriptCss.</div>",

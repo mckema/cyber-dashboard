@@ -157,7 +157,7 @@ fn closes_once_and_a_second_call_changes_nothing() {
     assert_eq!((i.state, i.task_id.as_str(), i.item_key.as_str()), (FakeState::Accepted, review["create_id"].as_str().unwrap(), ""));
     assert_eq!((i.assignee.as_str(), i.due.as_str()), ("", ""), "no assignee or due date unless configured");
     let d = &i.description;
-    for want in ["- Dashboard: [Exploit Watch dashboard](http://localhost:3000/en/exploit-watch)",
+    for want in ["- Dashboard: [Cyber Threat Dashboard](http://localhost:3000/en/exploit-watch)",
                  "- Report PDF: [cyber-threat-report-2026-11.pdf](http://localhost:3000/exploit-watch/cyber-threat-report-2026-11.pdf)",
                  "- [ ] Check the figures and the exceptions in the PDF against the dashboard",
                  "- [ ] Download the PDF", "- [ ] Send it to the fairCT COO via the Shared Drive", "- [ ] Close this issue",
