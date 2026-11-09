@@ -1,0 +1,10 @@
+# Local caches of deploy/check.sh (provider and tflint plugins, TF_DATA_DIR).
+.cache/
+# Terraform working directories, if terraform is run without check.sh.
+.terraform/
+# The module has no lock file of its own; each environment commits one.
+terraform/modules/**/.terraform.lock.hcl
+# Never commit state or plans.
+*.tfstate
+*.tfstate.*
+*.tfplan

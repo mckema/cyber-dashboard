@@ -1,0 +1,76 @@
+# Overlay: keep the job's state in a local GCS emulator instead of state/, to test
+# the Cloud Run setup (state mirror + write-through, GCS lease lock, monthly
+# evidence copy) without a GCP project. Lab only.
+#
+#   export COMPOSE_PATH_SEPARATOR=:       # Windows defaults to ";"
+#   export COMPOSE_FILE=compose.yml:compose.gcs-emulator.yml
+#   docker compose up -d --wait gcs
+#   docker compose run --rm job run
+#
+# The emulator (fake-gcs-server) keeps objects in memory: `docker compose down`
+# or a restart of `gcs` empties both buckets. It honours ifGenerationMatch for
+# multipart uploads only, not for DELETE (checked 2026-11-09), so lock release
+# and stale-lock takeover are covered by unit tests, not by this overlay.
+#
+# STATE_DIR points inside the container (/tmp/state), outside the repo bind
+# mount, as on Cloud Run: each `docker compose run` starts from the buckets.
+# Tracker: linear-mock, as in compose.yml.
+services:
+  gcs:
+    image: fsouza/fake-gcs-server:1.52.2
+    command:
+      - -scheme
+      - http
+      - -port
+      - "4443"
+      - -public-host
+      - gcs:4443
+      - -backend
+      - memory
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4443/storage/v1/b"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gcs-init:
+    # One-shot: create the state and reports buckets (409 = already there).
+    image: curlimages/curl:8.11.1
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        for b in ew-state ew-reports; do
+          code=$$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST 'http://gcs:4443/storage/v1/b?project=lab' \
+            -H 'Content-Type: application/json' \
+            -d "{\"name\":\"$$b\"}")
+          echo "bucket $$b: HTTP $$code"
+          case "$$code" in 200|409) ;; *) exit 1 ;; esac
+        done
+    environment:
+      NO_PROXY: gcs
+    depends_on:
+      gcs:
+        condition: service_healthy
+
+  job:
+    # Own tag, so building this overlay does not replace the image of the lab's
+    # running job and report-serve.
+    image: exploit-watch-job:gcs-e2e
+    environment: &gcs-env
+      STATE_DIR: /tmp/state
+      STATE_BUCKET: ew-state
+      STATE_PREFIX: state
+      REPORTS_BUCKET: ew-reports
+      GCS_ENDPOINT: http://gcs:4443
+      NO_PROXY: wiki,linear-mock,gcs,localhost,127.0.0.1
+      LOG_FORMAT: json
+    depends_on:
+      gcs-init:
+        condition: service_completed_successfully
+  report-serve:
+    image: exploit-watch-job:gcs-e2e
+    environment: *gcs-env
+    depends_on:
+      gcs-init:
+        condition: service_completed_successfully

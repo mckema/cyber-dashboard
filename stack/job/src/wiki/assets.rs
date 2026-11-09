@@ -22,15 +22,40 @@ use sha2::{Digest, Sha256};
 use super::{SIGNIN, bot_auth, bot_base, err_chain, gql_bot_with, head, is_signin};
 use crate::feeds::common::{self, Fatal};
 
-/// Asset folder the job writes to (created by bootstrap). Served as /<folder>/<file>.
-pub const ASSET_FOLDER: &str = "exploit-watch";
+/// Default asset folder the job writes to (created by bootstrap); WIKI_ASSET_FOLDER overrides it.
+pub const DEFAULT_ASSET_FOLDER: &str = "exploit-watch";
 /// File name of the month-to-date report PDF.
 pub const MTD_REPORT_NAME: &str = "cyber-threat-report-to-date.pdf";
 /// Wiki.js uploads.maxFileSize default (5 MiB); larger uploads are cut off by multer.
 pub const MAX_ASSET_BYTES: usize = 5 * 1024 * 1024;
 
+/// The top-level asset folder the job uploads into, served as /<folder>/<file>:
+/// WIKI_ASSET_FOLDER, or DEFAULT_ASSET_FOLDER when unset or blank. Every asset
+/// path, link and bootstrap rule takes the folder from here.
+pub fn asset_folder() -> Result<String, Fatal> {
+    asset_folder_from(&|k| std::env::var(k).ok())
+}
+
+/// asset_folder with an explicit variable lookup (tests, callers with their own lookup).
+/// Fatal for a value Wiki.js would not keep as the folder slug (only a-z 0-9 - _,
+/// starting with a letter or digit, no `/`: one top-level folder).
+pub fn asset_folder_from(get: &dyn Fn(&str) -> Option<String>) -> Result<String, Fatal> {
+    let f = get("WIKI_ASSET_FOLDER").map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let Some(f) = f else {
+        return Ok(DEFAULT_ASSET_FOLDER.into());
+    };
+    let ok = f.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && f.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'));
+    if !ok {
+        return Err(Fatal(format!(
+            "WIKI_ASSET_FOLDER={f:?}: use one top-level folder name of a-z 0-9 - _ (starting with a letter or digit)"
+        )));
+    }
+    Ok(f)
+}
+
 /// Top-level asset folders (`parentFolderId: 0`). Needs read:assets plus a page
-/// rule matching the folder slug itself (path "exploit-watch", no locale).
+/// rule matching the folder slug itself (path "<folder>", no locale).
 pub(crate) const FOLDERS: &str = "query ($p: Int!) { assets { folders(parentFolderId: $p) { id slug } } }";
 
 /// Id of the top-level folder `slug` in an `assets.folders` reply.
@@ -38,12 +63,15 @@ pub(crate) fn folder_id(data: &Value, slug: &str) -> Option<i64> {
     data["assets"]["folders"].as_array()?.iter().find(|f| f["slug"] == slug).and_then(|f| f["id"].as_i64())
 }
 
-/// Upload `bytes` as /ASSET_FOLDER/`name` (replacing a file of that name) with the
-/// bot key, then fetch it back and compare. Returns the asset path ("/exploit-watch/…").
+/// Upload `bytes` as /<asset_folder()>/`name` (replacing a file of that name) with
+/// the bot key, then fetch it back and compare. Returns the asset path
+/// ("/exploit-watch/…" by default). One IAP token (iap::token()) serves the folder
+/// lookup, the upload and the read-back.
 pub fn upload_asset(name: &str, bytes: &[u8]) -> Result<String, Fatal> {
     let key = std::env::var("WIKIJS_API_KEY").unwrap_or_default();
-    let iap = std::env::var("IAP_ID_TOKEN").unwrap_or_default();
-    upload_asset_with(common::client(), &bot_base(), &key, &iap, name, bytes)
+    let folder = asset_folder()?;
+    let iap = super::iap::token()?;
+    upload_asset_with(common::client(), &bot_base(), &key, &iap, &folder, name, bytes)
 }
 
 fn short_sha(b: &[u8]) -> String {
@@ -51,7 +79,7 @@ fn short_sha(b: &[u8]) -> String {
 }
 
 /// upload_asset with explicit inputs (tests, or callers with their own client).
-pub fn upload_asset_with(client: &Client, base: &str, key: &str, iap: &str, name: &str, bytes: &[u8])
+pub fn upload_asset_with(client: &Client, base: &str, key: &str, iap: &str, folder: &str, name: &str, bytes: &[u8])
     -> Result<String, Fatal> {
     // Wiki.js stores the name lowercased and sanitised; keep to names it stores as is,
     // so the read-back URL and the returned link are the file's real path.
@@ -61,7 +89,7 @@ pub fn upload_asset_with(client: &Client, base: &str, key: &str, iap: &str, name
     if !ok_name {
         return Err(Fatal(format!("wiki asset name {name:?}: use only a-z 0-9 . - _ (starting with a letter or digit)")));
     }
-    let path = format!("/{ASSET_FOLDER}/{name}");
+    let path = format!("/{folder}/{name}");
     if bytes.len() > MAX_ASSET_BYTES {
         return Err(Fatal(format!(
             "wiki asset {path}: {} bytes is over the Wiki.js upload limit of {MAX_ASSET_BYTES} bytes (uploads.maxFileSize)",
@@ -72,10 +100,10 @@ pub fn upload_asset_with(client: &Client, base: &str, key: &str, iap: &str, name
 
     let d = gql_bot_with(client, base, key, iap, FOLDERS, json!({"p": 0}))
         .map_err(|e| Fatal(format!("wiki asset folder lookup: {}", e.0)))?;
-    let fid = folder_id(&d, ASSET_FOLDER).ok_or_else(|| {
+    let fid = folder_id(&d, folder).ok_or_else(|| {
         Fatal(format!(
-            "wiki asset folder '{ASSET_FOLDER}' not found, or not visible to the bot key \
-             (needs read:assets on '{ASSET_FOLDER}'): run `bootstrap`"
+            "wiki asset folder '{folder}' not found, or not visible to the bot key \
+             (needs read:assets on '{folder}'): run `bootstrap` with the same WIKI_ASSET_FOLDER"
         ))
     })?;
 
@@ -134,7 +162,7 @@ mod tests {
     fn upload(replies: Vec<Canned>, iap: &str, name: &str, bytes: &[u8]) -> (Result<String, Fatal>, Vec<String>) {
         let n = replies.len();
         let (base, rx) = serve(replies);
-        let r = upload_asset_with(&client(), &format!("{base}/"), "KEY", iap, name, bytes);
+        let r = upload_asset_with(&client(), &format!("{base}/"), "KEY", iap, DEFAULT_ASSET_FOLDER, name, bytes);
         let seen: Vec<String> = rx.try_iter().take(n).collect();
         (r, seen)
     }
@@ -196,7 +224,7 @@ mod tests {
         assert_eq!(
             r.unwrap_err().0,
             "wiki asset folder 'exploit-watch' not found, or not visible to the bot key \
-             (needs read:assets on 'exploit-watch'): run `bootstrap`"
+             (needs read:assets on 'exploit-watch'): run `bootstrap` with the same WIKI_ASSET_FOLDER"
         );
         assert_eq!(seen.len(), 1, "nothing uploaded");
         let (r, _) = upload(vec![canned(200, r#"{"data":{"assets":{"folders":null}}}"#)], "", "a.pdf", b"x");
@@ -221,11 +249,11 @@ mod tests {
     fn upload_refuses_big_or_odd_files_before_sending() {
         let (base, rx) = serve(vec![]);
         let big = vec![0u8; MAX_ASSET_BYTES + 1];
-        let e = upload_asset_with(&client(), &base, "KEY", "", MTD_REPORT_NAME, &big).unwrap_err().0;
+        let e = upload_asset_with(&client(), &base, "KEY", "", DEFAULT_ASSET_FOLDER, MTD_REPORT_NAME, &big).unwrap_err().0;
         assert_eq!(e, format!("wiki asset /exploit-watch/cyber-threat-report-to-date.pdf: {} bytes is over the Wiki.js \
                                upload limit of 5242880 bytes (uploads.maxFileSize)", MAX_ASSET_BYTES + 1));
         for bad in ["", "a b.pdf", "../x.pdf", ".hidden", "x#1.pdf"] {
-            let e = upload_asset_with(&client(), &base, "KEY", "", bad, b"x").unwrap_err().0;
+            let e = upload_asset_with(&client(), &base, "KEY", "", DEFAULT_ASSET_FOLDER, bad, b"x").unwrap_err().0;
             assert!(e.starts_with("wiki asset name "), "{bad}: {e}");
         }
         assert!(rx.try_iter().next().is_none(), "no request sent");
@@ -238,5 +266,29 @@ mod tests {
         assert_eq!(folder_id(d, "exploit-watch"), Some(7));
         assert_eq!(folder_id(d, "nope"), None);
         assert_eq!(folder_id(&Value::Null, "exploit-watch"), None);
+    }
+
+    #[test]
+    fn asset_folder_default_and_override() {
+        let folder = |v: Option<&str>| asset_folder_from(&|k| (k == "WIKI_ASSET_FOLDER").then(|| v.map(String::from)).flatten());
+        assert_eq!(folder(None).unwrap(), "exploit-watch");
+        assert_eq!(folder(Some("  ")).unwrap(), "exploit-watch", "blank is unset");
+        assert_eq!(folder(Some(" cyber-threat ")).unwrap(), "cyber-threat");
+        assert_eq!(folder(Some("ctp_2026")).unwrap(), "ctp_2026");
+        for bad in ["Exploit-Watch", "a/b", "/x", "-x", "x y", "x.pdf", "é"] {
+            let e = folder(Some(bad)).unwrap_err().0;
+            assert!(e.starts_with(&format!("WIKI_ASSET_FOLDER={bad:?}: ")), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn upload_into_another_folder() {
+        let folders = r#"{"data":{"assets":{"folders":[{"id":7,"slug":"exploit-watch"},{"id":9,"slug":"cyber-threat"}]}}}"#;
+        let (base, rx) = serve(vec![canned(200, folders), canned(200, "ok"), canned(200, "x")]);
+        let r = upload_asset_with(&client(), &base, "KEY", "", "cyber-threat", "a.pdf", b"x");
+        assert_eq!(r.unwrap(), "/cyber-threat/a.pdf");
+        let seen: Vec<String> = rx.try_iter().collect();
+        assert!(seen[1].contains("{\"folderId\":9}"), "{}", seen[1]);
+        assert!(seen[2].starts_with("GET /cyber-threat/a.pdf "), "{}", seen[2]);
     }
 }

@@ -2,7 +2,7 @@
 
 Rebuilds the Wiki.js page "Cyber Threat Dashboard" (MS-30 "Cyber threat dashboard v1.0"; in the lab `CTP/run-books/Cyber-Threat-Dashboard`, on `wiki2` Mark McKee's page `CTP/run-books/Cyber-Exploit-Watch`, page id 51) from free public vulnerability and advisory feeds and the triage in Linear, so the page always shows the last 7 days and what needs a person now. Until 2026-11-06 the page was called "Cyber Threat Exploit Watch"; the technical names (binary and group `exploit-watch`, asset folder `exploit-watch/`, document IDs `EW-CTR-…`) keep the old name.
 
-`Lab prototype` · `Local Docker Compose only` · `As of 2026-11-05`
+`Lab prototype` · `Runs in local Docker Compose; GCP deployment built, not deployed` · `As of 2026-11-09`
 
 ## Contents
 
@@ -31,7 +31,7 @@ This repository is a fork of Mark McKee's prototype `mckema/cyber-dashboard` (20
 
 - reads seven feeds: the FR-A1 sources except MISP/CIRCL OSINT, which Mark McKee dropped on 2026-11-03, plus GitHub Advisory;
 - is a single Rust binary, `exploit-watch`;
-- runs against a self-hosted Wiki.js 2.5 in Docker Compose for testing. The production page is on `wiki2.internal.ediphy.io` behind Google Cloud IAP and is not written by this fork yet.
+- runs against a self-hosted Wiki.js 2.5 in Docker Compose for testing. The production page is on `wiki2.internal.ediphy.io` behind Google Cloud IAP and is not written by this fork yet. Since 2026-11-09 the job can run as a Cloud Run Job with its state in Cloud Storage, and `deploy/` holds the Terraform for it; nothing is deployed yet (see [Deployment](#deployment)).
 
 The job also covers the next two MS-30 requirements, FR-A2 (triage every new item: relevant to fairCT or not, with a reason and who decided, within one business day) and FR-A3 (a ticket for each relevant item): it matches items against a component list, files one Linear issue per match and shows the untriaged items and open tickets on the page. See [Triage](#triage).
 
@@ -43,13 +43,14 @@ The job only replaces content inside anchored elements of the page (table bodies
 
 Where each environment stands is in [Deployment](#deployment); decisions behind the plan are in [Decisions](#decisions).
 
-| Item | Requirement | Status (2026-11-05) |
+| Item | Requirement | Status (2026-11-09) |
 |---|---|---|
 | Replace the sample component list with a test list from colleagues (Rust and UI libraries), then the list agreed with Germano | FR-A2 | Waiting for the list |
 | Run `live` against a personal Linear Free workspace, then ask Mark McKee for a sandbox team in Ediphy's Linear | FR-A2, FR-A3, FR-A9 | Personal workspace done on 2026-11-04/05 (18 API and UI checks); sandbox team not requested yet |
 | Monthly and on-demand report to the fairCT COO | FR-A4 | Built in the local lab on 2026-11-05: `report --month` command, month-to-date PDF linked from the page and from `report-serve`. Since 2026-11-06 each month is closed automatically (final PDF frozen and uploaded, review reminder in Linear with a quality-check sample). Where the COO reads it, who reviews it, and the retention period, not agreed yet |
 | Run the lab loop against the Linear test workspace instead of `linear-mock` | FR-A2, FR-A3 | Since 2026-11-06 with `compose.linear-test.yml` (see [Operations](#operations)) |
-| Cloud Run Job, Cloud Scheduler, GCS state, Terraform; write to `wiki2` via IAP | — | Deferred |
+| Cloud Run Job, Cloud Scheduler, GCS state, Terraform; write to `wiki2` via IAP | — | Built and checked offline on 2026-11-09: state in GCS with a lease lock, IAP token and Linear token obtained at runtime, JSON run summary, Terraform in `deploy/` (see [Deployment](#deployment)). Not deployed: waiting for the sandbox project (D1), `wiki2` page, API key and IAP access (D2) and the Linear team (D3) asked of Mark McKee on 2026-11-06 |
+| `report-serve` ("Sync with Linear", "Generate current report") in production | FR-A3, FR-A4 | Lab only; a Cloud Run service behind IAP waits for Mark McKee's answer (walkthrough Q2, 2026-11-06) |
 
 ## Getting started
 
@@ -163,16 +164,78 @@ flowchart TB
 
 ### Deployment
 
-| Environment | Runtime | Wiki | Status (2026-11-05) |
+| Environment | Runtime | Wiki | Status (2026-11-09) |
 |---|---|---|---|
-| Local lab | Docker Compose: `wiki` + `job` + `linear-mock` + `report-serve`, loop every 21600 s (6 h); tracker `live` against `linear-mock`, or since 2026-11-06 against the Linear test workspace with `compose.linear-test.yml` | Wiki.js 2.5.317, page id 1 | Running (against the Linear test workspace since 2026-11-06) |
-| Production | Cloud Scheduler + Cloud Run Job, state in GCS | `wiki2.internal.ediphy.io` via IAP, page id 51 | Decided, not built |
-| Production, FR-A4 monthly report | A second Cloud Scheduler trigger on the 1st at 06:00 Europe/Amsterdam runs the job image as a Cloud Run Job with `report --close-month` (the previous month; the 6-hourly runs close it as well if that trigger failed), with `EW_ENVIRONMENT=production`; report.json, report.pdf, SHA256SUMS, frozen.json and review.json go to a GCS bucket with a retention policy and Bucket Lock (WORM, like S3 Object Lock in compliance mode; locked only once the retention period is agreed); the PDF is shared with the COO from a Google Shared Drive as a link, not as an email attachment | — | Proposed by the ISB Vietnam team (2026-11-06), not built; where the COO reads it is not agreed |
-| Production, FR-A4 on demand | The month-to-date PDF uploaded by each run (as in the lab). The "Generate current report" and "Sync with Linear" buttons would need a Cloud Run service behind IAP that verifies the IAP JWT (`x-goog-iap-jwt-assertion`) and logs who asked, shows a confirm page on GET and refreshes on POST (`Sec-Fetch-Site: same-origin`), and takes a GCS lock (object create with `ifGenerationMatch=0` and a lease) instead of `flock` | — | Proposed, not built |
+| Local lab | Docker Compose: `wiki` + `job` + `linear-mock` + `report-serve`, loop every 21600 s (6 h); tracker `live` against `linear-mock`, or since 2026-11-06 against the Linear test workspace with `compose.linear-test.yml`; since 2026-11-09 optionally state in a GCS emulator with `compose.gcs-emulator.yml` | Wiki.js 2.5.317, page id 1 | Running (against the Linear test workspace since 2026-11-06) |
+| Sandbox (GCP) | One Cloud Run Job (~ECS task on Fargate) started by Cloud Scheduler (~EventBridge Scheduler) every 6 hours (`0 */6 * * *`, Europe/Amsterdam); state in a Cloud Storage (~S3) bucket; Terraform in `deploy/` (see [GCP deployment](#gcp-deployment-terraform)) | `wiki2.internal.ediphy.io` via IAP, a sandbox page (D2) | Built and checked offline (2026-11-09), not deployed: project, page and Linear team not given yet |
+| Production (GCP) | Same as sandbox in its own project (`envs/prod`, created after the sandbox) | `wiki2.internal.ediphy.io` via IAP, page id 51 (walkthrough Q1) | Decided (Mark McKee, 2026-11-03), not built |
+| Production, FR-A4 monthly report | No separate trigger (ISB Vietnam team, 2026-11-09; replaces the second trigger on the 1st at 06:00 proposed on 2026-11-06): the first 6-hourly run of a month (00:00 Europe/Amsterdam on the 1st) closes the previous month, and `EW_ENVIRONMENT=production` drops the data marking. The frozen month's report.json, report.pdf, SHA256SUMS and frozen.json are copied once to a reports bucket with a retention policy, and Bucket Lock (WORM, ~S3 Object Lock in compliance mode) is set only once the retention period is agreed (walkthrough Q4). The PDF is shared with the COO from a Google Shared Drive as a link, not as an email attachment | — | Built (evidence copy, 2026-11-09); retention, reviewer and where the COO reads it not agreed |
+| Production, FR-A4 on demand | The month-to-date PDF uploaded by each run (as in the lab). The "Generate current report" and "Sync with Linear" buttons would need a Cloud Run service behind IAP that verifies the IAP JWT (`x-goog-iap-jwt-assertion`) and logs who asked, shows a confirm page on GET and refreshes on POST (`Sec-Fetch-Site: same-origin`); the GCS lease lock it would take exists since 2026-11-09 | — | Proposed, not built; waits for walkthrough Q2 |
+
+#### GCP deployment (Terraform)
+
+Written and checked offline on 2026-11-09 (`deploy/check.sh` clean); nothing applied. Terraform is run by hand from the operator's machine (ISB Vietnam team, 2026-11-09); CI/CD (GitHub Actions with Workload Identity Federation) comes later. The steps are in [Operations](#deploying-to-gcp).
+
+```text
+deploy/
+├── bootstrap.sh       # once per project: APIs Terraform needs + the tfstate bucket
+├── build-push.sh      # build stack/job, tag = git short sha, push, print the digest ref
+├── check.sh           # offline checks through Docker: fmt, validate, tflint, checkov
+├── .tflint.hcl        # tflint: recommended preset + google ruleset 0.41.0
+├── .checkov.yaml      # checkov: terraform framework; skips only inline, with a reason
+└── terraform/
+    ├── modules/exploit-watch/   # every resource, one file per concern; inputs in variables.tf
+    └── envs/sandbox/            # thin root: backend, provider, module call, tfvars, lock file
+```
+
+Standards (ISB Vietnam team, Henry, 2026-11-09): Google's Terraform best practices (a module plus a thin root per environment, GCS backend with versioning, pinned versions, no secret values in state); tflint with the google ruleset; Checkov, whose GCP checks follow the CIS Google Cloud Platform Foundations Benchmark; least-privilege IAM with two dedicated service accounts and no keys; deploy by digest with immutable tags and Artifact Analysis scanning; 12-factor configuration; symptom-based alerts. Every labelable resource carries `app=exploit-watch`, `env`, `owner=isb-vietnam`, `milestone=ms-30`, `managed-by=terraform`; names follow `<app>-<role>-<env>`. Pinned on 2026-11-09, each at least two weeks old then: Terraform 1.16.7 (`~> 1.16`), provider `hashicorp/google` `~> 8.8.0` (lock file 8.8.1), tflint 0.65.0, Checkov 3.3.30.
+
+| Resource | Name (sandbox) | Notes |
+|---|---|---|
+| Project services | run, cloudscheduler, secretmanager, artifactregistry, containerscanning, storage, logging, monitoring, iam, iamcredentials, cloudresourcemanager; compute with `enable_nat`; cloudkms with `enable_cmek`; billingbudgets with a budget | `disable_on_destroy = false` |
+| Artifact Registry (~ECR) repository | `fairct` | Docker, immutable tags, vulnerability scanning (Artifact Analysis). Cleanup: keep the 20 newest versions, delete untagged after 14 days, delete other versions older than 90 days (keep wins) |
+| State bucket | `exploit-watch-state-sandbox` | Uniform bucket-level access, public access prevention enforced, versioning; keep 3 noncurrent versions, delete them after 30 days |
+| Reports bucket | `exploit-watch-reports-sandbox` | Same baseline without versioning (not allowed with a retention policy); retention `reports_retention_days` (30); Bucket Lock only with `lock_retention = true`, which is irreversible |
+| Secrets (~AWS Secrets Manager), no versions | `exploit-watch-wikijs-api-key-sandbox`, `exploit-watch-linear-client-id-sandbox`, `exploit-watch-linear-client-secret-sandbox`; optional `…-github-token-…`, `…-nvd-api-key-…` | User-managed replication in the region. Values are added with `gcloud secrets versions add`, so they never enter the Terraform state |
+| Service accounts | `exploit-watch-bot-sandbox` (job), `exploit-watch-sched-sandbox` (trigger) | `sched`: service account ids are limited to 30 characters |
+| Cloud Run job | `exploit-watch-sandbox` | Image by digest, args `["run"]`, 1 task, `max_retries = 0`, timeout 1800 s, 1 vCPU / 1 GiB. Created only once `image_digest` is set (phase 2) |
+| Cloud Scheduler job | `exploit-watch-trigger-sandbox` | POST `https://run.googleapis.com/v2/projects/<project>/locations/<region>/jobs/<job>:run` with an OAuth token of the trigger account; `retry_count = 0`, the next schedule is the retry. Phase 2 |
+| Log-based metrics, alert policies, e-mail channels | `exploit-watch-run-success-sandbox`, `exploit-watch-run-degraded-sandbox`, 3 policies | See the alerts below; policies in phase 2 |
+| Optional egress | VPC, /26 subnet (Private Google Access, flow logs), deny-all ingress firewall, Cloud Router, Cloud NAT (~NAT Gateway) with a static IP | `enable_nat = true` (Direct VPC egress, `ALL_TRAFFIC`): only if `wiki2`'s IAP or Cloud Armor admits fixed source IPs (D2) |
+| Optional CMEK | Cloud KMS (~AWS KMS) key ring and key, 90-day rotation | `enable_cmek = true`: both buckets and all secrets |
+| Optional budget | `exploit-watch-budget-sandbox` | `billing_account_id` set; alerts at 50/90/100 % |
+
+The Terraform state bucket `exploit-watch-tfstate-<env>` is created by `bootstrap.sh`, not by Terraform. With `image_digest = null` (phase 1) Terraform creates everything except the job, the trigger, the invoker binding and the alert policies, because the registry the image goes to does not exist before the first apply. A precondition refuses to create the job while an input still contains `TODO-`, and `project_id` is validated at plan.
+
+| Identity | Role | On | Why |
+|---|---|---|---|
+| `exploit-watch-bot-<env>` | `roles/secretmanager.secretAccessor` | each secret | Read the values at execution start |
+| | `roles/storage.objectUser` | state bucket | Read, create, overwrite and delete state objects (caches, cursors, lease) |
+| | `roles/storage.objectCreator` + `roles/storage.objectViewer` | reports bucket | Create and read back; no overwrite or delete, as the retention policy requires |
+| | `roles/iap.httpsResourceAccessor` | `wiki2`'s IAP backend, in the wiki's project | Pass IAP. Not managed here: the wiki owner grants it to the output `bot_service_account_email` |
+| `exploit-watch-sched-<env>` | `roles/run.invoker` | the Cloud Run job only | Contains `run.jobs.run`; `roles/run.developer` is not needed |
+
+No project-level roles: Cloud Run collects stdout and its metrics itself, so `logging.logWriter` and `monitoring.metricWriter` are not granted. The Compute Engine default service account is not used. The operator needs `roles/iam.serviceAccountUser` on both service accounts besides the rights to create the resources.
+
+Job environment set by Terraform: `STATE_DIR=/tmp/state` (in memory, counts against the 1 GiB limit), `STATE_BUCKET`, `STATE_PREFIX=state`, `REPORTS_BUCKET`, `LOG_FORMAT=json`, `EW_ENVIRONMENT` (`test` in sandbox, `production` in prod), `WIKI_BASE`, `WIKI_PAGE_ID`, `WIKI_PUBLIC_URL`, `WIKI_ASSET_FOLDER`, `IAP_AUDIENCE`, `LINEAR_MODE=live`, `LINEAR_API_URL`, `LINEAR_TEAM_ID`, `COMPONENTS_FILE=/etc/exploit-watch/components.toml` (in the image), and the optional `USER_AGENT`, `REVIEW_SAMPLE_SIZE`, `REPORT_REVIEW_ASSIGNEE_ID`, `REPORT_REVIEW_DUE_DAYS`. From Secret Manager (version `latest`): `WIKIJS_API_KEY`, `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, and `GITHUB_TOKEN` / `NVD_API_KEY` when listed in `optional_secrets`. A referenced secret without a version makes the deployment or the execution fail.
+
+Alerts (Cloud Monitoring, ~CloudWatch alarms), built on the `run_summary` line of [Configuration](#configuration) (`LOG_FORMAT`) and Cloud Run's own metrics. The thresholds are a team proposal (2026-11-09):
+
+| Alert | Signal | Condition | Severity |
+|---|---|---|---|
+| No successful run for 7 h | log-based counter: `run_summary` with `result` written or unchanged | absent for 25200 s (protects only after the first successful run) | ERROR |
+| 2 failed executions in 13 h | `run.googleapis.com/job/completed_execution_count`, `result="failed"` | sum over 46800 s > 1 | ERROR |
+| Run with tracker, report or close errors | log-based counter: `tracker_errors > 0` or `report_error` or `close_month_error` | sum over 21600 s > 0 | WARNING |
+
+A failed execution is exit 1 (FATAL, refused publish, crash), exit 75 (lock busy) or a timeout. Notifications go to `alert_emails` (team addresses; the alert channel is not agreed, CTP-273).
+
+`deploy/check.sh` runs every step and exits 1 if one failed; caches go to `deploy/.cache/` (gitignored). Result on 2026-11-09: all passed, Checkov 11 passed, 0 failed, 5 skipped. Skips, each inline with its reason: `CKV_GCP_62` bucket access logging, state and reports buckets (object access is covered by Cloud Audit Logs when the project enables Data Access logs); `CKV_GCP_78` versioning, reports bucket (not allowed with a retention policy, which already blocks overwrite and delete); `CKV_GCP_84` CMEK on the registry (the images hold no customer data); `CKV_GCP_76` IPv6 Private Google Access, egress subnet (IPv4 only).
+
+Outputs: `bot_service_account_email`, `scheduler_service_account_email`, `image_repository`, `state_bucket`, `reports_bucket`, `secret_ids` (for `gcloud secrets versions add`), `job_name` and `scheduler_job_name` (null in phase 1), `nat_ip` (null unless `enable_nat`).
 
 ## How a run works
 
-1. Take the lock `state/run.lock`, so only one run uses `state/` at a time. If another run holds it, stop; a loop run waits for it first (see the table below).
+1. Take the lock `state/run.lock`, so only one run uses `state/` at a time. If another run holds it, stop; a loop run waits for it first (see the table below). With `STATE_BUCKET` set (since 2026-11-09) the lock is a lease object in the bucket, and taking it brings the local mirror of the bucket up to date (see [State](#state)).
 2. Set the window to the last 7 days (UTC).
 3. Call each feed module in order. A module whose `CADENCE` has not elapsed reuses the items of its last successful fetch (`state/items/`).
 4. Merge: CISA KEV and ENISA EUVD rows join by CVE into one "exploited" table; NVD scores fill CVE.org records that have no CNA or CISA-ADP score; CERT-EU and NCSC-NL share one advisory table.
@@ -271,7 +334,7 @@ FR-A4 asks for an "internal resolution report to the fairCT COO: items triaged, 
 - **Output**: `state/reports/<YYYY-MM | month-to-date>/` with `report.json`, `report.pdf` and `SHA256SUMS` (`sha256sum -c` format). `data_sha` (printed in the appendix) is the sha256 of `report.json` without `generated_at`; `content_sha` covers only the content sections (`components`, `status`, `bottom_line`, `attention`, `kpis`, `open_actions`, `resolved`, `outcomes`, `funnel`, `backlog`, `waiting_items`, `exceptions`), so it does not change with the hour alone; ages in whole days and the "over 1 business day" flags change it at most once a day.
 - **On demand, from the page** (option B): each writing run builds the month-to-date report and uploads the PDF as the wiki asset `/exploit-watch/cyber-threat-report-to-date.pdf` when `content_sha` changed or the last upload is 24 hours old (`state/reports/month-to-date/upload.json`). Under the page's status strip (feeds with a coloured dot, last update, KEV catalog), a "Cyber threat report" card says what the report covers and, since 2026-11-06, has two buttons. "Monthly report · `<Month YYYY>`" links to the latest frozen monthly PDF (tooltip "Final, frozen on `<d Mon YYYY>`"), with a small "Review: `<issue>`" link to the review reminder issue; before the first monthly report the card says "First monthly report: 1 `<Mon YYYY>`" instead. "Generate current report" links to `SERVE_PUBLIC_URL/report/month-to-date.pdf` (tooltip "Month to date, fresh from Linear. Not the monthly report.") or, when `SERVE_PUBLIC_URL` is not set, to the uploaded asset with `?v=<content sha>` and its "Current report data as of" time. The card does not say "official": the monthly report is final (frozen), not approved. Wiki.js serves the asset with `Content-Disposition: attachment`. Until 2026-11-06 the card had the buttons "Download report (PDF)" and "Refresh data & download".
 - **On demand, refreshed on click** (option 3b, local lab only): served by `report-serve` (see [Operations](#operations)). "Generate current report" (`GET /report/month-to-date.pdf`) and, since 2026-11-06, "Sync with Linear" (`GET /refresh`) read every issue back from the tracker, build the month-to-date report with tickets as of the click, upload it like option B, and rewrite the Linear section of the page: the two ticket tables, their counters, the four tiles and the "as of" time; when the report fails, the "as of" time comes from the last `report.json` (the stamp and the other tables stay as the last run left them; the page is written only when they changed). The first returns the PDF; the second sends the browser back to the page (`303` to `WIKI_PUBLIC_URL`). Measured on 2026-11-05 against `linear-mock`: 1.5 s; a click during a run waited 12 s for the lock.
-- **Monthly close** (since 2026-11-06; `stack/job/src/report/close.rs`): once a month is over (Europe/Amsterdam), the job freezes its final report, uploads the PDF and files a review reminder in Linear. The same function runs in two places: every writing `run`, right after the month-to-date report, closes the previous month if it is not closed yet (catch-up; the result is the `close_month` entry in `runs.jsonl` and never fails the run), and `report --close-month [--month YYYY-MM]` does it by hand (default: the previous month). Steps: (1) skip with a reason when the month is not over or the event log does not cover it, and skip the freeze when `reports/<YYYY-MM>/frozen.json` exists; (2) draw the quality-check sample, build the month's report with status "Final monthly" and the sample in its appendix, append `report_frozen` and `sample_drawn` to the event log and write `frozen.json`; from then on `report --month <YYYY-MM>` refuses to overwrite the folder; (3) upload the PDF as the wiki asset `/exploit-watch/cyber-threat-report-YYYY-MM.pdf` and record it in `upload.json`; (4) file the review reminder and log `review_issue_created`. A step that failed (wiki or Linear unreachable) is retried by the next call without rebuilding the frozen report; a call after success changes nothing. For MS-30 the PDF is shared with the COO by hand.
+- **Monthly close** (since 2026-11-06; `stack/job/src/report/close.rs`): once a month is over (Europe/Amsterdam), the job freezes its final report, uploads the PDF and files a review reminder in Linear. The same function runs in two places: every writing `run`, right after the month-to-date report, closes the previous month if it is not closed yet (catch-up; the result is the `close_month` entry in `runs.jsonl` and never fails the run), and `report --close-month [--month YYYY-MM]` does it by hand (default: the previous month). Steps: (1) skip with a reason when the month is not over or the event log does not cover it, and skip the freeze when `reports/<YYYY-MM>/frozen.json` exists; (2) draw the quality-check sample, build the month's report with status "Final monthly" and the sample in its appendix, append `report_frozen` and `sample_drawn` to the event log and write `frozen.json`; from then on `report --month <YYYY-MM>` refuses to overwrite the folder; (2b) since 2026-11-09, when `REPORTS_BUCKET` is set, copy the evidence (`report.json`, `report.pdf`, `SHA256SUMS`, `frozen.json`) to `gs://REPORTS_BUCKET/[REPORTS_PREFIX/]YYYY-MM/` with `ifGenerationMatch=0`: an object already there is skipped, never replaced, `archive.json` records the copy, and another error goes to `close_month.archive_error` without stopping the close (`upload.json` and `review.json` are not copied); (3) upload the PDF as the wiki asset `/<WIKI_ASSET_FOLDER>/cyber-threat-report-YYYY-MM.pdf` (default folder `exploit-watch`) and record it in `upload.json`; (4) file the review reminder and log `review_issue_created`. A step that failed (wiki or Linear unreachable) is retried by the next call without rebuilding the frozen report; a call after success changes nothing. For MS-30 the PDF is shared with the COO by hand.
 - **Review reminder**: one Linear issue per month, "Review monthly cyber threat report — `<Month YYYY>`" (with "[TEST] " in front for a test run), created in the team's first workflow state of type `unstarted` (Todo), not in Triage. Its description links the dashboard (`WIKI_PUBLIC_URL`) and the PDF (absolute when `WIKI_PUBLIC_URL` gives the wiki's origin, else the asset path), and has a checklist: check the figures and exceptions, download the PDF, send it to the fairCT COO via the Shared Drive, close the issue. It then lists the quality-check sample as a checklist "Really not relevant?" with a link per item and asks the reviewer to comment on the issue when an item is relevant. Assignee (`REPORT_REVIEW_ASSIGNEE_ID`) and due date (`REPORT_REVIEW_DUE_DAYS` business days after the month's last day) are sent only when set; both stay unset until agreed with Mark McKee. The issue is created idempotently like item issues: a UUID v4 is saved in `review.json` before the first attempt and sent as `IssueCreateInput.id`, and a "conflict on insert of Issue" answer is resolved by reading the issue with `issue(id:)`. The reminder is only a reminder (Henry, 2026-11-06): the job does not read it back, records no reviewer or approval, writes nothing into `triage.json`, and the PDF carries no review stamp. With `LINEAR_MODE=off` no reminder is filed.
 - **Quality-check sample** (a control for the automatic rule-out, which matches by component name only and does not check affected versions): `REVIEW_SAMPLE_SIZE` (default 10) of the month's `decided` events with the decision not relevant by rule; all of them when there are fewer, and the note "No automatically ruled-out items in the period." when there are none. The draw is deterministic: the seed is the sha256 of the month and the sorted candidate keys (one per line), and the keys with the lowest sha256(seed + key) are taken, so a rerun or an auditor gets the same list from the event log. Each item carries its title, vendor / product and source link from `triage.json` while the record is there, otherwise the title and link of its `decided` event, otherwise a link built from the key. The sample is printed in the monthly PDF's appendix ("Quality check sample — automatically ruled-out items"; not in month-to-date reports), saved in `review.json` and listed in the review reminder.
 - **Card data**: `report::latest_monthly()` returns the newest frozen month whose PDF is on the wiki (month, title, asset path, PDF sha256, frozen time, review issue). The PDF sha256 and the review issue are part of the page fingerprint, so a new monthly PDF or reminder rewrites the page.
@@ -312,6 +375,17 @@ export COMPOSE_ENV_FILES=.env,state/linear-test/secrets.env
 docker compose up -d
 ```
 
+**With the state in a GCS emulator** (since 2026-11-09): `compose.gcs-emulator.yml` adds `gcs` (fake-gcs-server 1.52.2, objects in memory) and `gcs-init` (creates the buckets `ew-state` and `ew-reports`), and gives `job` and `report-serve` `STATE_BUCKET`, `REPORTS_BUCKET`, `GCS_ENDPOINT=http://gcs:4443`, `LOG_FORMAT=json` and `STATE_DIR=/tmp/state` inside the container, as on Cloud Run. It builds the image under its own tag `exploit-watch-job:gcs-e2e`, so the lab's running containers keep theirs. The tracker stays `linear-mock`. A writing run would rewrite the lab page, so use `--dry-run` unless the page may change. Checked on 2026-11-09: a first run on empty buckets, a second run from a fresh container that read the 23 objects back (55 s, then 6 s), two runs at once (the second `LOCKED`, exit 75), and a run killed half way (its lease blocked others until `LOCK_TTL_SECONDS`, then the next run took it over).
+
+```bash
+export COMPOSE_PATH_SEPARATOR=:
+export COMPOSE_FILE=compose.yml:compose.gcs-emulator.yml
+docker compose build job
+docker compose up -d --wait gcs
+docker compose run --rm job run --dry-run
+docker compose rm -sf gcs gcs-init                     # empties the buckets
+```
+
 `report --close-month` takes the run lock (waiting up to `LOCK_WAIT_SECONDS`). It exits 0 when the month was closed or nothing was left to do, 1 when the upload or the reminder failed (run it again; it resumes), and 75 when the lock stayed busy. `--now` is for tests only: it acts as if it were that moment, marks the report at least `TEST DATA` and puts `[TEST] ` in front of the reminder title. Use it on a copy of `state/`, because the month it closes stays frozen.
 
 `report-serve` (local lab only) runs the job image as `exploit-watch serve --port 8090` on `127.0.0.1:8090`: `GET /healthz` answers `ok` (its compose healthcheck is `serve --healthcheck`); `GET /report/month-to-date.pdf` refreshes the tickets and returns the PDF. `GET /refresh` (since 2026-11-06) does the same refresh and answers `303 See Other` with `Location: WIKI_PUBLIC_URL` (200 "Refreshed. Go back to the page." when it is not set); within the cooldown, which both routes share, it redirects without refreshing; when the lock stays busy it answers 503 with `Retry-After`; on an error, 500. Within `SERVE_COOLDOWN_SECONDS` (60) of the last refresh it returns the last PDF; it waits up to `SERVE_LOCK_WAIT_SECONDS` (90) for a run that holds `state/run.lock`, and returns the last PDF if the lock stays busy (503 with `Retry-After` when there is none yet). Response headers `X-Report-Refreshed`, `X-Report-Reason` (cooldown, locked, error) and `X-Report-As-Of` say what was served. Each request on either route adds a `mode: "serve"` line with its `route` to `runs.jsonl`. After a code change, `docker compose build job` and `docker compose up -d` recreate both `job` and `report-serve`. `bootstrap` (since 2026-11-05) also grants the bot key `read:assets` and `write:assets` on the `exploit-watch` asset folder and creates that folder; run it once after upgrading.
@@ -319,6 +393,33 @@ docker compose up -d
 `bootstrap` is idempotent: a second run keeps the existing key (`bootstrap ok (.env unchanged)`). After `docker compose down -v` the wiki's admin and key are gone; run `bootstrap` again to recreate them.
 
 Only one `run` uses `state/` at a time. A manual `docker compose run --rm job run` started while the loop's run is in progress prints `LOCKED: …`, records `locked` in `runs.jsonl` and exits 75 without doing anything; run it again once `docker compose logs job` shows the loop's run has finished. If the loop's run starts while a manual run or a `report-serve` refresh holds the lock, the loop tries again every minute for up to `LOCK_WAIT_SECONDS` (15 minutes) before it skips to its next interval (6 hours).
+
+### Deploying to GCP
+
+Written on 2026-11-09, not run yet (no project). What Terraform creates is in [GCP deployment](#gcp-deployment-terraform). Prerequisites: Docker, the gcloud CLI, and Terraform 1.16.x or this Docker form (it uses the operator's Application Default Credentials; on Linux mount `~/.config/gcloud` instead of `$APPDATA/gcloud`):
+
+```bash
+tf() {
+  MSYS_NO_PATHCONV=1 docker run --rm -it \
+    -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
+    -v "$(pwd -W):/work" \
+    -v "$APPDATA/gcloud:/root/.config/gcloud:ro" \
+    -w /work/deploy/terraform/envs/sandbox \
+    hashicorp/terraform:1.16.7 "$@"
+}
+```
+
+1. **Project (D1):** set `project_id` in `deploy/terraform/envs/sandbox/terraform.tfvars`.
+2. **Bootstrap, once:** `gcloud auth login`, then `deploy/bootstrap.sh --project <project_id> --env sandbox`. It enables Service Usage, Cloud Resource Manager and Cloud Storage and creates `gs://exploit-watch-tfstate-sandbox` (versioning, uniform access, public access prevention). If the name is taken, pass `--bucket <name>` and run `terraform init -backend-config="bucket=<name>"`. With `enable_cmek = true` add `--cmek`.
+3. **Phase 1, foundation** (`image_digest = null`): `gcloud auth application-default login`, then `tf init`, `tf plan -out tfplan`, `tf apply tfplan`: APIs, registry, buckets, empty secrets, service accounts, log-based metrics.
+4. **Secret values**, before phase 2 (never in tfvars or the shell history; the ids are in the output `secret_ids`): `gcloud secrets versions add exploit-watch-wikijs-api-key-sandbox --project=<project_id> --data-file=<file>`, the same for `…-linear-client-id-sandbox` and `…-linear-client-secret-sandbox` (and the optional ones before listing them in `optional_secrets`); delete the files afterwards.
+5. **IAP:** the `wiki2` owner grants `roles/iap.httpsResourceAccessor` on the wiki's IAP backend to the output `bot_service_account_email`, in the wiki's project (for example `gcloud iap web add-iam-policy-binding --resource-type=backend-services --service=<backend> --member=serviceAccount:<bot email> --role=roles/iap.httpsResourceAccessor --project=<wiki project>`). A wiki admin creates the page, the asset folder (`WIKI_ASSET_FOLDER`) and the bot key's rights by hand: `bootstrap` logs in with the local strategy and cannot do it behind Google sign-in.
+6. **Image:** `deploy/build-push.sh --project <project_id>`; it refuses uncommitted changes under `stack/job` (unless `--allow-dirty`) and prints `europe-west4-docker.pkg.dev/<project_id>/fairct/exploit-watch@sha256:…`. Check the scan with `gcloud artifacts docker images describe <digest ref> --show-package-vulnerability`.
+7. **D2, D3 and the image:** set `wiki_page_id`, `wiki_public_url`, `iap_audience`, `linear_team_id` and `image_digest`.
+8. **Phase 2, job:** `tf plan -out tfplan`, `tf apply tfplan`: job, trigger, invoker binding, alert policies.
+9. **First run:** `gcloud run jobs execute exploit-watch-sandbox --region europe-west4 --project <project_id> --wait`; logs with `gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="exploit-watch-sandbox"' --project <project_id> --limit 50`. Confirm the `run_summary` line and the page. Pause the schedule with `scheduler_paused = true` or `gcloud scheduler jobs pause exploit-watch-trigger-sandbox --location europe-west4`.
+
+New version: commit, `build-push.sh`, put the printed digest in `image_digest`, plan, apply. Rollback: the previous digest, apply. Teardown (sandbox, `deletion_protection = false` there): empty the buckets first (reports objects only after their retention period), then `tf destroy`; a Cloud KMS key ring cannot be deleted. Prod later: copy `envs/sandbox` to `envs/prod` with its own project, state bucket (`bootstrap.sh --env prod`), `ew_environment = "production"` and `deletion_protection = true`; decide `lock_retention` only once the retention period is agreed. The sandbox starts with empty state; the lab's state is not copied.
 
 ## Configuration
 
@@ -329,19 +430,31 @@ Read from `.env` (created by `bootstrap` from `.env.example`) and the environmen
 | `WIKI_BASE` | `https://wiki2.internal.ediphy.io` (compose: `http://wiki:3000`) | Wiki.js URL |
 | `WIKI_PAGE_ID` | `51` (local bootstrap writes `1`) | Page to update |
 | `WIKIJS_API_KEY` | — | Bot key, sent as `Authorization` |
-| `IAP_ID_TOKEN` | — | Google OIDC token, sent as `Proxy-Authorization` (behind IAP only) |
+| `IAP_ID_TOKEN` | — | Google OIDC ID token, sent as `Proxy-Authorization: Bearer` (behind IAP only). A static override: it expires after about 1 hour and is never refreshed, so use it for a manual run only; takes precedence over `IAP_AUDIENCE` |
+| `IAP_AUDIENCE` | — | Since 2026-11-09: OAuth client ID of the IAP resource in front of Wiki.js. When set (and `IAP_ID_TOKEN` is not), the job asks the metadata server for an ID token for this audience (`…/service-accounts/default/identity?audience=…&format=full`, `Metadata-Flavor: Google`), reads `exp` from it and reuses it until 5 minutes before. Every wiki request uses it: GraphQL, the asset upload and its read-back. The service account needs `roles/iap.httpsResourceAccessor`. Outside Google Cloud it fails with "cannot reach it" |
+| `GCE_METADATA_HOST` | `metadata.google.internal` | Since 2026-11-09: metadata server (`host[:port]`) for the IAP ID token and the GCS access token; always reached without the proxy. Only for tests |
+| `WIKI_ASSET_FOLDER` | `exploit-watch` | Since 2026-11-09: top-level Wiki.js asset folder of the report PDFs (`/<folder>/<file>`): `a-z 0-9 - _`, starting with a letter or digit. `bootstrap` creates it and grants the bot group's asset rules on it, so run `bootstrap` with the same value (it reads the environment first, then `.env`) |
 | `WIKI_ADMIN_EMAIL`, `WIKI_ADMIN_PASSWORD` | `admin@example.com`, generated | Local admin, used by `bootstrap` only |
-| `STATE_DIR` | `./state` | Job state |
+| `STATE_DIR` | `./state` | Job state; with `STATE_BUCKET` the local mirror of the bucket (Cloud Run: `/tmp/state`) |
+| `STATE_BUCKET` | — | Since 2026-11-09: turns on state mode, `STATE_DIR` becomes a mirror of this GCS bucket with write-through and a lease lock (see [State](#state)). Unset: local state and `flock`, unchanged |
+| `STATE_PREFIX` | empty | Object name prefix in `STATE_BUCKET` (`<prefix>/<path under state/>`) |
+| `LOCK_TTL_SECONDS` | `2700` | State mode: lifetime of the run lease; a lease past it is taken over by the next run |
+| `GCS_ENDPOINT` | — (compose with the emulator: `http://gcs:4443`) | GCS base URL of an emulator: no auth, no proxy. Unset: `https://storage.googleapis.com` with an access token from the metadata server (`…/service-accounts/default/token`), cached until 60 s before it expires |
+| `REPORTS_BUCKET`, `REPORTS_PREFIX` | —, empty | Monthly close: copy the frozen month's evidence to `gs://REPORTS_BUCKET/[REPORTS_PREFIX/]YYYY-MM/` (see Monthly close in [Resolution report (FR-A4)](#resolution-report-fr-a4)) |
+| `LOG_FORMAT` | — | Since 2026-11-09: `json` prints one `run_summary` line on stdout for every runs.jsonl line of `run`, which Cloud Logging stores as `jsonPayload`: `{"severity":"INFO\|WARNING\|ERROR","message":"run written","event":"run_summary","result":"written\|unchanged\|would-write\|out\|locked\|fatal\|crash","tracker_errors":0,"report_error":false,"close_month_error":false,"run_at":…,"mode":…,"seconds":…}`. ERROR for fatal and crash; WARNING for locked, tracker errors, a report or upload error, or a close error; INFO otherwise. The alerts in `deploy/` read these fields; other output stays plain text |
 | `INTERVAL_SECONDS` | `21600` | Seconds between runs in the compose loop |
 | `HEARTBEAT_HOURS` | `24` | Rewrite the page after this long without a data change |
 | `CVE_ROW_CAP` | `300` | Rows shown in the CVE table |
 | `GITHUB_TOKEN` | — | Raises the GitHub API limit from 60 to 5,000 requests/h |
 | `NVD_API_KEY` | — | Removes the 6 s pause between NVD pages |
 | `USER_AGENT` | built-in | User-Agent for feed requests; CERT-EU rejects requests without one |
-| `COMPONENTS_FILE` | `stack/job/components.sample.toml` | Component list for the matcher |
+| `COMPONENTS_FILE` | `stack/job/components.sample.toml` | Component list for the matcher. Since 2026-11-09 the image also carries a list at `/etc/exploit-watch/components.toml` (build arg `COMPONENTS_SRC`, default the sample list until the list agreed with Germano exists), for deployments without the repo bind mount |
 | `LINEAR_MODE` | `off` (compose: `live`) | Tracker: `off` or `live` |
 | `LINEAR_API_URL` | `https://api.linear.app/graphql` (compose: `http://linear-mock:8080/graphql`) | Linear GraphQL endpoint |
-| `LINEAR_API_KEY` | — (compose: `lin_api_mock`) | Live mode only. A Linear personal API key (prefix `lin_api_`, sent as `Authorization: <key>`) or an OAuth access token, e.g. from an OAuth app's `client_credentials` grant (prefix `lin_oauth_`, sent as `Authorization: Bearer <token>`). Never written to logs, errors or the page |
+| `LINEAR_API_KEY` | — (compose: `lin_api_mock`) | Live mode only. A Linear personal API key (prefix `lin_api_`, sent as `Authorization: <key>`) or an OAuth access token, e.g. from an OAuth app's `client_credentials` grant (prefix `lin_oauth_`, sent as `Authorization: Bearer <token>`). Never written to logs, errors or the page. Takes precedence over `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` |
+| `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` | — | Since 2026-11-09, live mode when `LINEAR_API_KEY` is unset (set both or neither): OAuth app credentials. Before its first GraphQL call the job posts `grant_type=client_credentials&client_id=…&client_secret=…&scope=<LINEAR_OAUTH_SCOPE>` to the token URL (the request of the test kit's `oauth-token.sh`) and sends the token as `Bearer`. The token stays in memory, shared by every tracker of the process, renewed when less than 5 minutes are left; a 4xx refusal is a configuration error, not retried in that process; 5xx, 429 and network errors are retried at the next call. Secret and token never reach state, logs, errors or the page |
+| `LINEAR_OAUTH_SCOPE` | `read,write,issues:create,comments:create` | Scopes asked for with the client credentials. Linear's documentation says requesting different scopes revokes the app's existing client_credentials tokens: keep it the same wherever the app is used |
+| `LINEAR_TOKEN_URL` | origin of `LINEAR_API_URL` + `/oauth/token` | Token endpoint override (`https://api.linear.app/oauth/token`; `http://linear-mock:8080/oauth/token` in the lab) |
 | `LINEAR_TEAM_ID` | — (compose: `mock-team`) | Live mode only: the team whose Triage inbox receives issues |
 | `LOCK_WAIT_SECONDS` | `900` | Loop (`--every`) and `report --close-month`: how long a run waits for `state/run.lock` held by another run |
 | `EW_ENVIRONMENT` | `lab` | Data marking of report PDFs: `production` none; otherwise `LAB DATA` against `linear-mock`, else `TEST DATA` (since 2026-11-06) |
@@ -354,6 +467,8 @@ Read from `.env` (created by `bootstrap` from `.env.example`) and the environmen
 | `SERVE_COOLDOWN_SECONDS` | `60` | `report-serve`: no new refresh this soon after the last one |
 | `SERVE_LOCK_WAIT_SECONDS` | `90` | `report-serve`: how long a click waits for a run to release the lock |
 | `MOCK_APP_TOKEN` (`linear-mock` only) | — (compose: `lin_oauth_mock`) | OAuth access token the mock accepts as `Authorization: Bearer <token>` besides `MOCK_API_KEY`; must differ from `MOCK_API_KEY` and must not start with `lin_api_`. Set `LINEAR_API_KEY=lin_oauth_mock` in `.env` to exercise the job's Bearer path against the mock |
+| `MOCK_CLIENT_ID`, `MOCK_CLIENT_SECRET` (`linear-mock` only) | — | Since 2026-11-09: the client pair `POST /oauth/token` accepts (client_credentials, form body; set both or neither, only with `MOCK_APP_TOKEN`). The answer is `MOCK_APP_TOKEN` as a Bearer token; errors are OAuth bodies (400 `unsupported_grant_type` or `invalid_request`, 401 `invalid_client`). Expiry, revocation and scopes are not simulated. To test the job's client-credentials path, give the job the same pair and no `LINEAR_API_KEY` |
+| `MOCK_TOKEN_EXPIRES_IN` (`linear-mock` only) | `2592000` (30 days) | `expires_in` of the issued token |
 
 Do not put `$` or quotes in `.env` values: Compose reads the file too.
 
@@ -372,7 +487,8 @@ Do not put `$` or quotes in `.env` values: Compose reads the file too.
 | `triage-events.jsonl` | Since 2026-11-05: every change to `triage.json` as one JSON line (`decided`, `issue_created`, `triaged`, `state_changed`, `field_changed`, `pruned`), each with a stable `id`, `key`, `at` (when it happened) and `ts` (when it was logged). Appended by writing runs only and never pruned; the source for the FR-A4 report and the audit trail. The first writing run after the upgrade writes a `baseline` of every record held at that time, dated from the record (the decision at first sight, triage and closing at the times Linear gave, owner, due date and reason at the record's last change), so history before 2026-11-05 covers only records still in `triage.json` then. About 3 MB a month with the sample list (estimate). Since 2026-11-06 the monthly close also appends `report_frozen`, `sample_drawn` and `review_issue_created` with the key `report:YYYY-MM`; the report ignores them. Since 2026-11-06 a `field_changed` event for the reason also carries `reason_at` (when the comment was written; empty for a duplicate without a comment) |
 | `reports/<YYYY-MM \| month-to-date>/` | Since 2026-11-05: FR-A4 report as `report.json` (times in Amsterdam local time, `as_of` in UTC), `report.pdf` and `SHA256SUMS`; `month-to-date/upload.json` records the last PDF uploaded to the wiki (path, `content_sha`, time). Since 2026-11-06 a closed month also has `frozen.json` (`frozen_at`, `data_sha`, `pdf_sha`, `content_sha`, `marking`, `document_id`, `test_run`; its presence means the folder is final and is not overwritten), `upload.json` (wiki asset path, `pdf_sha`, upload time) and `review.json` (the quality-check sample, the reminder's `create_id` and its issue). See [Resolution report (FR-A4)](#resolution-report-fr-a4) |
 | `linear-mock/issues.json` | Issues held by the `linear-mock` service; editable by hand to simulate triage |
-| `run.lock` | Lock held by the run in progress (advisory `flock`); while held it contains that run's pid, container hostname and start time, otherwise it is empty. Do not delete it |
+| `run.lock` | Lock held by the run in progress (advisory `flock`); while held it contains that run's pid, container hostname and start time, otherwise it is empty. Do not delete it. In state mode the lock is the object `<prefix>/run.lock` instead (see State mode below) |
+| `reports/<YYYY-MM>/archive.json` | Since 2026-11-09, only with `REPORTS_BUCKET`: `bucket`, `objects`, `data_sha`, `archived_at` of the evidence copy; while it does not name the frozen month's `data_sha` and bucket, each close tries the copy again |
 | `runs.jsonl` | One line per run: `result` (`written`, `unchanged`, `would-write`, `out`, `locked`, `fatal`, `crash`), per-feed `status`, `items`, `new`, `baseline`, `lag_max_min`, `lag_median_min`, and `triage` (`components` version and `components_sha256` of the list file, `mode`, `endpoint` in live mode, `new_matched`, `new_not_relevant`, `created`, `recovered`, `commented`, `updated`, `pruned`, `missing_owner`, `missing_due`, `missing_reason`, `missing_actor`, `errors`: one line per tracker error of the run), and on a writing run `report` (`label`, `content_sha`, `data_sha`, `pdf_sha`, `uploaded`, `upload_error`, or `error`). Lines with `mode: "serve"` come from `report-serve`: `result` (`refreshed`, `cooldown`, `locked`, `error`), `seconds`, `updated`, `page_written`, `error`, and since 2026-11-06 `route` (`/report/month-to-date.pdf` or `/refresh`). Writing runs since 2026-11-06 also carry `close_month` (month, and either the reason it was skipped or what was done: `frozen`, `uploaded`, `review`, `events`, errors); `report --close-month` adds a line with `mode: "close-month"` |
 
 Lag is an item's first-seen time minus its first publication time (`published`; a later `updated` time is ignored), in minutes. It is recorded for items new on a run whose publication time has a time of day, and not on a feed's first (baseline) run. It is a metric, not a pass/fail rule (Mark McKee, 2026-11-03).
@@ -380,6 +496,15 @@ Lag is an item's first-seen time minus its first publication time (`published`; 
 `missing_owner` and `missing_due` count open tickets without an assignee or a due date; `missing_reason` counts matched items declined without a reason; `missing_actor` counts matched items out of Triage with no name for who triaged them. Since 2026-11-05 a read-back that comes back without `actor` or `changed` for an issue still out of Triage keeps the earlier values. They are counted from `triage.json` on every run, also when no tracker call is made, for the FR-A4 monthly report.
 
 Every `run` takes the lock, including `--dry-run`, `--out` and each `--every` iteration, because all of them write feed caches, cursors and `runs.jsonl`; only the wiki write is skipped. `bootstrap`, `demo` and `triage --report` do not write `state/` and do not take the lock; `report` writes only `state/reports/` and takes no lock; `report-serve` takes the lock for each refresh. The lock is released when a run ends in any way, including a panic or `docker compose kill`, so it never needs to be cleared by hand.
+
+**State mode** (since 2026-11-09; `stack/job/src/feeds/gcs.rs`, design "mirror + write-through" chosen by Henry on 2026-11-09). With `STATE_BUCKET` set, `STATE_DIR` is a local mirror of `gs://STATE_BUCKET/STATE_PREFIX/` and the code keeps reading local files:
+
+- **Sync** (bucket to mirror): list the prefix page by page, download every object that is new or whose `generation` differs from the one this process last saw, delete local files whose object is gone (files the process never saw in the bucket are left alone). Done at start (`main.rs` calls `state::init()` before every command except `demo`, `bootstrap` and `serve --healthcheck`; a failure is `FATAL`, exit 1) and again each time the lock is taken, so `serve` and `run --every` see other processes' writes. `*.tmp` and `run.lock` are not mirrored.
+- **Write-through**: every write through `state.rs` (`save_json`, `save_bytes`, `mark_seen`, `append_jsonl`, `append_run`, `remove`) is followed at once by an upload of the whole file (GCS objects cannot be appended to) as `uploadType=multipart` with `ifGenerationMatch` set to the generation the process knows (`0` for a new object). The issue create id is saved before the issue is created, so it reaches the bucket before Linear is called.
+- **HTTP 412** means another writer changed the object, so the lock was lost: the write panics ("… was changed by another writer …; the run lock was lost, stopping"), and every later write of that process panics too, so a 412 inside a feed module (whose panic counts as a feed error) still stops the run. Other upload errors, after 3 attempts on network errors, 408, 429 and 5xx, panic as well; the local file is replaced from the bucket at the next sync.
+- **Only the lock holder uploads**: the `locked` line of a run that found the lock busy, `serve`'s cooldown lines, and `report --month`/`--month-to-date` (no lock) stay in the mirror and are replaced at the next sync, with one warning on stderr.
+- **Lease**: the object `<prefix>/run.lock`, created with `ifGenerationMatch=0`, body `{"pid","host","started","expires_at"}` (`host` = `HOSTNAME`, else `CLOUD_RUN_EXECUTION`), `expires_at` = start + `LOCK_TTL_SECONDS` (2700). A busy lease is reported like a held `flock` (exit 75, loop retry and `serve` wait unchanged). A lease past `expires_at` (or past `timeCreated` + TTL when its body cannot be read) is deleted at its generation and the create tried once more ("… expired at …; taking it over"). Dropping the guard deletes it at our generation; a 404 or 412 then is logged and ignored. `LOCKED` messages name `gs://…/run.lock`.
+- **Permissions** of the job's service account: list, get, create, overwrite and delete objects on `STATE_BUCKET`; create and get only on `REPORTS_BUCKET`, which suits a retention policy.
 
 Reset only what you need: deleting `http/` forces full downloads; deleting `cursors/cvelist*` forces a 7-day backfill (about 47 MB); deleting `seen.json` makes the next run a baseline with no lag measured. If a root container created files in `state/`, the job cannot write them; fix with `MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/app" debian:trixie-slim chown -R 1000:1000 /app/state`.
 
@@ -389,10 +514,16 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 
 **Job**
 
-- The run lock is an advisory `flock` on `state/run.lock`. It works across containers on one Docker host, including Docker Desktop's Windows bind mount (verified 2026-11-04), but not across hosts or on object storage; the production design (Cloud Run Job, state in GCS) needs a different lock, for example a GCS object created with an `ifGenerationMatch=0` precondition (not built).
+- Without `STATE_BUCKET` the run lock is an advisory `flock` on `state/run.lock`. It works across containers on one Docker host, including Docker Desktop's Windows bind mount (verified 2026-11-04), but not across hosts or on object storage; state mode uses a GCS lease instead (since 2026-11-09).
+- State mode: the lease is not renewed during a run, so a run longer than `LOCK_TTL_SECONDS` (45 minutes) can be taken over by the next one, and the first then stops with a 412 at its next write. A process that dies (out of memory, task timeout, SIGKILL) leaves its lease until `expires_at`; runs before then report `LOCKED` (exit 75). With a 6-hour schedule the next scheduled run is not affected.
+- State mode: a process that dies after a local write but before its upload loses that write; the bucket keeps the previous version. Each file is consistent on its own, but there is no transaction across files: a run killed half way can leave `triage.json` updated and `triage-events.jsonl` not, as a killed run does with local state.
+- State mode: every write uploads the whole file, and `runs.jsonl` and `triage-events.jsonl` are never pruned, so each append costs their full size in upload (about 3 MB a month for the event log, estimate). A start-up sync runs without the lock and does not pin each download to the listed generation: a file written in between fails the next write with 412 rather than being overwritten.
+- fake-gcs-server 1.52.2 honours `ifGenerationMatch` only on multipart uploads (the only kind the job uses) and ignores it on DELETE (checked 2026-11-09), so in `compose.gcs-emulator.yml` a stale-lease takeover or a release could delete a lease that changed meanwhile; real GCS checks it, and unit tests cover it.
+- With `LOG_FORMAT=json` only the `run_summary` line is JSON; the other output is plain text, which Cloud Logging stores as `textPayload` without a severity.
 
 **Wiki.js**
 
+- Behind IAP the job sends a metadata-server ID token for `IAP_AUDIENCE` (since 2026-11-09). If `wiki2`'s IAP uses a Google-managed OAuth client, programmatic access may need a JWT signed by the service account (IAM Credentials `signJwt`) with the resource URL as audience instead; not built (`wiki/iap.rs` has room for it as another token source). Whether `wiki2.internal.ediphy.io` is reachable from the internet through IAP or only from a private network is not known (2026-11-09); the Terraform assumes the former.
 - The HTML sanitiser strips `<style>`, `<script>` and `<link>` and mangles long inline `style` attributes, so the page has no JavaScript and no inline styles.
 - `pages.single` checks `manage:pages`, not `read:pages`. The bot key's group has `read:pages`/`write:pages` on `CTP/run-books/` and `manage:pages` on this page only.
 - A wrong key does not return 401: an unknown key reads as guest (HTTP 200, "not authorized"); a revoked key or a disabled API returns HTTP 500.
@@ -434,7 +565,8 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 - A wrong `LINEAR_TEAM_ID`, or a key not scoped to that team, gets HTTP 200 with `INPUT_ERROR` "Entity not found: Team" from Linear, not `FORBIDDEN`; the error on the Linear status in the Linear heading names both causes, and the run stops creating issues at the first one, as for `FORBIDDEN`.
 - Issue references in `state/triage.json` belong to one tracker. Before pointing `LINEAR_API_URL` at another endpoint (mock to real Linear or back), or when resetting `state/linear-mock/`, move `state/triage.json` aside too. Otherwise a comment on an issue the endpoint does not have fails on every run until that item leaves the 7-day window, and the issue keeps its last known state. Before 2026-11-05 the first such error also stopped the read-back of every other issue.
 - A hand edit to `state/linear-mock/issues.json` reaches the page on the next writing run: within 6 hours in the loop, or now with `docker compose run --rm job run`. Put a decline reason in `reason`; `comments` holds the job's own comments.
-- The job does not obtain or refresh OAuth tokens. A `client_credentials` access token lasts 30 days; after that every Linear call fails with `AUTHENTICATION_ERROR` (shown on the Linear status in the Linear heading and in `runs.jsonl`; the run itself does not fail) until `LINEAR_API_KEY` is replaced with a new token.
+- With `LINEAR_API_KEY` the job does not obtain or refresh tokens: a `client_credentials` access token lasts 30 days, after which every Linear call fails with `AUTHENTICATION_ERROR` (shown on the Linear status in the Linear heading and in `runs.jsonl`; the run itself does not fail) until it is replaced. Since 2026-11-09 the job obtains its own token from `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET`, one per process.
+- Whether issuing a new client_credentials token (same scopes) revokes the previous one is not verified (2026-11-09). If it does, a long-running `serve` and a scheduled run with the same app would revoke each other's tokens, and the older process's next call fails with `AUTHENTICATION_ERROR`; the job does not retry with a new token then.
 - `linear-mock` checks only the header form of the OAuth token; it does not simulate token issuance, expiry, revocation or scopes.
 
 **Resolution report (FR-A4)**
@@ -451,7 +583,7 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 - The assessment time of a decline is that of its first reason; a later comment that replaces the reason does not move it, and a deleted reason makes the item wait again. An issue declined without a reason and later accepted counts as assessed at its first `triagedAt`, and the funnel still counts it as ruled out by a person (by its first triage state). An issue moved back to Triage counts as waiting, not assessed (before 2026-11-06 it counted as both).
 - In the lab the event log starts on 2026-11-05 (against the Linear test workspace, on 2026-11-06), so November 2026 is closed on 1 December with the "Partial history" notice. On the first writing run with a new state the month-to-date report is refused once, because the event log is created later in that run than the report's cut-off; the next run builds it.
 - Two things are tested only against `linear-mock` and in unit tests, not on the real Linear workspace: the `StateByType` lookup, and creating an issue in the `unstarted` state with `assigneeId` and `dueDate`.
-- `report --close-month` and the runs share the `flock` on `state/run.lock`. In production (GCS) this needs the lock proposed in Deployment; otherwise a scheduler run and a 6-hourly run closing the same month at the same moment could file two reminders.
+- `report --close-month` and the runs share the run lock (`flock`, or the GCS lease in state mode since 2026-11-09), so two closes of the same month cannot run at once. In GCP there is no separate close trigger: the first run of the month closes it.
 - `report-serve` is single-threaded: while a refresh runs, `/healthz` and other clicks wait. Its cooldown is kept in memory and resets on restart. A click that changes the ticket tables writes one more page version (see `--purge-history`). Its GETs (`/report/month-to-date.pdf`, `/refresh`) have side effects and it has no authentication: lab only (see [Deployment](#deployment)).
 - The month-to-date PDF is a wiki asset: anyone who can read the wiki can download it (guests have `read:assets` on the lab wiki), an upload overwrites it with no history, and uploads are limited to 5 MB (Wiki.js `uploads.maxFileSize`). Wiki.js answers `ok` to an upload even when it failed to save, so the job reads the file back and compares it.
 - The job image carries the typst CLI (about 56 MB; the image grew from 141 MB to 223 MB on 2026-11-05; 221 MB on Debian trixie, 2026-11-06).
@@ -461,6 +593,8 @@ Found by testing against Wiki.js 2.5.317 and the live feeds on 2026-11-03.
 ```text
 compose.yml                 all services: wiki (Wiki.js 2.x), job, linear-mock; one folder each in stack/
 compose.linear-test.yml     overlay: job and report-serve against the Linear test workspace (see Operations)
+compose.gcs-emulator.yml    overlay: state in a GCS emulator, as on Cloud Run (see Operations)
+deploy/                     Terraform and scripts for GCP (see GCP deployment)
 stack/wiki/page/            skeleton.html (page content with anchor ids), style.css (scriptCss)
 stack/job/Cargo.toml        crate exploit-watch (Rust 1.99, edition 2024), with Cargo.lock
 stack/job/src/              the crate's source
@@ -469,7 +603,10 @@ stack/job/src/report/       FR-A4 report: event-log reading, sections, report.ty
 stack/job/src/serve.rs      report-serve (lab): refresh tickets and download the report on click
 stack/job/Dockerfile        build on rust:1.99.1-slim-trixie, run on debian:trixie-slim as uid 1000;
                             a separate stage downloads typst 0.15.1 (sha256-checked) into the image
-stack/job/Dockerfile.dockerignore   build context: Cargo.toml, Cargo.lock, src/ only
+stack/job/Dockerfile.dockerignore   build context: Cargo.toml, Cargo.lock, src/ and the component lists only
+stack/job/src/feeds/gcs.rs  state mode: GCS client (no SDK), mirror, lease
+stack/job/src/wiki/iap.rs   IAP ID token source; triage/linear_oauth.rs: Linear client_credentials
+stack/job/src/logjson.rs    run_summary JSON line (LOG_FORMAT=json)
 stack/job/components.sample.toml    sample component list for triage
 stack/linear-mock/          crate linear-mock (local stand-in for the Linear API), with its own Cargo.lock and Dockerfile
 ```
@@ -485,6 +622,8 @@ MSYS_NO_PATHCONV=1 docker run --rm -e HTTP_PROXY=$HTTP_PROXY -e HTTPS_PROXY=$HTT
 ```
 
 For `linear-mock`, use `-w /src/stack/linear-mock` and a separate target volume (`-v ew-target-mock:/target`). After changing either crate, rebuild its image: `docker compose build job` or `docker compose build linear-mock`.
+
+The GCS round trip against the emulator is an ignored test: start fake-gcs-server on the test container's network and run `EW_GCS_EMULATOR=http://<host>:4443 cargo test -- --ignored gcs::tests::emulator_roundtrip`. After a change under `deploy/`, run `deploy/check.sh` (fmt, validate, tflint, checkov, all through Docker).
 
 The test container has no typst, so the test that renders a report PDF is `#[ignore]`d; to run it, mount a typst 0.15.1 binary and set `TYPST_BIN`, then pass `-- --ignored report`. To look at a PDF without a test, run `docker compose run --rm job report --month-to-date` and open `state/reports/month-to-date/report.pdf`.
 
@@ -539,3 +678,11 @@ To add a feed, write a module in `stack/job/src/feeds/` that follows the contrac
 | 2026-11-06 | The tracker's status moves from the last row of Feed health to the Linear heading ("Linear connected" / "Linear error: …" next to "Sync with Linear"); the five feed tiles name their sources and link to their tables; even spacing (20 px around the report card, 44 px above and below each top-level part) | ISB Vietnam team (Henry) | Decided, applied |
 | 2026-11-06 | The Linear section keeps the two "now" tiles only (the month figures are in the report PDF); "Generate current report" saves as `cyber-threat-report-YYYY-MM-DD-HHMM.pdf`, the data's "as of" time | ISB Vietnam team (Henry) | Decided, applied |
 | 2026-11-06 | Page name "Cyber Threat Dashboard" (after MS-30 "Cyber threat dashboard v1.0") instead of "Cyber Threat Exploit Watch": masthead, Wiki.js title and description, lab path `CTP/run-books/Cyber-Threat-Dashboard` (bootstrap moves the old page, same id), PDF author, review reminder text. Technical names keep `exploit-watch`; the production page on `wiki2` (Mark McKee's, page id 51) is his to rename | ISB Vietnam team (Henry) | Decided, applied in the lab |
+| 2026-11-09 | Make the job GCP-ready before the MS-30 date (2026-11-16) without waiting for project access: code and Terraform built and tested locally (GCS emulator), the sandbox deployed once Mark McKee answers D1–D3, production after Q1 and D1–D3; the demo runs in the lab | ISB Vietnam team (Henry) | Decided, applied |
+| 2026-11-09 | State in GCS as a local mirror with write-through (each write uploads the whole file with `ifGenerationMatch`) and a lease lock (`run.lock` object created with `ifGenerationMatch=0`, 45-minute TTL), chosen over a storage backend that reads every file over the network and over a gcsfuse mount (no atomic rename or append, still needs its own lock) | ISB Vietnam team (Henry) | Decided, applied |
+| 2026-11-09 | One Cloud Run Job every 6 hours (`0 */6 * * *`, Europe/Amsterdam); the first run of a month closes the previous one. Replaces the two jobs (runs at `30 */6`, a close at 06:00 on the 1st) in the sandbox request of 2026-11-06, which were proposals | ISB Vietnam team (Henry) | Decided, applied in `deploy/` |
+| 2026-11-09 | Infrastructure as Terraform run by hand (module plus a thin root per environment, GCS backend), images built and pushed by `deploy/build-push.sh`, deploy by digest; CI/CD with GitHub Actions and Workload Identity Federation later, with MS-32 | ISB Vietnam team (Henry) | Decided, applied |
+| 2026-11-09 | Standards for `deploy/`: Google's Terraform best practices, tflint and Checkov (CIS GCP mapping) in `deploy/check.sh`, least-privilege IAM without keys, immutable tags with Artifact Analysis scanning, 12-factor configuration, symptom-based alerts, five mandatory labels. Not now: Cloud Foundation Toolkit modules, pre-commit, CMEK (variable, off), distroless, SBOM, SLSA with signing and Binary Authorization, Renovate, OpenTelemetry | ISB Vietnam team (Henry) | Decided, applied |
+| 2026-11-09 | Cloud NAT with a static IP only when `wiki2`'s IAP or Cloud Armor admits fixed source IPs (`enable_nat`, off); the sandbox request of 2026-11-06 asked for it | ISB Vietnam team | Decided |
+| 2026-11-09 | The job obtains its own credentials at runtime: the IAP ID token from the metadata server (`IAP_AUDIENCE`) and a Linear token from the OAuth app's client credentials, one per process; static `IAP_ID_TOKEN` and `LINEAR_API_KEY` stay as overrides | ISB Vietnam team | Decided, applied |
+| 2026-11-09 | `report-serve` stays lab-only until Mark McKee answers walkthrough Q2 | ISB Vietnam team | Decided |

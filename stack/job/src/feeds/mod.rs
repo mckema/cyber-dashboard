@@ -4,6 +4,7 @@
 //! whose failure aborts the run (nothing is written).
 
 pub mod common;
+pub mod gcs;
 pub mod state;
 
 pub mod certeu;

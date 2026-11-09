@@ -7,8 +7,9 @@
 //!
 //! HTTP
 //!
-//!   GET  /health    200 "ok" (no auth)
-//!   POST /graphql   JSON {"query": "...", "variables": {...}}
+//!   GET  /health        200 "ok" (no auth)
+//!   POST /graphql       JSON {"query": "...", "variables": {...}}
+//!   POST /oauth/token   client_credentials grant (form body, see OAuth token below)
 //!   anything else   404
 //!
 //! Auth: two credentials, mirroring Linear's two header forms.
@@ -21,9 +22,9 @@
 //!
 //! Anything else is HTTP 401 with Linear's error body (extensions.code
 //! AUTHENTICATION_ERROR). Both credentials can do everything; the log line says
-//! which one a request used ("as user" / "as app"). Token issuance, expiry,
-//! revocation and scopes are not simulated, and the data is the same whichever
-//! credential wrote it: comments still show as written by "exploit-watch bot",
+//! which one a request used ("as user" / "as app"). Token expiry, revocation and
+//! scopes are not simulated (POST /oauth/token always hands out the same token),
+//! and the data is the same whichever credential wrote it: comments still show as written by "exploit-watch bot",
 //! and no history node or botActor is produced for what the app created.
 //!
 //! Operations (dispatch on the trimmed start of `query`):
@@ -166,22 +167,35 @@
 //!   MOCK_APP_TOKEN  optional; an OAuth access token clients send as "Bearer <token>".
 //!                   Must differ from MOCK_API_KEY and must not start with
 //!                   "lin_api_" (the job sends such values bare, as personal keys)
+//!   MOCK_CLIENT_ID, MOCK_CLIENT_SECRET   optional, both or neither, and only
+//!                   with MOCK_APP_TOKEN: the OAuth app credentials POST /oauth/token accepts
+//!   MOCK_TOKEN_EXPIRES_IN  default 2592000 (30 days, as Linear): expires_in of the token
 //!   MOCK_TEAM_ID    required; the only team id that exists
 //!   MOCK_DATA_DIR   default /data
 //!   PORT            default 8080; the server listens on 0.0.0.0
+//!
+//! OAuth token: POST /oauth/token with an application/x-www-form-urlencoded body
+//! grant_type=client_credentials, client_id, client_secret, scope (optional), as
+//! Linear's token endpoint takes it. The right MOCK_CLIENT_ID/MOCK_CLIENT_SECRET
+//! pair gets 200 {"access_token": MOCK_APP_TOKEN, "token_type": "Bearer",
+//! "expires_in": MOCK_TOKEN_EXPIRES_IN, "scope": <as asked, default "read">}.
+//! Errors are OAuth error bodies {"error", "error_description"}: HTTP 400
+//! unsupported_grant_type (any other grant) or invalid_request (a field missing),
+//! HTTP 401 invalid_client (wrong pair, or the mock has no client configured).
 //!
 //! `linear-mock healthcheck` GETs http://127.0.0.1:$PORT/health and exits 0 when
 //! it answers 200, 1 otherwise (the runtime image has no curl or wget).
 //!
 //! Logging: one line per request on stdout (time, method, path, operation,
-//! credential kind, result, HTTP status). The API key and the app token are
-//! never logged.
+//! credential kind, result, HTTP status). The API key, the app token and the
+//! client secret are never logged.
 //!
 //! Not simulated: rate limits (HTTP 429 / RATELIMITED, X-RateLimit-* headers),
 //! pagination (`first` and nested `first` are ignored, all matches are
 //! returned), archived issues, any other query or mutation, other workflow
 //! states or teams, comment authors other than the two above, the OAuth flow
-//! itself (token endpoint, expiry, refresh, scopes, app attribution), moves
+//! beyond the client_credentials token (authorization code, expiry, refresh,
+//! revocation, scopes, app attribution), moves
 //! after the triage other than accepted-canceled (one history entry per issue,
 //! two for accepted-canceled), startedAt, Snooze (snoozedUntilAt) and the
 //! duplicate relation to the canonical issue.
@@ -222,7 +236,14 @@ pub struct Config {
     pub app_token: Option<String>,
     pub team_id: String,
     pub data_dir: PathBuf,
+    /// MOCK_CLIENT_ID + MOCK_CLIENT_SECRET: what POST /oauth/token accepts; None = no client.
+    pub oauth_client: Option<(String, String)>,
+    /// MOCK_TOKEN_EXPIRES_IN: `expires_in` of the issued token.
+    pub token_expires_in: u64,
 }
+
+/// Default MOCK_TOKEN_EXPIRES_IN: 30 days, the life of a Linear client_credentials token.
+const DEFAULT_TOKEN_EXPIRES_IN: u64 = 30 * 86_400;
 
 impl Config {
     /// Errors name the variable, never its value.
@@ -239,11 +260,24 @@ impl Config {
                                     values bare, as personal API keys, never as \"Bearer <token>\""));
             }
         }
+        let optional = |k: &str| get(k).filter(|v| !v.is_empty());
+        let oauth_client = match (optional("MOCK_CLIENT_ID"), optional("MOCK_CLIENT_SECRET")) {
+            (None, None) => None,
+            (Some(id), Some(secret)) if app_token.is_some() => Some((id, secret)),
+            (Some(_), Some(_)) => return Err("MOCK_CLIENT_ID needs MOCK_APP_TOKEN: it is the token /oauth/token issues".into()),
+            _ => return Err("MOCK_CLIENT_ID and MOCK_CLIENT_SECRET go together: set both or neither".into()),
+        };
+        let token_expires_in = match optional("MOCK_TOKEN_EXPIRES_IN") {
+            None => DEFAULT_TOKEN_EXPIRES_IN,
+            Some(v) => v.parse().map_err(|_| format!("MOCK_TOKEN_EXPIRES_IN={v:?} is not a number of seconds"))?,
+        };
         Ok(Self {
             api_key,
             app_token,
             team_id: required("MOCK_TEAM_ID")?,
             data_dir: get("MOCK_DATA_DIR").filter(|v| !v.is_empty()).unwrap_or_else(|| "/data".into()).into(),
+            oauth_client,
+            token_expires_in,
         })
     }
 }
@@ -521,7 +555,77 @@ pub fn handle(method: &str, url: &str, auth: Option<&str>, body: &[u8], cfg: &Co
     match (method, path) {
         ("GET", "/health") => Reply::text(200, "ok", "health"),
         ("POST", "/graphql") => graphql(auth, body, cfg, now),
+        ("POST", "/oauth/token") => oauth_token(body, cfg),
         _ => Reply::text(404, "not found", "not found"),
+    }
+}
+
+/// Value of one application/x-www-form-urlencoded field ("+" is a space, %XX a byte).
+fn form_decode(s: &str) -> String {
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let escaped = (b[i] == b'%' && i + 2 < b.len()).then(|| Some(hex(b[i + 1])? << 4 | hex(b[i + 2])?)).flatten();
+        match (b[i], escaped) {
+            (_, Some(v)) => {
+                out.push(v);
+                i += 2;
+            }
+            (b'+', None) => out.push(b' '),
+            (c, None) => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The fields of a form body (the last of a repeated name wins).
+fn form_fields(body: &[u8]) -> Map<String, Value> {
+    let text = String::from_utf8_lossy(body);
+    let mut m = Map::new();
+    for pair in text.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        m.insert(form_decode(k), Value::String(form_decode(v)));
+    }
+    m
+}
+
+/// POST /oauth/token: the client_credentials grant (module doc). Logs never hold the secret or the token.
+fn oauth_token(body: &[u8], cfg: &Config) -> Reply {
+    let f = form_fields(body);
+    let field = |k: &str| f.get(k).and_then(Value::as_str).unwrap_or("");
+    let error = |status: u16, code: &str, description: &str, log: String| Reply {
+        status,
+        body: json!({"error": code, "error_description": description}).to_string(),
+        json: true,
+        log: format!("oauth token refused: {log}"),
+    };
+    let grant = field("grant_type");
+    if grant != "client_credentials" {
+        return error(400, "unsupported_grant_type", "linear-mock only supports grant_type=client_credentials",
+                     format!("grant_type {:?}", grant.chars().take(40).collect::<String>()));
+    }
+    if field("client_id").is_empty() || field("client_secret").is_empty() {
+        return error(400, "invalid_request", "client_id and client_secret are required", "client_id or client_secret missing".into());
+    }
+    let (Some((id, secret)), Some(token)) = (&cfg.oauth_client, &cfg.app_token) else {
+        return error(401, "invalid_client", "Client authentication failed", "MOCK_CLIENT_ID is not set".into());
+    };
+    if field("client_id") != id || field("client_secret") != secret {
+        return error(401, "invalid_client", "Client authentication failed", "wrong client credentials".into());
+    }
+    let scope = match field("scope") {
+        "" => "read",
+        s => s,
+    };
+    Reply {
+        status: 200,
+        body: json!({"access_token": token, "token_type": "Bearer", "expires_in": cfg.token_expires_in, "scope": scope})
+            .to_string(),
+        json: true,
+        log: format!("oauth token issued (client_credentials, scope {:?})", scope.chars().take(80).collect::<String>()),
     }
 }
 
@@ -958,6 +1062,8 @@ mod tests {
     const KEY: &str = "lin_api_test";
     const APP: &str = "lin_oauth_test";
     const TEAM: &str = "team-1";
+    const CLIENT_ID: &str = "mock-client";
+    const CLIENT_SECRET: &str = "mock-secret+/=";
 
     // The documents exactly as the job sends them (src/triage/tracker.rs, 2026-11-04;
     // IssueById 2026-11-05; IssueStates with the four timestamps 2026-11-05).
@@ -1014,7 +1120,8 @@ mod tests {
             Self(p)
         }
         fn cfg(&self) -> Config {
-            Config { api_key: KEY.into(), app_token: Some(APP.into()), team_id: TEAM.into(), data_dir: self.0.clone() }
+            Config { api_key: KEY.into(), app_token: Some(APP.into()), team_id: TEAM.into(), data_dir: self.0.clone(),
+                     oauth_client: Some((CLIENT_ID.into(), CLIENT_SECRET.into())), token_expires_in: DEFAULT_TOKEN_EXPIRES_IN }
         }
         fn file(&self) -> PathBuf {
             self.0.join(DATA_FILE)
@@ -1135,6 +1242,71 @@ mod tests {
         assert!(r.log.starts_with("TriageState as app ok"), "{}", r.log);
         let r = handle("POST", "/graphql", Some(KEY), body.as_bytes(), &cfg, NOW);
         assert!(r.log.starts_with("TriageState as user ok"), "{}", r.log);
+    }
+
+    // ------------------------------------------------ POST /oauth/token (client_credentials)
+
+    /// The form the job sends (triage/linear_oauth.rs), with the mock's client pair.
+    fn token_form(id: &str, secret: &str) -> String {
+        format!("grant_type=client_credentials&client_id={id}&client_secret={}&scope=read%2Cwrite%2Cissues%3Acreate%2Ccomments%3Acreate",
+                secret.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D"))
+    }
+
+    fn token(cfg: &Config, body: &str) -> (u16, Value, String) {
+        let r = handle("POST", "/oauth/token", None, body.as_bytes(), cfg, NOW);
+        assert!(r.json);
+        assert!(!r.log.contains(CLIENT_SECRET) && !r.log.contains("mock-secret") && !r.log.contains(APP),
+                "log must not hold a secret: {}", r.log);
+        (r.status, serde_json::from_str(&r.body).unwrap(), r.log)
+    }
+
+    #[test]
+    fn oauth_token_issues_the_app_token() {
+        let d = TestDir::new();
+        let cfg = d.cfg();
+        let (status, v, log) = token(&cfg, &token_form(CLIENT_ID, CLIENT_SECRET));
+        assert_eq!(status, 200);
+        assert_eq!(v, json!({"access_token": APP, "token_type": "Bearer", "expires_in": 2_592_000,
+                             "scope": "read,write,issues:create,comments:create"}));
+        assert_eq!(log, "oauth token issued (client_credentials, scope \"read,write,issues:create,comments:create\")");
+        // The issued token works on /graphql as the app.
+        let bearer = format!("Bearer {}", v["access_token"].as_str().unwrap());
+        assert_eq!(authenticate(Some(&bearer), &cfg), Ok(Caller::App));
+        // No scope asked: "read"; MOCK_TOKEN_EXPIRES_IN is passed through.
+        let short = Config { token_expires_in: 90, ..cfg.clone() };
+        let (_, v, _) = token(&short, &format!("grant_type=client_credentials&client_id={CLIENT_ID}&client_secret={}",
+                                                CLIENT_SECRET.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D")));
+        assert_eq!((v["scope"].clone(), v["expires_in"].clone()), (json!("read"), json!(90)));
+        assert!(!d.file().exists(), "issuing a token writes nothing");
+    }
+
+    #[test]
+    fn oauth_token_errors_are_oauth_bodies() {
+        let cfg = TestDir::new().cfg();
+        let err = |body: &str| {
+            let (status, v, log) = token(&cfg, body);
+            (status, v["error"].as_str().unwrap_or("").to_string(), log)
+        };
+        assert_eq!(err(&token_form(CLIENT_ID, "wrong")), (401, "invalid_client".into(), "oauth token refused: wrong client credentials".into()));
+        assert_eq!(err(&token_form("other", CLIENT_SECRET)).0, 401);
+        assert_eq!(err(&token_form(CLIENT_ID, CLIENT_SECRET).replace("client_credentials", "authorization_code")).1,
+                   "unsupported_grant_type");
+        assert_eq!(err("").1, "unsupported_grant_type");
+        assert_eq!(err("grant_type=client_credentials&client_id=x").1, "invalid_request");
+        // Unescaped "+" in the secret is a space, so it does not match.
+        assert_eq!(err(&format!("grant_type=client_credentials&client_id={CLIENT_ID}&client_secret={CLIENT_SECRET}")).0, 401);
+        let no_client = Config { oauth_client: None, ..cfg.clone() };
+        let (status, v, log) = token(&no_client, &token_form(CLIENT_ID, CLIENT_SECRET));
+        assert_eq!((status, v["error"].as_str()), (401, Some("invalid_client")));
+        assert_eq!(log, "oauth token refused: MOCK_CLIENT_ID is not set");
+        assert_eq!(handle("GET", "/oauth/token", None, b"", &cfg, NOW).status, 404);
+    }
+
+    #[test]
+    fn form_decoding() {
+        assert_eq!(form_decode("a+b%2B%2f%3D%zz%4"), "a b+/=%zz%4");
+        let f = form_fields(b"x=1&y=&z&x=2&k%20e=v%26");
+        assert_eq!(Value::Object(f), json!({"x": "2", "y": "", "z": "", "k e": "v&"}));
     }
 
     #[test]
@@ -1700,6 +1872,23 @@ mod tests {
         assert!(same.contains("must differ") && !same.contains("lin_api_k"), "{same}");
         let personal = app("lin_api_other").unwrap_err();
         assert!(personal.contains("must not start with") && !personal.contains("other"), "{personal}");
+        assert_eq!((c.oauth_client.clone(), c.token_expires_in), (None, 2_592_000), "no OAuth client by default");
+        let oauth = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            Config::from_vars(&move |k: &str| match k {
+                "MOCK_API_KEY" => Some("lin_api_k".into()),
+                "MOCK_TEAM_ID" => Some("t".into()),
+                _ => pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()),
+            })
+        };
+        let c = oauth(&[("MOCK_APP_TOKEN", "lin_oauth_a"), ("MOCK_CLIENT_ID", "id"), ("MOCK_CLIENT_SECRET", "sec"),
+                        ("MOCK_TOKEN_EXPIRES_IN", "120")]).unwrap();
+        assert_eq!((c.oauth_client, c.token_expires_in), (Some(("id".into(), "sec".into())), 120));
+        let e = oauth(&[("MOCK_CLIENT_ID", "id"), ("MOCK_CLIENT_SECRET", "sec")]).unwrap_err();
+        assert!(e.contains("needs MOCK_APP_TOKEN") && !e.contains("sec\""), "{e}");
+        let e = oauth(&[("MOCK_APP_TOKEN", "lin_oauth_a"), ("MOCK_CLIENT_ID", "id")]).unwrap_err();
+        assert!(e.contains("set both or neither"), "{e}");
+        assert!(oauth(&[("MOCK_TOKEN_EXPIRES_IN", "soon")]).unwrap_err().contains("MOCK_TOKEN_EXPIRES_IN"));
         assert_eq!(port_from(&vars(&[])), Ok(8080));
         assert_eq!(port_from(&vars(&[("PORT", "9000")])), Ok(9000));
         assert!(port_from(&vars(&[("PORT", "x")])).is_err());

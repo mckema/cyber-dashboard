@@ -46,6 +46,10 @@
 //!   REPORT_REVIEW_ASSIGNEE_ID  Linear user id of the reviewer (default: none)
 //!   REPORT_REVIEW_DUE_DAYS     due date: business days (Mon-Fri, Amsterdam) after the
 //!                              month's last day (default: none)
+//!   REPORTS_BUCKET             copy the frozen month's evidence to this GCS bucket
+//!                              (archive(); default: none, no copy)
+//!   REPORTS_PREFIX             object name prefix in REPORTS_BUCKET (default: none)
+//!   GCS_ENDPOINT, GCE_METADATA_HOST  GCS endpoint and auth (feeds/gcs.rs)
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc, Weekday};
 use serde::Serialize;
@@ -61,6 +65,11 @@ use crate::triage::tracker::{self, IssueRef, TaskSpec, Tracker, TrackerError, ne
 pub const FROZEN: &str = "frozen.json";
 pub const REVIEW: &str = "review.json";
 pub const UPLOAD: &str = "upload.json";
+/// Where the evidence copy to REPORTS_BUCKET went (see archive()).
+pub const ARCHIVE: &str = "archive.json";
+/// The files of a closed month copied to REPORTS_BUCKET (upload.json and
+/// review.json are operational and stay in state).
+pub const EVIDENCE: [&str; 4] = ["report.json", "report.pdf", "SHA256SUMS", FROZEN];
 pub const DEFAULT_SAMPLE_SIZE: usize = 10;
 /// Linear workflow state type of the reminder: Todo, not Triage.
 pub const REVIEW_STATE_TYPE: &str = "unstarted";
@@ -270,7 +279,10 @@ fn reminder_spec(r: &ReminderInput, var: &dyn Fn(&str) -> Option<String>) -> Tas
     let title = format!("{}Review monthly cyber threat report — {title_month}", if r.test_run { "[TEST] " } else { "" });
     let public = var("WIKI_PUBLIC_URL").map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
     let path = if r.asset_path.is_empty() {
-        format!("/{}/{}", crate::wiki::assets::ASSET_FOLDER, asset_name(r.month))
+        // A bad WIKI_ASSET_FOLDER already failed the upload; the link then names the default.
+        let folder = crate::wiki::assets::asset_folder_from(var)
+            .unwrap_or_else(|_| crate::wiki::assets::DEFAULT_ASSET_FOLDER.into());
+        format!("/{folder}/{}", asset_name(r.month))
     } else {
         r.asset_path.to_string()
     };
@@ -386,16 +398,20 @@ pub struct Closed {
     pub review_error: Option<String>,
     /// Events this call appended.
     pub events: Vec<String>,
+    /// Evidence objects this call copied to REPORTS_BUCKET.
+    pub archived: Vec<String>,
+    pub archive_error: Option<String>,
 }
 
 impl Closed {
     pub fn has_error(&self) -> bool {
-        self.upload_error.is_some() || self.review_error.is_some()
+        self.upload_error.is_some() || self.review_error.is_some() || self.archive_error.is_some()
     }
 
     /// Done and nothing left to do: frozen earlier, PDF on the wiki, reminder filed or off.
     fn idle(&self) -> bool {
-        self.skipped.starts_with("already frozen") && !self.uploaded && !self.review_created && !self.has_error()
+        self.skipped.starts_with("already frozen") && !self.uploaded && !self.review_created && self.archived.is_empty()
+            && !self.has_error()
     }
 
     /// The runs.jsonl entry: empty fields left out.
@@ -428,6 +444,8 @@ impl Closed {
         put(&mut m, "review_skipped", json!(self.review_skipped));
         put(&mut m, "review_error", json!(self.review_error.as_deref().map(|e| clip(e, 300))));
         put(&mut m, "events", json!(self.events));
+        put(&mut m, "archived", json!(self.archived));
+        put(&mut m, "archive_error", json!(self.archive_error.as_deref().map(|e| clip(e, 300))));
         Value::Object(m)
     }
 
@@ -444,6 +462,12 @@ impl Closed {
         }
         if let Some(e) = &self.upload_error {
             out.push(format!("  upload failed: {e}"));
+        }
+        if !self.archived.is_empty() {
+            out.push(format!("  evidence copied: {}", self.archived.join(", ")));
+        }
+        if let Some(e) = &self.archive_error {
+            out.push(format!("  evidence copy failed: {e}"));
         }
         if let (Some(r), true) = (&self.review, self.review_created) {
             out.push(format!("  review reminder {} {}", r.identifier, r.url));
@@ -487,9 +511,48 @@ pub fn close_month(period: &Period, now: DateTime<Utc>, o: &mut CloseOpts) -> Re
     out.data_sha = s(&frozen, "data_sha").into();
     out.pdf_sha = s(&frozen, "pdf_sha").into();
 
+    archive(&name, &frozen, now, o.var, &mut out);
     upload(&name, &frozen, now, o, &mut out);
     review(&name, &frozen, now, o, &mut out);
     Ok(out)
+}
+
+/// Step 2b (REPORTS_BUCKET set, since 2026-11-09): copy the frozen month's
+/// EVIDENCE to gs://REPORTS_BUCKET/[REPORTS_PREFIX/]YYYY-MM/<file>, each with
+/// ifGenerationMatch=0, so an object already there is never replaced (412: skip).
+/// archive.json records the copy; retried on later calls until it names this
+/// data_sha and bucket. An error goes to archive_error and does not fail the close.
+fn archive(name: &str, frozen: &Value, now: DateTime<Utc>, var: &dyn Fn(&str) -> Option<String>, out: &mut Closed) {
+    let Some(bucket) = var("REPORTS_BUCKET").map(|b| b.trim().to_string()).filter(|b| !b.is_empty()) else { return };
+    let prefix = var("REPORTS_PREFIX").unwrap_or_default().trim().trim_matches('/').to_string();
+    let data_sha = s(frozen, "data_sha");
+    let last: Value = state::load_json(&rel(name, ARCHIVE)).unwrap_or(Value::Null);
+    if s(&last, "data_sha") == data_sha && s(&last, "bucket") == bucket {
+        return;
+    }
+    let gcs = crate::feeds::gcs::Gcs::from_var(var);
+    let mut objects = Vec::new();
+    for f in EVIDENCE {
+        let Some(bytes) = state::load_bytes(&rel(name, f)) else {
+            if f == "report.pdf" && s(frozen, "pdf_sha").is_empty() {
+                continue; // frozen without a PDF (tests)
+            }
+            out.archive_error = Some(format!("evidence copy: {}/{} is missing", state::dir().display(), rel(name, f)));
+            return;
+        };
+        let obj = if prefix.is_empty() { format!("{name}/{f}") } else { format!("{prefix}/{name}/{f}") };
+        match gcs.upload(&bucket, &obj, &bytes, 0) {
+            Ok(_) => out.archived.push(obj.clone()),
+            Err(e) if e.conflict() => {} // already copied by an earlier call
+            Err(e) => {
+                out.archive_error = Some(format!("evidence copy: {e}"));
+                return;
+            }
+        }
+        objects.push(obj);
+    }
+    state::save_json(&rel(name, ARCHIVE), &json!({
+        "bucket": bucket, "objects": objects, "data_sha": data_sha, "archived_at": iso_utc(now)}));
 }
 
 /// Step 2: Some(frozen.json) once frozen; None (out.skipped set) when the month

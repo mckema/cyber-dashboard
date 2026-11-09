@@ -10,8 +10,15 @@
 //!   WIKI_BASE         https://wiki2.internal.ediphy.io   (compose: http://wiki:3000)
 //!   WIKI_PAGE_ID      51                                  (local bootstrap: 1)
 //!   WIKIJS_API_KEY    Wiki.js API key          -> Authorization header
-//!   IAP_ID_TOKEN      Google OIDC ID token     -> Proxy-Authorization header (only behind IAP)
+//!   IAP_ID_TOKEN      Google OIDC ID token     -> Proxy-Authorization header (only behind IAP; static override)
+//!   IAP_AUDIENCE      —                        IAP OAuth client ID: mint the ID token from the metadata
+//!                                              server at runtime (Cloud Run), cached until exp - 5 min (wiki/iap.rs)
+//!   GCE_METADATA_HOST metadata.google.internal metadata server host[:port] for IAP_AUDIENCE
+//!   WIKI_ASSET_FOLDER exploit-watch            top-level Wiki.js asset folder of the report PDFs (bootstrap must match)
 //!   STATE_DIR         ./state                  caches, cursors, seen.json, runs.jsonl
+//!   STATE_BUCKET, STATE_PREFIX, LOCK_TTL_SECONDS, GCS_ENDPOINT, REPORTS_BUCKET, REPORTS_PREFIX
+//!                                              state in GCS (local mirror + write-through, lease lock): feeds/gcs.rs
+//!   LOG_FORMAT        —                        json: one run_summary JSON line per run on stdout (logjson.rs)
 //!   CVE_ROW_CAP       300                      rows shown in the CVE table
 //!   HEARTBEAT_HOURS   24                       rewrite even without data changes after this long
 //!   GITHUB_TOKEN      optional, raises the GitHub rate limit
@@ -19,6 +26,10 @@
 //!   COMPONENTS_FILE   stack/job/components.sample.toml   component list for the matcher
 //!   LINEAR_MODE       off                      off | live
 //!   LINEAR_API_KEY    live mode only: personal API key (lin_api_…, sent bare) or OAuth access token (sent as Bearer)
+//!   LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET   live mode, when LINEAR_API_KEY is unset: OAuth app credentials;
+//!                                              the job obtains its token (client_credentials, triage/linear_oauth.rs)
+//!   LINEAR_OAUTH_SCOPE read,write,issues:create,comments:create   scopes asked for with the client credentials
+//!   LINEAR_TOKEN_URL  origin of LINEAR_API_URL + /oauth/token     token endpoint override
 //!   LINEAR_TEAM_ID    live mode only: team whose Triage inbox receives issues
 //!   LINEAR_API_URL    https://api.linear.app/graphql   live mode endpoint (compose lab: the linear-mock service)
 //!   LOCK_WAIT_SECONDS 900                      --every: how long a loop run waits for a held lock
@@ -512,8 +523,19 @@ fn run(args: &Args) -> Result<(), Fatal> {
         record.insert("close_month".into(), c);
     }
     record.insert("seconds".into(), json!((t0.elapsed().as_secs_f64() * 10.0).round() / 10.0));
-    state::append_run(&Value::Object(record));
+    record_run(Value::Object(record));
     Ok(())
+}
+
+/// Append one line of `run` to runs.jsonl and, with LOG_FORMAT=json, print its
+/// summary (logjson.rs). The log line comes first and the append cannot unwind
+/// past here: after a lost state lease every write panics (feeds/gcs.rs), and
+/// the summary must still reach the log for the alerts.
+fn record_run(rec: Value) {
+    crate::logjson::run_summary(&rec);
+    if let Err(p) = catch_unwind(AssertUnwindSafe(|| state::append_run(&rec))) {
+        eprintln!("cannot record the run in runs.jsonl: {}", panic_text(p));
+    }
 }
 
 /// Exit code of a single run that found another run in progress (sysexits
@@ -531,10 +553,10 @@ fn lock_or_skip(args: &Args) -> Result<Option<state::RunLock>, Fatal> {
     match state::lock_run(now)? {
         Ok(lock) => Ok(Some(lock)),
         Err(holder) => {
-            let msg = format!("another run holds {}/run.lock ({holder}); this run did nothing",
-                              state::dir().display());
+            let msg = format!("another run holds {} ({holder}); this run did nothing",
+                              state::lock_location());
             eprintln!("LOCKED: {msg}");
-            state::append_run(&json!({"run_at": iso_utc(now), "mode": mode(args), "result": "locked", "error": clip(&msg, 300)}));
+            record_run(json!({"run_at": iso_utc(now), "mode": mode(args), "result": "locked", "error": clip(&msg, 300)}));
             Ok(None)
         }
     }
@@ -570,33 +592,46 @@ fn lock_with_retry(args: &Args) -> Result<Option<state::RunLock>, Fatal> {
 /// cursors, runs.jsonl), so each one holds the lock; each --every iteration
 /// takes it afresh, so a manual run can slot in between two loop runs.
 pub fn main(args: Args) -> Result<i32, Fatal> {
+    let fatal = |e: &Fatal| {
+        eprintln!("FATAL: {e}");
+        record_run(json!({"run_at": iso_utc(state::utcnow()), "result": "fatal", "error": e.0}));
+    };
+    let crash = |msg: &str| {
+        eprintln!("CRASH: {msg}");
+        record_run(json!({"run_at": iso_utc(state::utcnow()), "result": "crash", "error": clip(msg, 300)}));
+    };
     let Some(every) = args.every else {
-        let Some(_lock) = lock_or_skip(&args)? else {
+        // A single run (Cloud Run Job, manual run) records fatal and crash like
+        // the loop does, then exits 1. main.rs prints the FATAL line.
+        let Some(_lock) = lock_or_skip(&args).inspect_err(|e| record_run(
+            json!({"run_at": iso_utc(state::utcnow()), "result": "fatal", "error": e.0})))? else {
             return Ok(EXIT_LOCKED);
         };
-        run(&args)?;
-        return Ok(0);
-    };
-    let fatal = |e: Fatal| {
-        eprintln!("FATAL: {e}");
-        state::append_run(&json!({"run_at": iso_utc(state::utcnow()), "result": "fatal", "error": e.0}));
+        return match catch_unwind(AssertUnwindSafe(|| run(&args))) {
+            Ok(Ok(())) => Ok(0),
+            Ok(Err(e)) => {
+                record_run(json!({"run_at": iso_utc(state::utcnow()), "result": "fatal", "error": e.0}));
+                Err(e)
+            }
+            Err(p) => {
+                let msg = panic_text(p);
+                crash(&msg);
+                Err(Fatal(format!("crash: {}", clip(&msg, 300))))
+            }
+        };
     };
     loop {
         let started = Instant::now();
         match lock_with_retry(&args) {
             Ok(None) => {} // waited, logged and recorded; try again next interval
-            Err(e) => fatal(e),
+            Err(e) => fatal(&e),
             // The guard lives to the end of this arm, so a fatal or crash line is
             // also written under the lock. Unwinding from a panic drops it as well.
             Ok(Some(_lock)) => match catch_unwind(AssertUnwindSafe(|| run(&args))) {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => fatal(e),
-                Err(p) => {
-                    // Keep the loop alive; the log shows what happened.
-                    let msg = panic_text(p);
-                    eprintln!("CRASH: {msg}");
-                    state::append_run(&json!({"run_at": iso_utc(state::utcnow()), "result": "crash", "error": clip(&msg, 300)}));
-                }
+                Ok(Err(e)) => fatal(&e),
+                // Keep the loop alive; the log shows what happened.
+                Err(p) => crash(&panic_text(p)),
             },
         }
         let _ = std::io::stdout().flush();

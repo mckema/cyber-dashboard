@@ -1,4 +1,4 @@
-//! Wiki.js 2.5 GraphQL client shared by `run` (bot API key, optional IAP token)
+//! Wiki.js 2.5 GraphQL client shared by `run` (bot API key, optional IAP token, iap.rs)
 //! and `bootstrap` (admin JWT; the setup steps themselves are in bootstrap.rs).
 //!
 //! Wiki.js 2.5 never answers 401 for a bad key: an unknown key is treated as a
@@ -8,6 +8,7 @@
 
 pub mod assets;
 pub mod bootstrap;
+pub mod iap;
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -84,17 +85,19 @@ pub fn bot_base() -> String {
     b.trim_end_matches('/').to_string()
 }
 
-/// GraphQL call as the job: WIKI_BASE + WIKIJS_API_KEY (+ IAP_ID_TOKEN as
-/// Proxy-Authorization when set). Returns `data`, or Fatal naming what went
-/// wrong (unreachable, IAP sign-in redirect, HTTP status, GraphQL errors).
+/// GraphQL call as the job: WIKI_BASE + WIKIJS_API_KEY (+ the IAP token from
+/// iap::token() as Proxy-Authorization when IAP is configured). Returns `data`,
+/// or Fatal naming what went wrong (no IAP token, unreachable, IAP sign-in
+/// redirect, HTTP status, GraphQL errors).
 pub fn gql_bot(query: &str, variables: Value) -> Result<Value, Fatal> {
     let key = std::env::var("WIKIJS_API_KEY").unwrap_or_default();
-    let iap = std::env::var("IAP_ID_TOKEN").unwrap_or_default();
+    let iap = iap::token()?;
     gql_bot_with(common::client(), &bot_base(), &key, &iap, query, variables)
 }
 
 /// The job's auth on any Wiki.js request (GraphQL, asset upload and read-back):
-/// `Authorization: Bearer <key>`, plus the IAP token as Proxy-Authorization when set.
+/// `Authorization: Bearer <key>`, plus the IAP token (iap::token()) as
+/// Proxy-Authorization when it is not empty.
 pub(crate) fn bot_auth(req: RequestBuilder, key: &str, iap: &str) -> RequestBuilder {
     let req = req.header(AUTHORIZATION, format!("Bearer {key}"));
     if iap.is_empty() {

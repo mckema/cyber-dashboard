@@ -268,7 +268,7 @@ pub fn generate(period: &Period, now: DateTime<Utc>, opts: &Opts) -> Result<Gene
         state::save_bytes(&rel("report.pdf"), p);
     } else {
         // A PDF from an earlier call would no longer match report.json.
-        let _ = std::fs::remove_file(state::dir().join(rel("report.pdf")));
+        state::remove(&rel("report.pdf"));
     }
     state::save_json(&rel("report.json"), &data);
     let json_bytes = state::load_bytes(&rel("report.json")).unwrap_or_default();

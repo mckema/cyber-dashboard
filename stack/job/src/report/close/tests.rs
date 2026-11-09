@@ -435,3 +435,71 @@ fn helpers() {
     assert_eq!(key_link("ENISA EUVD:EUVD-2026-5"), "https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-5");
     assert_eq!(key_link("odd"), "");
 }
+
+/// REPORTS_BUCKET "ev" under REPORTS_PREFIX "monthly" on the fake GCS at `base`.
+fn reports_vars(base: String) -> impl Fn(&str) -> Option<String> {
+    move |k: &str| match k {
+        "REPORTS_BUCKET" => Some("ev".into()),
+        "REPORTS_PREFIX" => Some("/monthly/".into()),
+        "GCS_ENDPOINT" => Some(base.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn evidence_is_copied_once_and_objects_already_there_are_skipped() {
+    use crate::wiki::testing::{canned, serve};
+    let t = lab("close-archive");
+    let wiki = Wiki::default();
+    let ok_gen = |g: u32| canned(200, &json!({"generation": g.to_string()}).to_string());
+    // report.pdf is already in the bucket (412): skipped without an error
+    let (base, rx) = serve(vec![ok_gen(1), canned(412, "conditionNotMet"), ok_gen(3), ok_gen(4)]);
+    let var = reports_vars(base);
+    let c = close(DEC1, &wiki, Ok(None), false, &var);
+    assert!(c.frozen && !c.has_error(), "{:?}", c.lines());
+    assert_eq!(c.archived, ["monthly/2026-11/report.json", "monthly/2026-11/SHA256SUMS", "monthly/2026-11/frozen.json"]);
+    assert_eq!(c.record()["archived"], json!(c.archived));
+    let reqs: Vec<String> = rx.try_iter().collect();
+    assert_eq!(reqs.len(), 4);
+    for (r, f) in reqs.iter().zip(EVIDENCE) {
+        assert!(r.starts_with("POST /upload/storage/v1/b/ev/o?uploadType=multipart&ifGenerationMatch=0 "), "{r}");
+        assert!(r.contains(&format!("{{\"name\":\"monthly/2026-11/{f}\"}}")), "{r}");
+    }
+    let pdf = std::fs::read(t.dir.join("reports/2026-11/report.pdf")).unwrap();
+    assert!(reqs[1].contains(&*String::from_utf8_lossy(&pdf)), "the PDF bytes are sent");
+    let a = read(&t, ARCHIVE);
+    assert_eq!((a["bucket"].clone(), a["data_sha"].clone()), (json!("ev"), read(&t, FROZEN)["data_sha"].clone()));
+    assert_eq!(a["objects"].as_array().unwrap().len(), 4);
+    // A later call copies nothing (the server has no more replies) and stays idle.
+    let c = close(DEC1, &wiki, Ok(None), false, &var);
+    assert!(c.archived.is_empty() && !c.has_error());
+    assert_eq!(c.record(), json!({"month": "2026-11", "skipped": "already frozen at 2026-12-01T05:00:00Z"}));
+}
+
+#[test]
+fn an_evidence_copy_error_is_recorded_and_retried_on_the_next_call() {
+    use crate::wiki::testing::{canned, serve};
+    let t = lab("close-archive-err");
+    let wiki = Wiki::default();
+    let (base, _rx) = serve(vec![canned(403, "denied")]);
+    let c = close(DEC1, &wiki, Ok(None), false, &reports_vars(base));
+    assert!(c.frozen && c.uploaded, "the close goes on");
+    assert!(c.has_error());
+    let err = c.archive_error.clone().unwrap();
+    assert!(err.starts_with("evidence copy: upload gs://ev/monthly/2026-11/report.json: HTTP 403"), "{err}");
+    assert!(c.record()["archive_error"].is_string());
+    assert!(!t.dir.join("reports/2026-11").join(ARCHIVE).exists());
+    let ok_gen = || canned(200, r#"{"generation": "1"}"#);
+    let (base, _rx) = serve(vec![ok_gen(), ok_gen(), ok_gen(), ok_gen()]);
+    let c = close(DEC1, &wiki, Ok(None), false, &reports_vars(base));
+    assert_eq!((c.archived.len(), c.has_error()), (4, false));
+    assert!(t.dir.join("reports/2026-11").join(ARCHIVE).exists());
+}
+
+#[test]
+fn no_reports_bucket_no_copy() {
+    let t = lab("close-archive-off");
+    let c = close(DEC1, &Wiki::default(), Ok(None), false, &vars(&[]));
+    assert!(c.frozen && c.archived.is_empty() && c.archive_error.is_none());
+    assert!(!t.dir.join("reports/2026-11").join(ARCHIVE).exists());
+}

@@ -11,11 +11,13 @@
 //!               the page tables, and the Amsterdam business-day clock (overdue = red)
 //!   tracker     where tickets live: nothing (off, default) or the Linear GraphQL API (live;
 //!               LINEAR_API_URL points it at the linear-mock service in the compose lab)
+//!   linear_oauth  the live tracker's OAuth app token (client_credentials) when LINEAR_API_KEY is unset
 //!   sync        one tracker round per run: create, comment, read states back, save
 //!   step        the triage part of one run, called by run.rs; builds the page tables
 //!   report      `exploit-watch triage --report`: match counts over state/items/, offline
 
 pub mod components;
+pub mod linear_oauth;
 pub mod matcher;
 pub mod report;
 pub mod step;

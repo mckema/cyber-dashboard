@@ -7,8 +7,9 @@
 //!   3. Turn the GraphQL API on (it is off by default).
 //!   4. Create/refresh group "exploit-watch": read+write pages under CTP/run-books/,
 //!      plus manage:pages on the one page (needed to read it), plus read+write
-//!      assets in the asset folder "exploit-watch" (see group_update_vars).
-//!   4b. Create the top-level asset folder "exploit-watch" (report PDF).
+//!      assets in the asset folder (WIKI_ASSET_FOLDER, default "exploit-watch";
+//!      see group_update_vars).
+//!   4b. Create that top-level asset folder (report PDF).
 //!   5. Create the page CTP/run-books/Cyber-Exploit-Watch from stack/wiki/page/skeleton.html
 //!      with stack/wiki/page/style.css as scriptCss. Done as admin, because the bot key
 //!      deliberately lacks write:styles.
@@ -37,7 +38,7 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use super::assets::{ASSET_FOLDER, FOLDERS, folder_id};
+use super::assets::{FOLDERS, asset_folder_from, folder_id};
 use super::{Mode, Wiki, err_chain, head};
 use crate::feeds::common::Fatal;
 
@@ -327,7 +328,7 @@ fn find_group(w: &Wiki, jwt: &str) -> Result<Option<i64>, Fatal> {
     Ok(hits.first().copied())
 }
 
-fn step_group(w: &Wiki, jwt: &str) -> Result<i64, Fatal> {
+fn step_group(w: &Wiki, jwt: &str, folder: &str) -> Result<i64, Fatal> {
     let gid = match find_group(w, jwt)? {
         Some(gid) => {
             println!("group      reusing '{GROUP_NAME}' id {gid}");
@@ -355,7 +356,7 @@ fn step_group(w: &Wiki, jwt: &str) -> Result<i64, Fatal> {
         groups { update(id: $id, name: $n, redirectOnLogin: "/", permissions: $perm, pageRules: $rules) {
           responseResult { succeeded message } } }
       }"#,
-        group_update_vars(gid),
+        group_update_vars(gid, folder),
         Some(jwt),
         "groups.update",
     )?;
@@ -363,7 +364,7 @@ fn step_group(w: &Wiki, jwt: &str) -> Result<i64, Fatal> {
     println!(
         "group      read:pages+write:pages START '{RULE_PATH}'; manage:pages EXACT '{PAGE_PATH}'; locale {PAGE_LOCALE}"
     );
-    println!("group      read:assets+write:assets START '{ASSET_FOLDER}/'; read:assets EXACT '{ASSET_FOLDER}'; any locale");
+    println!("group      read:assets+write:assets START '{folder}/'; read:assets EXACT '{folder}'; any locale");
     Ok(gid)
 }
 
@@ -380,10 +381,10 @@ fn step_group(w: &Wiki, jwt: &str) -> Result<i64, Fatal> {
 /// Assets (the report PDF): POST /u checks write:assets on "<folder>/<file>" and
 /// `assets.folders` checks read:assets on the bare folder slug, both WITHOUT a
 /// locale, so these rules have `locales: []` (a rule listing "en" never matches
-/// them). START "exploit-watch/" covers the files only; the EXACT rule lets the
+/// them). START "<folder>/" covers the files only; the EXACT rule lets the
 /// job find the folder id. No manage:assets: the key cannot rename or delete.
-pub(crate) fn group_update_vars(gid: i64) -> Value {
-    let folder_files = format!("{ASSET_FOLDER}/");
+pub(crate) fn group_update_vars(gid: i64, folder: &str) -> Value {
+    let folder_files = format!("{folder}/");
     json!({
         "id": gid, "n": GROUP_NAME,
         "perm": ["read:pages", "write:pages", "manage:pages", "read:assets", "write:assets"],
@@ -395,29 +396,29 @@ pub(crate) fn group_update_vars(gid: i64) -> Value {
             {"id": "as", "deny": false, "match": "START",
              "roles": ["read:assets", "write:assets"], "path": folder_files, "locales": []},
             {"id": "af", "deny": false, "match": "EXACT",
-             "roles": ["read:assets"], "path": ASSET_FOLDER, "locales": []},
+             "roles": ["read:assets"], "path": folder, "locales": []},
         ],
     })
 }
 
 /// Create the top-level asset folder the job uploads into, unless it exists (as admin).
-fn step_asset_folder(w: &Wiki, jwt: &str) -> Result<i64, Fatal> {
+fn step_asset_folder(w: &Wiki, jwt: &str, folder: &str) -> Result<i64, Fatal> {
     let list = |label| w.gql(FOLDERS, json!({"p": 0}), Some(jwt), label);
-    if let Some(id) = folder_id(&list("assets.folders")?, ASSET_FOLDER) {
-        println!("assets     folder '{ASSET_FOLDER}' exists, id {id}");
+    if let Some(id) = folder_id(&list("assets.folders")?, folder) {
+        println!("assets     folder '{folder}' exists, id {id}");
         return Ok(id);
     }
     let d = w.gql(
         "mutation ($s: String!) { assets { createFolder(parentFolderId: 0, slug: $s, name: $s) {
            responseResult { succeeded message } } } }",
-        json!({"s": ASSET_FOLDER}),
+        json!({"s": folder}),
         Some(jwt),
         "assets.createFolder",
     )?;
     check(&d["assets"]["createFolder"], "assets.createFolder")?;
-    let id = folder_id(&list("assets.folders")?, ASSET_FOLDER)
-        .ok_or_else(|| Fatal(format!("asset folder '{ASSET_FOLDER}' was created but does not appear in assets.folders")))?;
-    println!("assets     created folder '{ASSET_FOLDER}' id {id}");
+    let id = folder_id(&list("assets.folders")?, folder)
+        .ok_or_else(|| Fatal(format!("asset folder '{folder}' was created but does not appear in assets.folders")))?;
+    println!("assets     created folder '{folder}' id {id}");
     Ok(id)
 }
 
@@ -638,7 +639,7 @@ fn step_page(w: &Wiki, jwt: &str, args: &Args) -> Result<i64, Fatal> {
     Ok(pid)
 }
 
-fn step_smoke(w: &Wiki, key: &str, pid: i64) -> Result<(), Fatal> {
+fn step_smoke(w: &Wiki, key: &str, pid: i64, folder: &str) -> Result<(), Fatal> {
     // Same read the job does (run.rs READ_PAGE), with the bot key.
     let d = w.gql(
         "query ($id: Int!) { pages { single(id: $id) { id path content } } }",
@@ -655,10 +656,10 @@ fn step_smoke(w: &Wiki, key: &str, pid: i64) -> Result<(), Fatal> {
     );
     // Same folder lookup the job does before an asset upload (assets.rs).
     let d = w.gql(FOLDERS, json!({"p": 0}), Some(key), "bot asset folders (assets.folders)")?;
-    let id = folder_id(&d, ASSET_FOLDER).ok_or_else(|| {
-        Fatal(format!("bot key cannot see asset folder '{ASSET_FOLDER}': check the group's read:assets EXACT rule"))
+    let id = folder_id(&d, folder).ok_or_else(|| {
+        Fatal(format!("bot key cannot see asset folder '{folder}': check the group's read:assets EXACT rule"))
     })?;
-    println!("smoke      bot key sees asset folder '{ASSET_FOLDER}' id {id}");
+    println!("smoke      bot key sees asset folder '{folder}' id {id}");
     Ok(())
 }
 
@@ -717,6 +718,10 @@ pub fn main(args: Args) -> Result<i32, Fatal> {
         .filter(|s| !s.is_empty())
         .or_else(|| Some(env.get("WIKI_BASE").to_string()).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "http://localhost:3000".into());
+    // WIKI_ASSET_FOLDER like WIKI_BASE: the process environment, then .env. The job must use the same value.
+    let folder = asset_folder_from(&|k| {
+        std::env::var(k).ok().filter(|s| !s.is_empty()).or_else(|| Some(env.get(k).to_string()))
+    })?;
     let email = env.val("WIKI_ADMIN_EMAIL", "admin@example.com");
     let site_url = env.val("WIKI_SITE_URL", "http://localhost:3000");
     let mut password = env.val("WIKI_ADMIN_PASSWORD", "");
@@ -759,14 +764,14 @@ pub fn main(args: Args) -> Result<i32, Fatal> {
     step_setup(&w, &email, &password, &site_url)?;
     let jwt = step_login(&w, &email, &password)?;
     step_api_on(&w, &jwt)?;
-    let gid = step_group(&w, &jwt)?;
-    step_asset_folder(&w, &jwt)?;
+    let gid = step_group(&w, &jwt, &folder)?;
+    step_asset_folder(&w, &jwt, &folder)?;
     let pid = step_page(&w, &jwt, &args)?; // before the key: the key check reads this page
     env.save("WIKI_PAGE_ID", &pid.to_string())?;
     let current = env.val("WIKIJS_API_KEY", "");
     let key = step_key(&w, &jwt, gid, &current, pid)?;
     env.save("WIKIJS_API_KEY", &key)?;
-    step_smoke(&w, &key, pid)?;
+    step_smoke(&w, &key, pid, &folder)?;
 
     if env.changed.is_empty() {
         println!("bootstrap  ok (.env unchanged)");
@@ -932,7 +937,7 @@ mod tests {
 
     #[test]
     fn group_grants_assets_with_locale_less_rules() {
-        let v = group_update_vars(5);
+        let v = group_update_vars(5, "exploit-watch");
         assert_eq!((v["id"].as_i64(), v["n"].as_str()), (Some(5), Some(GROUP_NAME)));
         assert_eq!(v["perm"], json!(["read:pages", "write:pages", "manage:pages", "read:assets", "write:assets"]));
         let rules = v["rules"].as_array().unwrap();
@@ -952,6 +957,11 @@ mod tests {
         // No asset management, no admin rights.
         let s = v.to_string();
         assert!(!s.contains("manage:assets") && !s.contains("manage:system") && !s.contains("write:styles"));
+        // WIKI_ASSET_FOLDER moves both asset rules, nothing else.
+        let o = group_update_vars(5, "cyber-threat");
+        let path = |id: &str| o["rules"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap()["path"].clone();
+        assert_eq!((path("as"), path("af"), path("ew")), (json!("cyber-threat/"), json!("cyber-threat"), json!(PAGE_PATH)));
+        assert_eq!(o["n"], GROUP_NAME);
     }
 
     #[test]
@@ -968,10 +978,10 @@ mod tests {
             canned(200, r#"{"data":{"assets":{"createFolder":{"responseResult":{"succeeded":false,"message":"An asset folder with the same name already exists."}}}}}"#),
         ]);
         let w = Wiki::with_client(&base, client());
-        assert_eq!(step_asset_folder(&w, "JWT").unwrap(), 2);
-        assert_eq!(step_asset_folder(&w, "JWT").unwrap(), 9);
+        assert_eq!(step_asset_folder(&w, "JWT", "exploit-watch").unwrap(), 2);
+        assert_eq!(step_asset_folder(&w, "JWT", "exploit-watch").unwrap(), 9);
         assert_eq!(
-            step_asset_folder(&w, "JWT").unwrap_err().0,
+            step_asset_folder(&w, "JWT", "exploit-watch").unwrap_err().0,
             "assets.createFolder refused: An asset folder with the same name already exists."
         );
         let reqs: Vec<String> = rx.try_iter().collect();

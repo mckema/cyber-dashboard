@@ -11,6 +11,7 @@
 //! See README.md (Architecture) for how the pieces fit together.
 
 mod feeds;
+mod logjson;
 mod render;
 mod report;
 mod run;
@@ -47,6 +48,17 @@ enum Command {
 
 fn main() {
     let cli = Cli::parse();
+    // STATE_BUCKET set: sync the local state mirror first (feeds/gcs.rs).
+    let stateless = match &cli.cmd {
+        Command::Demo(_) | Command::Bootstrap(_) => true,
+        Command::Serve(a) => a.healthcheck,
+        _ => false,
+    };
+    if !stateless
+        && let Err(e) = feeds::state::init() {
+        eprintln!("FATAL: {e}");
+        std::process::exit(1);
+    }
     let res: Result<i32, Fatal> = match cli.cmd {
         Command::Run(a) => run::main(a),
         Command::Bootstrap(a) => wiki::bootstrap::main(a),

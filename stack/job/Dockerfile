@@ -48,6 +48,12 @@ RUN http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" apt-get update \
  && useradd --uid 1000 --create-home --shell /usr/sbin/nologin app
 COPY --from=typst /usr/local/bin/typst /usr/local/bin/typst
 COPY --from=build /usr/local/bin/exploit-watch /usr/local/bin/exploit-watch
+# Component list for deployments without the repo bind mount (Cloud Run sets
+# COMPONENTS_FILE=/etc/exploit-watch/components.toml). Outside /app, because
+# compose bind-mounts the repo over /app. COMPONENTS_SRC picks the file from the
+# build context; the sample list until the list agreed with Germano exists.
+ARG COMPONENTS_SRC=components.sample.toml
+COPY ${COMPONENTS_SRC} /etc/exploit-watch/components.toml
 WORKDIR /app
 USER app
 ENTRYPOINT ["exploit-watch"]

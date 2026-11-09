@@ -11,7 +11,8 @@
 //!
 //!   off    (default, also when unset or empty) no tracker; matched items stay
 //!          untriaged on the page
-//!   live   LinearTracker: Linear GraphQL API, needs LINEAR_API_KEY + LINEAR_TEAM_ID
+//!   live   LinearTracker: Linear GraphQL API, needs LINEAR_TEAM_ID and a credential:
+//!          LINEAR_API_KEY, or LINEAR_CLIENT_ID + LINEAR_CLIENT_SECRET (see Credential)
 //!
 //! Any other value (also the former "fake") is a Config error. LINEAR_API_URL
 //! sets the live tracker's GraphQL endpoint (unset or empty: ENDPOINT, the real
@@ -66,14 +67,20 @@
 //! then In Progress then Done within seconds (TRI-10) gives one coalesced entry
 //! triage->completed, with startedAt and completedAt set.
 //!
-//! Credential: LINEAR_API_KEY holds either a personal API key or an OAuth access
-//! token (e.g. from an OAuth app's client_credentials grant, actor=app). The
-//! prefix picks the header (auth_value): a value starting with
-//! PERSONAL_KEY_PREFIX ("lin_api_") is sent bare, anything else as
-//! "Bearer <value>". The job does not obtain or refresh OAuth tokens: when one
-//! expires, calls fail with AUTHENTICATION_ERROR until LINEAR_API_KEY is replaced.
-//! The credential never appears in errors, logs or the health note; the header
-//! value is marked sensitive.
+//! Credential (LinearTracker::from_vars), first match wins:
+//!   LINEAR_API_KEY   a personal API key or an OAuth access token obtained
+//!                    elsewhere. The prefix picks the header (auth_value): a value
+//!                    starting with PERSONAL_KEY_PREFIX ("lin_api_") is sent bare,
+//!                    anything else as "Bearer <value>". Never refreshed: when a
+//!                    token expires, calls fail with AUTHENTICATION_ERROR until it
+//!                    is replaced.
+//!   LINEAR_CLIENT_ID + LINEAR_CLIENT_SECRET   the job obtains an OAuth app token
+//!                    itself with the client_credentials grant (linear_oauth.rs:
+//!                    token URL, scope, in-memory cache, renewal) and sends it as
+//!                    "Bearer <token>" (actor=app). Requested before the first
+//!                    GraphQL call, not when the tracker is built.
+//! The credential, the client secret and the token never appear in errors, logs
+//! or the health note; header values are marked sensitive.
 //!
 //! Idempotent issue creation (real Linear, 2026-11-05): every create sends the
 //! job's own id in IssueCreateInput.id, a random UUID v4 (new_issue_id) that the
@@ -107,6 +114,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::linear_oauth::{ClientCredentials, TokenSource};
 use super::types::Match;
 use crate::feeds::common::{self, Item, iso_utc, parse_iso};
 #[cfg(test)]
@@ -678,6 +686,11 @@ impl HttpReply {
 /// The HTTP layer: POST one JSON body to the GraphQL endpoint. Tests swap it for canned replies.
 /// `Any` lets tests downcast a LinearTracker's transport to check its endpoint.
 pub trait Transport: std::any::Any {
+    /// Make the credential ready for the next post() (obtain or renew an OAuth
+    /// token). LinearTracker::gql calls it before every post().
+    fn authorize(&mut self) -> Result<(), TrackerError> {
+        Ok(())
+    }
     fn post(&mut self, body: &Value) -> Result<HttpReply, String>;
 }
 
@@ -693,34 +706,58 @@ pub fn auth_value(credential: &str) -> String {
 }
 
 /// The real transport: shared client (proxy from HTTP(S)_PROXY), Authorization
-/// from auth_value(). No Debug: it holds the credential.
+/// from auth_value() (LINEAR_API_KEY) or from an OAuth token source
+/// (LINEAR_CLIENT_ID + LINEAR_CLIENT_SECRET). No Debug: it holds the credential.
 pub struct HttpTransport {
     pub endpoint: String,
-    auth: HeaderValue,
+    /// The Authorization value of the next request; None until authorize() got an OAuth token.
+    auth: Option<HeaderValue>,
+    /// Some: the token comes from the client_credentials grant (authorize() renews `auth`).
+    oauth: Option<TokenSource>,
+}
+
+/// `value` as a sensitive header value; Config error naming `what` (never the value) when it cannot be one.
+fn sensitive_header(value: &str, what: &str) -> Result<HeaderValue, TrackerError> {
+    let mut v = HeaderValue::from_str(value)
+        .map_err(|_| TrackerError::Config(format!("{what} has characters that are not allowed in an HTTP header")))?;
+    v.set_sensitive(true);
+    Ok(v)
 }
 
 impl HttpTransport {
     /// Config error (without the value) when the credential cannot go in an HTTP header.
     pub fn new(endpoint: &str, credential: &str) -> Result<Self, TrackerError> {
-        let mut auth = HeaderValue::from_str(&auth_value(credential)).map_err(|_| {
-            TrackerError::Config("LINEAR_API_KEY has characters that are not allowed in an HTTP header".into())
-        })?;
-        auth.set_sensitive(true);
-        Ok(Self { endpoint: endpoint.into(), auth })
+        let auth = sensitive_header(&auth_value(credential), "LINEAR_API_KEY")?;
+        Ok(Self { endpoint: endpoint.into(), auth: Some(auth), oauth: None })
+    }
+
+    /// Token from the client_credentials grant, obtained on the first authorize().
+    pub fn with_oauth(endpoint: &str, source: TokenSource) -> Self {
+        Self { endpoint: endpoint.into(), auth: None, oauth: Some(source) }
     }
 
     /// The request post() sends (tests build it without sending).
     fn request(&self, body: &Value) -> reqwest::blocking::RequestBuilder {
-        common::client()
+        let mut req = common::client()
             .post(&self.endpoint)
             .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, self.auth.clone())
-            .header(USER_AGENT, common::user_agent())
-            .body(serde_json::to_vec(body).expect("JSON body"))
+            .header(USER_AGENT, common::user_agent());
+        if let Some(auth) = &self.auth {
+            req = req.header(AUTHORIZATION, auth.clone());
+        }
+        req.body(serde_json::to_vec(body).expect("JSON body"))
     }
 }
 
 impl Transport for HttpTransport {
+    fn authorize(&mut self) -> Result<(), TrackerError> {
+        if let Some(src) = self.oauth.as_mut() {
+            let token = src.token()?;
+            self.auth = Some(sensitive_header(&format!("Bearer {token}"), "the OAuth access token")?);
+        }
+        Ok(())
+    }
+
     fn post(&mut self, body: &Value) -> Result<HttpReply, String> {
         let r = self.request(body).send().map_err(|e| err_chain(&e))?;
         let status = r.status().as_u16();
@@ -873,19 +910,31 @@ impl LinearTracker {
         Self::from_vars(&|k| std::env::var(k).ok())
     }
 
-    /// LINEAR_API_KEY (personal API key or OAuth access token, see auth_value),
-    /// LINEAR_TEAM_ID (both required) and LINEAR_API_URL (optional, default
-    /// ENDPOINT; the compose lab sets it to the linear-mock service).
+    /// The credential (module doc: LINEAR_API_KEY, else LINEAR_CLIENT_ID +
+    /// LINEAR_CLIENT_SECRET), LINEAR_TEAM_ID (required) and LINEAR_API_URL
+    /// (optional, default ENDPOINT; the compose lab sets it to the linear-mock
+    /// service). Nothing is contacted here.
     pub fn from_vars(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, TrackerError> {
         let var = |k: &str| get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-        let key = var("LINEAR_API_KEY").ok_or_else(|| TrackerError::Config("LINEAR_MODE=live needs LINEAR_API_KEY".into()))?;
-        let team = var("LINEAR_TEAM_ID").ok_or_else(|| TrackerError::Config("LINEAR_MODE=live needs LINEAR_TEAM_ID".into()))?;
         let url = var("LINEAR_API_URL").unwrap_or_else(|| ENDPOINT.to_string());
-        Ok(Self::new(Box::new(HttpTransport::new(&url, &key)?), &team))
+        let transport = match var("LINEAR_API_KEY") {
+            Some(key) => HttpTransport::new(&url, &key)?,
+            None => match ClientCredentials::from_vars(get, &url)? {
+                Some(creds) => HttpTransport::with_oauth(&url, TokenSource::new(creds)),
+                None => {
+                    return Err(TrackerError::Config(
+                        "LINEAR_MODE=live needs LINEAR_API_KEY, or LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET".into(),
+                    ));
+                }
+            },
+        };
+        let team = var("LINEAR_TEAM_ID").ok_or_else(|| TrackerError::Config("LINEAR_MODE=live needs LINEAR_TEAM_ID".into()))?;
+        Ok(Self::new(Box::new(transport), &team))
     }
 
     /// One GraphQL call; returns `data`. `label` names the operation in errors.
     pub fn gql(&mut self, query: &str, variables: Value, label: &str) -> Result<Value, TrackerError> {
+        self.transport.authorize()?;
         let r = self
             .transport
             .post(&json!({"query": query, "variables": variables}))
@@ -1363,7 +1412,7 @@ mod tests {
         assert_eq!(pick(&[("LINEAR_MODE", " Fake ")]).err().unwrap(),
                    TrackerError::Config("LINEAR_MODE=fake: expected off or live".into()), "fake mode is gone");
         assert_eq!(pick(&[("LINEAR_MODE", "live"), ("LINEAR_API_KEY", " ")]).err().unwrap(),
-                   TrackerError::Config("LINEAR_MODE=live needs LINEAR_API_KEY".into()));
+                   TrackerError::Config("LINEAR_MODE=live needs LINEAR_API_KEY, or LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET".into()));
         assert_eq!(pick(&[("LINEAR_MODE", "live"), ("LINEAR_API_KEY", "lin_api_x")]).err().unwrap(),
                    TrackerError::Config("LINEAR_MODE=live needs LINEAR_TEAM_ID".into()));
         assert!(pick(&[("LINEAR_MODE", "live"), ("LINEAR_API_KEY", "lin_api_x"), ("LINEAR_TEAM_ID", "t")]).unwrap().is_some());
@@ -1430,6 +1479,79 @@ mod tests {
         .unwrap();
         assert!(matches!(&e, TrackerError::Config(m) if m.contains("LINEAR_API_KEY")), "{e:?}");
         assert!(!e.to_string().contains("lin_oauth") && !e.to_string().contains("cret"), "{e}");
+    }
+
+    // ------------------------------------------------ OAuth client_credentials
+
+    fn transport_of(l: &LinearTracker) -> &HttpTransport {
+        let any: &dyn std::any::Any = &*l.transport;
+        any.downcast_ref::<HttpTransport>().expect("HttpTransport")
+    }
+
+    #[test]
+    fn credential_precedence_api_key_then_client_credentials() {
+        let build = |vars: &[(&str, &str)]| {
+            let vars: Vec<(String, String)> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            LinearTracker::from_vars(&move |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()))
+        };
+        let client = [("LINEAR_TEAM_ID", "t"), ("LINEAR_CLIENT_ID", "cid"), ("LINEAR_CLIENT_SECRET", "csecret")];
+
+        // LINEAR_API_KEY wins: exactly today's behaviour, no token source.
+        let l = build(&[client.as_slice(), &[("LINEAR_API_KEY", "lin_api_x")]].concat()).unwrap();
+        let t = transport_of(&l);
+        assert!(t.oauth.is_none());
+        assert_eq!(t.auth.as_ref().unwrap().to_str().unwrap(), "lin_api_x");
+
+        // Client credentials: token URL from LINEAR_API_URL's origin, nothing requested yet.
+        let l = build(&[client.as_slice(), &[("LINEAR_API_KEY", " "), ("LINEAR_API_URL", "http://linear-mock:8080/graphql")]].concat())
+            .unwrap();
+        let t = transport_of(&l);
+        assert!(t.auth.is_none(), "no token before the first call");
+        let src = t.oauth.as_ref().unwrap();
+        assert_eq!(src.creds().token_url, "http://linear-mock:8080/oauth/token");
+        assert_eq!(src.requests, 0);
+        let l = build(&client).unwrap();
+        assert_eq!(transport_of(&l).oauth.as_ref().unwrap().creds().token_url, "https://api.linear.app/oauth/token");
+
+        let e = build(&[("LINEAR_TEAM_ID", "t"), ("LINEAR_CLIENT_ID", "cid")]).err().unwrap();
+        assert!(matches!(&e, TrackerError::Config(m) if m.contains("LINEAR_CLIENT_SECRET is not")), "{e:?}");
+        let e = build(&[("LINEAR_CLIENT_ID", "cid"), ("LINEAR_CLIENT_SECRET", "csecret")]).err().unwrap();
+        assert_eq!(e, TrackerError::Config("LINEAR_MODE=live needs LINEAR_TEAM_ID".into()));
+        assert!(!format!("{e:?}").contains("csecret"));
+    }
+
+    /// authorize() obtains the token once and the request carries it as a sensitive Bearer header.
+    #[test]
+    fn oauth_token_becomes_the_bearer_header() {
+        use crate::wiki::testing::{canned, client, serve};
+        let (base, rx) = serve(vec![canned(200, r#"{"access_token":"lin_oauth_app1","token_type":"Bearer","expires_in":2592000}"#)]);
+        let creds = ClientCredentials::new(&format!("{base}/oauth/token"), "cid", "csecret", "read");
+        let mut t = HttpTransport::with_oauth("http://linear-mock:8080/graphql", TokenSource::with_client(creds, client()));
+        t.authorize().unwrap();
+        t.authorize().unwrap();
+        assert_eq!(t.oauth.as_ref().unwrap().requests, 1, "one token for many calls");
+        assert_eq!(rx.try_iter().count(), 1);
+        let req = t.request(&json!({"query": "q"})).build().unwrap();
+        let v = req.headers().get(AUTHORIZATION).expect("Authorization header");
+        assert!(v.is_sensitive());
+        assert_eq!(v.to_str().unwrap(), "Bearer lin_oauth_app1");
+    }
+
+    /// A refused token request surfaces from gql() as a Config error (repeating: sync stops) without the secret.
+    #[test]
+    fn oauth_refusal_stops_before_any_graphql_call() {
+        use crate::wiki::testing::{canned, client, serve};
+        let (base, rx) = serve(vec![canned(401, r#"{"error":"invalid_client","error_description":"bad csecret"}"#)]);
+        let creds = ClientCredentials::new(&format!("{base}/oauth/token"), "cid", "csecret", "read");
+        let t = HttpTransport::with_oauth("http://127.0.0.1:9/graphql", TokenSource::with_client(creds, client()));
+        let mut l = LinearTracker::new(Box::new(t), "team-uuid");
+        for _ in 0..2 {
+            let e = l.gql("{ viewer { id } }", json!({}), "viewer").unwrap_err();
+            assert!(matches!(&e, TrackerError::Config(m) if m.starts_with("Linear OAuth token refused (HTTP 401: invalid_client: bad <redacted>)")),
+                    "{e:?}");
+            assert!(!e.to_string().contains("csecret"));
+        }
+        assert_eq!(rx.try_iter().count(), 1, "the refusal is not retried");
     }
 
     // ------------------------------------------------ Linear (canned replies)
