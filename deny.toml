@@ -1,0 +1,51 @@
+# cargo-deny configuration (run by infra/gcp/check.sh:
+#   cargo deny --locked check advisories bans sources licenses).
+
+[graph]
+# The job runs as a linux/amd64 container only.
+targets = ["x86_64-unknown-linux-gnu"]
+
+[advisories]
+# RustSec advisory database; vulnerabilities always fail the check.
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+# Each exception: { id = "RUSTSEC-...", reason = "..." }
+ignore = []
+
+[licenses]
+# Permissive licences only.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.93
+# The list is a policy, not an inventory: entries no crate uses yet are fine.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# exploit-watch itself has no licence; publish = false in Cargo.toml.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# crates.io only, no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

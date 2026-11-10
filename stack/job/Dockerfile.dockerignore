@@ -1,9 +1,0 @@
-# Used for builds with stack/job/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
-# Paths are relative to the build context stack/job. Only what the build stage
-# compiles, plus the component lists the runtime stage copies (COMPONENTS_SRC);
-# tests/, target/ and the other files in stack/job stay out.
-*
-!Cargo.toml
-!Cargo.lock
-!src/
-!components*.toml

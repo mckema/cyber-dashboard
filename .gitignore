@@ -1,4 +1,18 @@
+# Local secrets and environment files; only the example is committed
 .env
+*.env
+.env.*
+!.env.example
+# Runtime state and build output
 state/
 target/
+# Generated reports
+*.pdf
+# Terraform variable files with local values
+*.auto.tfvars
+terraform.tfvars.json
+# Local compose overrides and the real component list
+compose.override.yml
+/components.toml
+# Local tool settings
 .claude/

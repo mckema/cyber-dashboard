@@ -1,6 +1,0 @@
-# Used for builds with stack/linear-mock/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
-# Only what the build stage compiles; target/ and any local data stay out.
-*
-!Cargo.toml
-!Cargo.lock
-!src/

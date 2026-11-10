@@ -1,0 +1,12 @@
+{
+  "data": {
+    "issueCreate": {
+      "success": true,
+      "issue": {
+        "id": "a1b2c3d4-0000-4000-8000-000000000123",
+        "identifier": "SEC-123",
+        "url": "https://linear.app/example/issue/SEC-123/cve-2026-1234-tokio-runtime-use-after-free"
+      }
+    }
+  }
+}

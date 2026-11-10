@@ -1,0 +1,13 @@
+# Checkov configuration for infra/gcp/terraform (run by infra/gcp/check.sh).
+# Its GCP checks follow the CIS Google Cloud Platform Foundations Benchmark.
+# No skip-check here: every exception is an inline
+#   #checkov:skip=CKV_...:<reason>
+# on the resource it applies to.
+framework:
+  - terraform
+compact: true
+quiet: true
+skip-download: true
+download-external-modules: false
+evaluate-variables: true
+summary-position: bottom

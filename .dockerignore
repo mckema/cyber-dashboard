@@ -1,0 +1,10 @@
+# Build context: the repo root (compose.yml, infra/gcp/build-push.sh). Only what the
+# build stage compiles (Cargo files, src/, page/ for include_str!), plus the
+# component lists the runtime stage copies (COMPONENTS_SRC); everything else,
+# including state/, .env, tests/ and infra/, stays out of the context.
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!page/
+!components*.toml
